@@ -1,0 +1,56 @@
+name = "ens-metadata-v2"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+compatibility_flags = ["nodejs_compat"]
+
+[env.development]
+name = "ens-metadata-v2-dev"
+
+[env.production]
+name = "ens-metadata-v2-prod"
+
+# KV Namespaces for caching
+[[kv_namespaces]]
+binding = "METADATA_CACHE"
+id = "metadata_cache_namespace"
+preview_id = "metadata_cache_preview"
+
+[[kv_namespaces]]
+binding = "SVG_CACHE"
+id = "svg_cache_namespace"
+preview_id = "svg_cache_preview"
+
+# R2 Buckets for asset storage
+[[r2_buckets]]
+binding = "ASSET_BUCKET"
+bucket_name = "ens-metadata-assets"
+preview_bucket_name = "ens-metadata-assets-preview"
+
+# D1 Database for analytics and state
+[[d1_databases]]
+binding = "DB"
+database_name = "ens-metadata-db"
+database_id = "ens-metadata-database-id"
+preview_database_id = "ens-metadata-database-preview-id"
+
+# Durable Objects for coordination
+[[durable_objects.bindings]]
+name = "REQUEST_DEDUPER"
+class_name = "RequestDeduper"
+script_name = "ens-metadata-v2"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RequestDeduper"]
+
+# Environment variables
+[vars]
+ENSNODE_GRAPHQL_URL = "https://api.ensnode.xyz/graphql"
+MAINNET_RPC_URL = "https://ethereum.publicnode.com"
+NAMECHAIN_RPC_URL = "https://namechain.rpc.url"
+LOG_LEVEL = "info"
+
+# Production-specific environment variables
+[env.production.vars]
+ENSNODE_GRAPHQL_URL = "https://api.ensnode.xyz/graphql"
+LOG_LEVEL = "warn"
