@@ -62,4 +62,7 @@ app.onError((err, c) => {
   return c.json({ error: "Internal Server Error" }, 500);
 });
 
+// Export Durable Object classes
+export { RequestDeduper } from "./durable-objects/request-deduper";
+
 export default app;
