@@ -27,7 +27,7 @@ describe('Cross-Chain Sync', () => {
     {
       ensnodeEndpoint: 'https://test-ensnode.graphql',
       fallbackToBlockchain: true,
-      cacheEnabled: true,
+      internalCacheEnabled: true,
       d1Enabled: false, // Disabled for testing
     },
     mockKV,

@@ -15,6 +15,7 @@ import {
 import { MetadataService } from "./services/metadata";
 import { WebhookService } from "./services/webhook";
 import { CacheService } from "./services/cache";
+import { CachePresets } from "./utils/cache-headers";
 import type {
   MetadataResponse,
   MigrationStatusResponse,
@@ -59,7 +60,7 @@ function getServices(env: Env) {
     {
       ensnodeEndpoint: env.ENSNODE_GRAPHQL_URL,
       fallbackToBlockchain: true,
-      cacheEnabled: true,
+      internalCacheEnabled: true, // Enable internal KV cache for ensnode responses
       d1Enabled: true, // Enable D1 sync
     },
     env.METADATA_CACHE,
@@ -146,6 +147,16 @@ app.get(
         identifier
       );
 
+      // Set CF cache headers based on domain characteristics
+      const cacheHeaders = metadata.attributes?.find(a => a.trait_type === 'Migration Status')?.value === 'Migrated'
+        ? CachePresets.migratedDomain({ name: identifier, isMigrated: true })
+        : CachePresets.standardDomain({ name: identifier, isMigrated: false });
+
+      // Apply cache headers
+      Object.entries(cacheHeaders).forEach(([key, value]) => {
+        c.header(key, value);
+      });
+
       return c.json(metadata);
     } catch (error) {
       console.error("Metadata resolution error:", error);
@@ -153,6 +164,13 @@ app.get(
         error: error instanceof Error ? error.message : "Failed to resolve metadata",
         timestamp: new Date().toISOString(),
       };
+
+      // Set error cache headers
+      const errorCacheHeaders = CachePresets.error();
+      Object.entries(errorCacheHeaders).forEach(([key, value]) => {
+        c.header(key, value);
+      });
+
       return c.json(errorResponse, 500);
     }
   }
@@ -168,6 +186,13 @@ app.get(
 
     try {
       const migrationStatus = await metadataService.getMigrationStatus(name);
+
+      // Set CF cache headers for migration status
+      const cacheHeaders = CachePresets.migrationStatus(name);
+      Object.entries(cacheHeaders).forEach(([key, value]) => {
+        c.header(key, value);
+      });
+
       return c.json(migrationStatus);
     } catch (error) {
       console.error("Migration status error:", error);
@@ -175,6 +200,13 @@ app.get(
         error: error instanceof Error ? error.message : "Failed to check migration status",
         timestamp: new Date().toISOString(),
       };
+
+      // Set error cache headers
+      const errorCacheHeaders = CachePresets.error();
+      Object.entries(errorCacheHeaders).forEach(([key, value]) => {
+        c.header(key, value);
+      });
+
       return c.json(errorResponse, 500);
     }
   }
@@ -212,6 +244,13 @@ app.get(
 
     try {
       const syncResult = await metadataService.getCrossChainSync(name);
+
+      // Set CF cache headers for cross-chain sync
+      const cacheHeaders = CachePresets.crossChain(name);
+      Object.entries(cacheHeaders).forEach(([key, value]) => {
+        c.header(key, value);
+      });
+
       return c.json(syncResult);
     } catch (error) {
       console.error("Cross-chain sync error:", error);
@@ -219,6 +258,13 @@ app.get(
         error: error instanceof Error ? error.message : "Failed to compare cross-chain data",
         timestamp: new Date().toISOString(),
       };
+
+      // Set error cache headers
+      const errorCacheHeaders = CachePresets.error();
+      Object.entries(errorCacheHeaders).forEach(([key, value]) => {
+        c.header(key, value);
+      });
+
       return c.json(errorResponse, 500);
     }
   }
@@ -292,6 +338,12 @@ app.get("/health", async (c) => {
       },
     };
 
+    // Set CF cache headers for health check
+    const cacheHeaders = CachePresets.health();
+    Object.entries(cacheHeaders).forEach(([key, value]) => {
+      c.header(key, value);
+    });
+
     return c.json(health);
   } catch (error) {
     console.error("Health check error:", error);
@@ -299,9 +351,17 @@ app.get("/health", async (c) => {
       error: "Health check failed",
       timestamp: new Date().toISOString(),
     };
+
+    // Set error cache headers
+    const errorCacheHeaders = CachePresets.error();
+    Object.entries(errorCacheHeaders).forEach(([key, value]) => {
+      c.header(key, value);
+    });
+
     return c.json(errorResponse, 500);
   }
 });
+
 
 // Webhook endpoint for cache invalidation
 app.post("/webhook/ensnode", async (c) => {

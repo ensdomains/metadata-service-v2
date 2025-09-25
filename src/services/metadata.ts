@@ -1,4 +1,4 @@
-// Metadata service that integrates ensnode, cache, and blockchain fallback
+// Metadata service that integrates ensnode, internal KV cache, and blockchain fallback
 import { EnsnodeService, type EnsnodeDomain } from './ensnode';
 import { CacheService, CacheKeys, CacheTTL } from './cache';
 import { BlockchainService } from './blockchain';
@@ -19,13 +19,14 @@ export interface MetadataServiceConfig {
   ensnodeEndpoint: string;
   ensnodeFallbackEndpoint?: string;
   fallbackToBlockchain: boolean;
-  cacheEnabled: boolean;
+  internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
 }
 
 export class MetadataService {
   private ensnode: EnsnodeService;
-  private cache: CacheService;
+  private internalCache?: CacheService; // For internal optimizations only
+  private cache: CacheService; // Backwards compatibility
   private blockchain: BlockchainService;
   private resolver: ResolverService;
   private fallback: FallbackService;
@@ -43,7 +44,21 @@ export class MetadataService {
       fallbackEndpoint: config.ensnodeFallbackEndpoint,
     });
 
-    this.cache = new CacheService(kv);
+    // Initialize internal cache for ensnode responses if enabled
+    if (config.internalCacheEnabled) {
+      this.internalCache = new CacheService(kv);
+      this.cache = this.internalCache; // Backwards compatibility
+    } else {
+      // Create a no-op cache for backwards compatibility
+      this.cache = {
+        get: async () => null,
+        set: async () => {},
+        delete: async () => {},
+        deleteByPrefix: async () => 0,
+        getStats: async () => ({ totalKeys: 0, keysSample: [] })
+      } as any;
+    }
+
     this.blockchain = new BlockchainService(blockchainEnv);
     this.resolver = new ResolverService(this.blockchain);
 
@@ -61,11 +76,11 @@ export class MetadataService {
     // Initialize D1 and sync services if enabled
     if (config.d1Enabled && db) {
       this.d1 = new D1Service(db);
-      this.sync = new SyncService(this.d1, this.ensnode, this.cache, DEFAULT_SYNC_CONFIG);
+      this.sync = new SyncService(this.d1, this.ensnode, DEFAULT_SYNC_CONFIG);
     }
   }
 
-  // Get metadata for a single domain
+  // Get metadata for a single domain (no API response caching - CF handles this)
   async getMetadata(
     network: NetworkName,
     registryType: 'registry' | 'namewrapper',
@@ -76,16 +91,8 @@ export class MetadataService {
       throw new Error('Invalid ENS name format');
     }
 
-    const cacheKey = CacheKeys.domain(identifier);
-
-    // Try cache first
-    const cached = await this.cache.get<MetadataResponse>(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
     try {
-      // Use comprehensive fallback service
+      // Use comprehensive fallback service (internally cached)
       const { data: domain, source, usedFallback } = await this.fallback.getDomainMetadata(identifier);
 
       let metadata: MetadataResponse;
@@ -99,15 +106,9 @@ export class MetadataService {
             console.warn(`Failed to sync ${identifier} to D1:`, error)
           );
         }
-
-        // Cache with appropriate TTL for ensnode data
-        const ttl = CacheTTL.forDomain(domain as any);
-        await this.cache.set(cacheKey, metadata, { ttl });
       } else {
         // Built from blockchain data
         metadata = await this.buildMetadataFromBlockchain(domain as any, registryType);
-        // Cache with shorter TTL for blockchain-sourced data
-        await this.cache.set(cacheKey, metadata, { ttl: CacheTTL.error });
       }
 
       if (usedFallback) {
@@ -125,10 +126,6 @@ export class MetadataService {
 
             // Convert D1 record to metadata
             const metadata = await this.buildMetadataFromD1Record(d1Record, network, registryType);
-
-            // Cache briefly to avoid repeated D1 queries
-            await this.cache.set(cacheKey, metadata, { ttl: CacheTTL.error });
-
             return metadata;
           }
         } catch (d1Error) {
@@ -141,22 +138,14 @@ export class MetadataService {
     }
   }
 
-  // Get migration status
+  // Get migration status (CF cache handles API response caching)
   async getMigrationStatus(name: string): Promise<MigrationStatusResponse> {
     if (!validateEnsName(name)) {
       throw new Error('Invalid ENS name format');
     }
 
-    const cacheKey = CacheKeys.migrationStatus(name);
-
-    // Try cache first
-    const cached = await this.cache.get<MigrationStatusResponse>(cacheKey);
-    if (cached) {
-      return cached;
-    }
-
     try {
-      // Use comprehensive fallback service
+      // Use comprehensive fallback service (internally cached)
       const { data: status, source, usedFallback } = await this.fallback.getMigrationStatus(name);
 
       let response: MigrationStatusResponse;
@@ -168,8 +157,6 @@ export class MetadataService {
           l1Owner: (status as any).owner?.id,
           expirationDate: (status as any).expiryDate,
         };
-        // Cache with normal TTL for ensnode data
-        await this.cache.set(cacheKey, response, { ttl: CacheTTL.normal });
       } else {
         // Built from blockchain data
         response = {
@@ -178,8 +165,6 @@ export class MetadataService {
           l1Owner: (status as any).owner?.id,
           expirationDate: (status as any).expiryDate,
         };
-        // Cache with shorter TTL for blockchain-sourced data
-        await this.cache.set(cacheKey, response, { ttl: CacheTTL.error });
       }
 
       if (usedFallback) {
@@ -202,8 +187,6 @@ export class MetadataService {
               expirationDate: d1Record.expiration_date,
             };
 
-            // Cache briefly to avoid repeated D1 queries
-            await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
             return fallbackResponse;
           }
         } catch (d1Error) {
@@ -219,8 +202,6 @@ export class MetadataService {
         status: 'unmigrated',
       };
 
-      // Cache briefly to avoid repeated failures
-      await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
       return fallbackResponse;
     }
   }
@@ -247,8 +228,8 @@ export class MetadataService {
 
       if (source === 'ensnode') {
         response = this.buildHierarchyResponse(hierarchy as any, name);
-        // Cache with normal TTL for ensnode data
-        await this.cache.set(cacheKey, response, { ttl: CacheTTL.normal });
+        // Cache with ensnode TTL for ensnode data
+        await this.cache.set(cacheKey, response, { ttl: CacheTTL.ensnode });
       } else {
         // Built from blockchain data
         response = this.buildHierarchyResponseFromBlockchain(hierarchy as any, name);

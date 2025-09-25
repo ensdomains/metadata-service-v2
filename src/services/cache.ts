@@ -1,5 +1,5 @@
-// KV cache management for ensnode responses
-import type { EnsnodeDomain } from "./ensnode";
+// Simplified KV cache management for internal ensnode response caching
+// External API response caching is handled by Cloudflare native caching
 
 export interface CacheOptions {
   ttl?: number;
@@ -41,7 +41,6 @@ export class CacheService {
     // Compress large responses
     if (serialized.length > compressionThreshold) {
       try {
-        // Use gzip compression if available in CF Workers
         const compressed = await this.compress(serialized);
         if (compressed.length < serialized.length * 0.8) {
           serialized = compressed;
@@ -62,7 +61,9 @@ export class CacheService {
     const cacheKey = this.buildKey(namespace, key);
     const cached = await this.kv.get(cacheKey);
 
-    if (!cached) return null;
+    if (!cached) {
+      return null;
+    }
 
     try {
       let data = cached;
@@ -111,33 +112,17 @@ export class CacheService {
     return deletions.length;
   }
 
-  // Get cache statistics
+  // Basic cache statistics
   async getStats(namespace: string = "ensnode"): Promise<{
     totalKeys: number;
     keysSample: string[];
-    estimatedSize: number;
   }> {
     const prefix = this.buildKey(namespace, "");
     const list = await this.kv.list({ prefix, limit: 1000 });
 
-    // Get size estimate from a sample of entries
-    const sampleKeys = list.keys.slice(0, 10);
-    let sampleSize = 0;
-
-    for (const key of sampleKeys) {
-      const value = await this.kv.get(key.name);
-      if (value) {
-        sampleSize += value.length;
-      }
-    }
-
-    const avgSize = sampleKeys.length > 0 ? sampleSize / sampleKeys.length : 0;
-    const estimatedSize = avgSize * list.keys.length;
-
     return {
       totalKeys: list.keys.length,
       keysSample: list.keys.slice(0, 5).map((k) => k.name),
-      estimatedSize,
     };
   }
 
@@ -148,11 +133,8 @@ export class CacheService {
 
   // Compress string data
   private async compress(data: string): Promise<string> {
-    // Placeholder for compression - CF Workers has limited compression options
-    // In a real implementation, we might use CompressionStream if available
     try {
       const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
       const stream = new CompressionStream("gzip");
       const writer = stream.writable.getWriter();
       const reader = stream.readable.getReader();
@@ -224,108 +206,31 @@ export class CacheService {
   }
 }
 
-// Cache key generators for different operations
+// Cache key generators for internal operations
 export const CacheKeys = {
-  domain: (name: string) => `domain:${name.toLowerCase()}`,
-  domains: (names: string[]) =>
-    `domains:${names
-      .map((n) => n.toLowerCase())
-      .sort()
-      .join(",")}`,
-  migrationStatus: (name: string) => `migration:${name.toLowerCase()}`,
-  hierarchy: (name: string) => `hierarchy:${name.toLowerCase()}`,
-  batch: (operation: string, hash: string) => `batch:${operation}:${hash}`,
-  health: () => "health:status",
+  // For backwards compatibility
+  domain: (name: string) => `ensnode:domain:${name.toLowerCase()}`,
+  domains: (names: string[]) => `ensnode:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
+  migrationStatus: (name: string) => `ensnode:migration:${name.toLowerCase()}`,
+  hierarchy: (name: string) => `ensnode:hierarchy:${name.toLowerCase()}`,
+  health: () => "ensnode:health:status",
+
+  // New naming convention
+  ensnodeDomain: (name: string) => `ensnode:domain:${name.toLowerCase()}`,
+  ensNodeBatch: (names: string[]) => `ensnode:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
+  ensnodeMigration: (name: string) => `ensnode:migration:${name.toLowerCase()}`,
+  ensnodeHierarchy: (name: string) => `ensnode:hierarchy:${name.toLowerCase()}`,
+  ensnodeHealth: () => "ensnode:health:status",
 };
 
-// Cache TTL helpers
+// Cache TTL helpers for internal caching
 export const CacheTTL = {
-  // Long cache for stable migrated domains
-  migrated: 3600, // 1 hour
+  // Short cache for internal ensnode responses
+  ensnode: 300, // 5 minutes
 
-  // Medium cache for normal domains
-  normal: 300, // 5 minutes
+  // Very short cache for health checks
+  health: 60, // 1 minute
 
-  // Short cache for expiring domains
-  expiring: 60, // 1 minute
-
-  // Very short cache for temporary failures
+  // Short cache for errors
   error: 30, // 30 seconds
-
-  // Batch operation cache
-  batch: 180, // 3 minutes
-
-  // Health check cache
-  health: 120, // 2 minutes
-
-  // Calculate dynamic TTL based on domain status
-  forDomain: (domain?: EnsnodeDomain): number => {
-    if (!domain) return CacheTTL.error;
-
-    if (domain.isMigrated) return CacheTTL.migrated;
-
-    if (domain.expiryDate) {
-      const expiry = new Date(domain.expiryDate).getTime();
-      const now = Date.now();
-      const daysUntilExpiry = (expiry - now) / (1000 * 60 * 60 * 24);
-
-      if (daysUntilExpiry < 7) return CacheTTL.expiring;
-      if (daysUntilExpiry < 30) return CacheTTL.normal / 2;
-    }
-
-    return CacheTTL.normal;
-  },
 };
-
-// Cache warming utilities
-export class CacheWarmer {
-  constructor(
-    private cache: CacheService,
-    private ensnode: any, // EnsnodeService - avoiding circular import
-  ) {}
-
-  // Warm cache for popular domains
-  async warmPopularDomains(domains: string[]): Promise<void> {
-    const chunks = this.chunkArray(domains, 10);
-
-    for (const chunk of chunks) {
-      const promises = chunk.map(async (domain) => {
-        try {
-          const { data } = await this.ensnode.getDomain(domain);
-          if (data) {
-            const cacheKey = CacheKeys.domain(domain);
-            const ttl = CacheTTL.forDomain(data);
-            await this.cache.set(cacheKey, data, { ttl });
-          }
-        } catch (error) {
-          console.warn(`Failed to warm cache for ${domain}:`, error);
-        }
-      });
-
-      await Promise.all(promises);
-      // Small delay between chunks to avoid overwhelming ensnode
-      await this.sleep(100);
-    }
-  }
-
-  // Invalidate cache for updated domains
-  async invalidateDomain(name: string): Promise<void> {
-    await Promise.all([
-      this.cache.delete(CacheKeys.domain(name)),
-      this.cache.delete(CacheKeys.migrationStatus(name)),
-      this.cache.delete(CacheKeys.hierarchy(name)),
-    ]);
-  }
-
-  private chunkArray<T>(array: T[], size: number): T[][] {
-    const chunks: T[][] = [];
-    for (let i = 0; i < array.length; i += size) {
-      chunks.push(array.slice(i, i + size));
-    }
-    return chunks;
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-}

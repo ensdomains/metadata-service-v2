@@ -156,10 +156,10 @@ describe('CacheService', () => {
   describe('cache operations', () => {
     it('should generate correct cache keys', () => {
       const key = CacheKeys.domain('test.eth');
-      expect(key).toBe('domain:test.eth');
+      expect(key).toBe('ensnode:domain:test.eth');
 
       const batchKey = CacheKeys.domains(['test.eth', 'example.eth']);
-      expect(batchKey).toBe('domains:example.eth,test.eth');
+      expect(batchKey).toBe('ensnode:batch:example.eth,test.eth');
     });
 
     it('should set cache entry', async () => {

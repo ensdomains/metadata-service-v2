@@ -1,7 +1,6 @@
 // Sync service for storing ensnode data in D1 for fast local queries
 import { D1Service } from './d1';
 import { EnsnodeService, type EnsnodeDomain } from './ensnode';
-import { CacheService } from './cache';
 import { namehash, validateEnsName } from '../utils/ens';
 import type { MigrationStatus } from '../types';
 
@@ -25,7 +24,6 @@ export class SyncService {
   constructor(
     private d1: D1Service,
     private ensnode: EnsnodeService,
-    private cache: CacheService,
     private config: SyncConfig
   ) {}
 
