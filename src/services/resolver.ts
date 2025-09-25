@@ -65,116 +65,125 @@ export class ResolverService {
     network: NetworkName,
     version: 'v1' | 'v2'
   ): Promise<NameData> {
-    const { result: resolverData, usedFallback } = await this.blockchain.executeWithFallback(
-      network,
-      async (client) => {
-        // Get basic registry data
-        const registry = this.blockchain.getContract(network, 'registry');
-        
-        const [owner, resolver] = await Promise.all([
-          registry.read.owner([node]),
-          registry.read.resolver([node])
-        ]);
+    try {
+      // Get basic registry data using enhanced methods
+      const [owner, resolver] = await Promise.all([
+        this.blockchain.getOwner(network, node),
+        this.blockchain.getResolver(network, node)
+      ]);
 
-        let registrant: string | undefined;
-        let expiry: bigint | undefined;
-        let isWrapped = false;
-        let fuses: number | undefined;
+      let registrant: string | undefined;
+      let expiry: bigint | undefined;
+      let isWrapped = false;
+      let fuses: number | undefined;
 
-        // Check if name is wrapped
-        if (owner && !isEmptyAddress(owner as string)) {
+      // Check if name is wrapped using enhanced method
+      if (owner && !isEmptyAddress(owner)) {
+        isWrapped = await this.blockchain.isWrapped(network, node);
+
+        if (isWrapped) {
           try {
             const nameWrapper = this.blockchain.getContract(network, 'nameWrapper');
-            isWrapped = await nameWrapper.read.isWrapped([node]);
-            
-            if (isWrapped) {
-              const [wrappedOwner, wrappedFuses, wrappedExpiry] = await nameWrapper.read.getData([node]);
-              registrant = wrappedOwner as string;
-              fuses = Number(wrappedFuses);
-              expiry = wrappedExpiry as bigint;
-            }
+            const [wrappedOwner, wrappedFuses, wrappedExpiry] = await nameWrapper.read.getData([node]);
+            registrant = wrappedOwner as string;
+            fuses = Number(wrappedFuses);
+            expiry = wrappedExpiry as bigint;
           } catch (error) {
-            console.warn('Failed to check wrapper status:', error);
+            console.warn('Failed to get wrapper data:', error);
           }
         }
-
-        // Get resolver records if resolver exists
-        const addresses: Record<string, string> = {};
-        const texts: Record<string, string> = {};
-        let contenthash: string | undefined;
-
-        if (resolver && !isEmptyAddress(resolver as string)) {
-          try {
-            const resolverContract = this.blockchain.getContract(network, 'resolver', resolver as string);
-            
-            // Get ETH address
-            const ethAddress = await resolverContract.read.addr([node]);
-            if (ethAddress && !isEmptyAddress(ethAddress as string)) {
-              addresses.eth = ethAddress as string;
-            }
-
-            // Get common text records
-            const textKeys = ['email', 'url', 'avatar', 'description', 'notice', 'keywords', 'discord', 'github', 'reddit', 'twitter'];
-            const textResults = await Promise.allSettled(
-              textKeys.map(key => resolverContract.read.text([node, key]))
-            );
-
-            textResults.forEach((result, index) => {
-              if (result.status === 'fulfilled' && result.value) {
-                texts[textKeys[index]] = result.value as string;
-              }
-            });
-
-            // Get contenthash
-            try {
-              const contentHashResult = await resolverContract.read.contenthash([node]);
-              if (contentHashResult && contentHashResult !== '0x') {
-                contenthash = contentHashResult as string;
-              }
-            } catch (error) {
-              // Contenthash not supported or empty
-            }
-
-          } catch (error) {
-            console.warn('Failed to resolve records:', error);
-          }
-        }
-
-        return {
-          owner: owner as string,
-          resolver: resolver as string,
-          registrant,
-          expiry,
-          isWrapped,
-          fuses,
-          addresses,
-          texts,
-          contenthash,
-        };
       }
-    );
 
-    // Determine migration status
-    const migrationStatus = this.determineMigrationStatus('namechain', network, resolverData.owner);
+      // Get resolver records using enhanced methods
+      const addresses: Record<string, string> = {};
+      const texts: Record<string, string> = {};
+      let contenthash: string | undefined;
 
-    // Calculate registration and expiration dates
-    let registrationDate: Date | undefined;
-    let expirationDate: Date | undefined;
+      if (resolver && !isEmptyAddress(resolver)) {
+        try {
+          // Get ETH address using enhanced method
+          const ethAddress = await this.blockchain.getAddr(network, resolver, node, 60);
+          if (ethAddress && !isEmptyAddress(ethAddress)) {
+            addresses.eth = ethAddress;
+          }
 
-    if (resolverData.expiry) {
-      expirationDate = new Date(Number(resolverData.expiry) * 1000);
+          // Get common text records using enhanced method
+          const textKeys = ['email', 'url', 'avatar', 'description', 'notice', 'keywords', 'discord', 'github', 'reddit', 'twitter'];
+          const textResults = await Promise.allSettled(
+            textKeys.map(key => this.blockchain.getText(network, resolver, node, key))
+          );
+
+          textResults.forEach((result, index) => {
+            if (result.status === 'fulfilled' && result.value) {
+              texts[textKeys[index]] = result.value;
+            }
+          });
+
+          // Get contenthash using enhanced method
+          try {
+            const contentHashResult = await this.blockchain.getContenthash(network, resolver, node);
+            if (contentHashResult && contentHashResult !== '0x') {
+              contenthash = contentHashResult;
+            }
+          } catch (error) {
+            // Contenthash not supported or empty
+          }
+
+        } catch (error) {
+          console.warn('Failed to resolve records:', error);
+        }
+      }
+
+      // For .eth names, try to get expiry from registrar
+      if (name.endsWith('.eth') && name.split('.').length === 2) {
+        try {
+          const labelHash = labelhash(name.split('.')[0]);
+          const expiryResult = await this.blockchain.getExpiry(network, labelHash);
+          if (expiryResult) {
+            expiry = expiryResult;
+          }
+        } catch (error) {
+          console.warn('Failed to get expiry from registrar:', error);
+        }
+      }
+
+      // Determine migration status
+      const migrationStatus = this.determineMigrationStatus('namechain', network, owner);
+
+      // Calculate registration and expiration dates
+      let registrationDate: Date | undefined;
+      let expirationDate: Date | undefined;
+
+      if (expiry) {
+        expirationDate = new Date(Number(expiry) * 1000);
+      }
+
+      const resolverData: ResolverData = {
+        owner,
+        resolver,
+        registrant,
+        expiry,
+        isWrapped,
+        fuses,
+        addresses,
+        texts,
+        contenthash,
+      };
+
+      return {
+        name,
+        tokenId,
+        version,
+        network,
+        migrationStatus,
+        resolver: resolverData,
+        registrationDate,
+        expirationDate,
+      };
+    } catch (error) {
+      console.error(`Failed to resolve ${name} from ${network}:`, error);
+      throw new Error(`Unable to resolve ${name} from ${network}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-
-    return {
-      name,
-      tokenId,
-      version,
-      network,
-      migrationStatus,
-      resolver: resolverData,
-      registrationDate,
-      expirationDate,
-    };
   }
 
   // Resolve multiple names in parallel

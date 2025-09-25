@@ -1,5 +1,5 @@
 // Network types
-export type NetworkName = 'mainnet' | 'sepolia' | 'namechain';
+export type NetworkName = 'mainnet' | 'namechain';
 
 // ENS version types
 export type ENSVersion = 'v1' | 'v2';

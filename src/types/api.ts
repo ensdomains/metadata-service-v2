@@ -56,6 +56,23 @@ export interface BatchMetadataResponse {
   failed: number;
 }
 
+export interface CrossChainSyncResponse {
+  name: string;
+  mainnet: {
+    exists: boolean;
+    metadata?: MetadataResponse;
+    error?: string;
+  };
+  namechain: {
+    exists: boolean;
+    metadata?: MetadataResponse;
+    error?: string;
+  };
+  consistent: boolean;
+  differences: string[];
+  recommendation: 'migrated' | 'unmigrated' | 'inconsistent' | 'error';
+}
+
 export interface HealthResponse {
   service: string;
   version: string;

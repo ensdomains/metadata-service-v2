@@ -16,8 +16,10 @@
     "build": "tsc && wrangler deploy --dry-run"
   },
   "dependencies": {
-    "graphql": "^16.9.0",
-    "graphql-request": "^7.1.0",
+    "@adraffy/ens-normalize": "^1.11.0",
+    "@ensdomains/ensjs": "^3.7.0",
+    "graphql": "^16.11.0",
+    "graphql-request": "^7.2.0",
     "hono": "^4.6.3",
     "viem": "^2.21.19"
   },

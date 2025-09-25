@@ -331,13 +331,122 @@ export class BlockchainService {
     };
   }
 
+  // Enhanced ENS resolution: get owner directly from registry
+  async getOwner(network: NetworkName, node: string): Promise<string> {
+    return this.executeWithFallback(network, async (client) => {
+      const registry = getContract({
+        address: CONTRACTS[network as keyof typeof CONTRACTS].registry as `0x${string}`,
+        abi: ENS_REGISTRY_ABI,
+        client,
+      });
+
+      return await registry.read.owner([node as `0x${string}`]) as string;
+    }).then(({ result }) => result);
+  }
+
+  // Enhanced ENS resolution: get resolver address from registry
+  async getResolver(network: NetworkName, node: string): Promise<string> {
+    return this.executeWithFallback(network, async (client) => {
+      const registry = getContract({
+        address: CONTRACTS[network as keyof typeof CONTRACTS].registry as `0x${string}`,
+        abi: ENS_REGISTRY_ABI,
+        client,
+      });
+
+      return await registry.read.resolver([node as `0x${string}`]) as string;
+    }).then(({ result }) => result);
+  }
+
+  // Enhanced ENS resolution: get text record from resolver
+  async getText(network: NetworkName, resolverAddress: string, node: string, key: string): Promise<string> {
+    return this.executeWithFallback(network, async (client) => {
+      const resolver = getContract({
+        address: resolverAddress as `0x${string}`,
+        abi: RESOLVER_ABI,
+        client,
+      });
+
+      return await resolver.read.text([node as `0x${string}`, key]) as string;
+    }).then(({ result }) => result);
+  }
+
+  // Enhanced ENS resolution: get address record from resolver
+  async getAddr(network: NetworkName, resolverAddress: string, node: string, coinType: number = 60): Promise<string> {
+    return this.executeWithFallback(network, async (client) => {
+      const resolver = getContract({
+        address: resolverAddress as `0x${string}`,
+        abi: RESOLVER_ABI,
+        client,
+      });
+
+      if (coinType === 60) {
+        // ETH address (backwards compatibility)
+        return await resolver.read.addr([node as `0x${string}`]) as string;
+      } else {
+        // Multi-coin address - need different ABI for this
+        // For now, just return empty string for non-ETH addresses
+        return '';
+      }
+    }).then(({ result }) => result);
+  }
+
+  // Enhanced ENS resolution: get contenthash from resolver
+  async getContenthash(network: NetworkName, resolverAddress: string, node: string): Promise<string> {
+    return this.executeWithFallback(network, async (client) => {
+      const resolver = getContract({
+        address: resolverAddress as `0x${string}`,
+        abi: RESOLVER_ABI,
+        client,
+      });
+
+      const result = await resolver.read.contenthash([node as `0x${string}`]);
+      return result ? `0x${Buffer.from(result as any).toString('hex')}` : '0x';
+    }).then(({ result }) => result);
+  }
+
+  // Enhanced ENS resolution: check if name is wrapped
+  async isWrapped(network: NetworkName, node: string): Promise<boolean> {
+    try {
+      const owner = await this.getOwner(network, node);
+      return owner.toLowerCase() === CONTRACTS[network as keyof typeof CONTRACTS].nameWrapper.toLowerCase();
+    } catch (error) {
+      return false;
+    }
+  }
+
+  // Enhanced ENS resolution: get expiry date for .eth names
+  async getExpiry(network: NetworkName, labelhash: string): Promise<bigint | null> {
+    try {
+      return this.executeWithFallback(network, async (client) => {
+        const registrar = getContract({
+          address: CONTRACTS[network as keyof typeof CONTRACTS].registrar as `0x${string}`,
+          abi: [
+            {
+              inputs: [{ name: 'id', type: 'uint256' }],
+              name: 'nameExpires',
+              outputs: [{ name: '', type: 'uint256' }],
+              stateMutability: 'view',
+              type: 'function',
+            },
+          ],
+          client,
+        });
+
+        return await registrar.read.nameExpires([BigInt(labelhash)]) as bigint;
+      }).then(({ result }) => result);
+    } catch (error) {
+      console.warn(`Failed to get expiry for ${labelhash}:`, error);
+      return null;
+    }
+  }
+
   // Get network configuration
   getNetworkConfig(network: NetworkName): NetworkConfig {
     // Ensure network is supported
     if (!(network in CONTRACTS)) {
       throw new Error(`Unsupported network for configuration: ${network}`);
     }
-    
+
     const contracts = CONTRACTS[network as keyof typeof CONTRACTS];
     const client = this.getClient(network);
 

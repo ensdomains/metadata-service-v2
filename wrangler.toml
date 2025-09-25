@@ -33,21 +33,16 @@ database_name = "ens-metadata-db"
 database_id = "ens-metadata-database-id"
 preview_database_id = "ens-metadata-database-preview-id"
 
-# Durable Objects for coordination
-[[durable_objects.bindings]]
-name = "REQUEST_DEDUPER"
-class_name = "RequestDeduper"
-script_name = "ens-metadata-v2"
-
-[[migrations]]
-tag = "v1"
-new_classes = ["RequestDeduper"]
 
 # Environment variables
 [vars]
 ENSNODE_GRAPHQL_URL = "https://api.ensnode.xyz/graphql"
 MAINNET_RPC_URL = "https://ethereum.publicnode.com"
 NAMECHAIN_RPC_URL = "https://namechain.rpc.url"
+MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
+MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
+MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
+NAMECHAIN_FALLBACK_RPC_1 = "https://namechain-fallback-1.rpc.url"
 LOG_LEVEL = "info"
 
 # Production-specific environment variables
