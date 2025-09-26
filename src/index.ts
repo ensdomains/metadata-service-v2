@@ -15,6 +15,7 @@ import {
 import { MetadataService } from "./services/metadata";
 import { WebhookService } from "./services/webhook";
 import { CacheService } from "./services/cache";
+import { ImageGenerationService } from "./services/image";
 import { CachePresets } from "./utils/cache-headers";
 import type {
   MetadataResponse,
@@ -80,7 +81,9 @@ function getServices(env: Env) {
     requireAuth: false, // TODO: Configure based on environment
   });
 
-  return { metadataService, webhookService, cacheService };
+  const imageService = new ImageGenerationService();
+
+  return { metadataService, webhookService, cacheService, imageService };
 }
 
 // Middleware
@@ -362,6 +365,76 @@ app.get("/health", async (c) => {
   }
 });
 
+
+// Image generation endpoint: /{name}/image
+app.get(
+  "/:name/image",
+  validateEnsNameParam,
+  async (c) => {
+    const { name } = c.req.param();
+    const { imageService, metadataService } = getServices(c.env);
+
+    try {
+      // Get query parameters for customization
+      const status = c.req.query('status') as any;
+      const style = c.req.query('style') as any;
+      const bg = c.req.query('bg') as any;
+      const width = c.req.query('w');
+      const height = c.req.query('h');
+
+      // Build image options
+      const options: any = { name };
+
+      if (status) options.migrationStatus = status;
+      if (style) options.style = style;
+      if (bg) options.background = bg;
+      if (width && height) {
+        options.size = {
+          width: parseInt(width, 10),
+          height: parseInt(height, 10),
+        };
+      }
+
+      // Validate options
+      const validation = imageService.validateOptions(options);
+      if (!validation.valid) {
+        const errorResponse: ErrorResponse = {
+          error: `Invalid image parameters: ${validation.errors.join(', ')}`,
+          timestamp: new Date().toISOString(),
+        };
+        return c.json(errorResponse, 400);
+      }
+
+      // Try to get migration status from metadata service if not provided
+      if (!status) {
+        try {
+          const migrationStatus = await metadataService.getMigrationStatus(name);
+          options.migrationStatus = migrationStatus.status;
+        } catch (error) {
+          // Use default if migration status lookup fails
+          options.migrationStatus = 'unmigrated';
+        }
+      }
+
+      // Generate image
+      const image = await imageService.generateDomainImage(options);
+
+      // Set appropriate headers
+      c.header('Content-Type', image.contentType);
+      c.header('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+      c.header('Content-Length', image.svg.length.toString());
+
+      return c.body(image.svg);
+    } catch (error) {
+      console.error("Image generation error:", error);
+      const errorResponse: ErrorResponse = {
+        error: error instanceof Error ? error.message : "Failed to generate image",
+        timestamp: new Date().toISOString(),
+      };
+      return c.json(errorResponse, 500);
+    }
+  }
+);
 
 // Webhook endpoint for cache invalidation
 app.post("/webhook/ensnode", async (c) => {

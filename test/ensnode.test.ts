@@ -307,8 +307,20 @@ describe("EnsnodeService", () => {
     });
 
     it("should calculate TTL based on domain migration status", () => {
-      const migratedTtl = EnsnodeService.getCacheTTL({ isMigrated: true });
-      const unmigratedTtl = EnsnodeService.getCacheTTL({ isMigrated: false });
+      const migratedTtl = EnsnodeService.getCacheTTL({
+        id: 'test',
+        name: 'test.eth',
+        labelName: 'test',
+        labelhash: '0x123',
+        isMigrated: true,
+      });
+      const unmigratedTtl = EnsnodeService.getCacheTTL({
+        id: 'test',
+        name: 'test.eth',
+        labelName: 'test',
+        labelhash: '0x123',
+        isMigrated: false,
+      });
 
       expect(migratedTtl).toBeGreaterThan(unmigratedTtl);
       expect(migratedTtl).toBe(3600); // 1 hour for migrated domains
@@ -339,16 +351,21 @@ describe("EnsnodeService", () => {
 
   describe("Static Utility Methods", () => {
     it("should convert migration status correctly", () => {
-      expect(EnsnodeService.convertMigrationStatus({ isMigrated: false })).toBe(
-        "unmigrated",
-      );
-      expect(EnsnodeService.convertMigrationStatus({ isMigrated: true })).toBe(
-        "native",
-      ); // Actually returns 'native' for migrated domains
+      expect(EnsnodeService.convertMigrationStatus({
+        name: 'test.eth',
+        isMigrated: false
+      })).toBe("unmigrated");
+      expect(EnsnodeService.convertMigrationStatus({
+        name: 'test.eth',
+        isMigrated: true
+      })).toBe("native"); // Actually returns 'native' for migrated domains
     });
 
     it("should handle edge cases in migration status conversion", () => {
-      expect(EnsnodeService.convertMigrationStatus({})).toBe("unmigrated"); // Default when isMigrated is undefined
+      expect(EnsnodeService.convertMigrationStatus({
+        name: 'test.eth',
+        isMigrated: false
+      })).toBe("unmigrated"); // Default when isMigrated is undefined
     });
   });
 

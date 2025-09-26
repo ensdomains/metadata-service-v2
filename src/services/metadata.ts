@@ -382,6 +382,10 @@ export class MetadataService {
     registryType: string
   ): Promise<MetadataResponse> {
     const label = getLabel(domain.name);
+    const migrationStatus = EnsnodeService.convertMigrationStatus({
+      name: domain.name,
+      isMigrated: domain.isMigrated || false,
+    });
 
     return {
       name: domain.name,
@@ -389,7 +393,7 @@ export class MetadataService {
       version: domain.isMigrated ? 'v2' : 'v1',
       network,
       description: this.generateDescription(domain.name, domain.isMigrated || false),
-      image: this.generateImageUrl(domain.name),
+      image: this.generateImageUrl(domain.name, migrationStatus),
       attributes: this.buildAttributes(domain, label),
       external_url: `https://app.ens.domains/name/${domain.name}`,
     };
@@ -401,6 +405,7 @@ export class MetadataService {
     registryType: string
   ): Promise<MetadataResponse> {
     const label = getLabel(nameData.name);
+    const migrationStatus = nameData.version === 'v2' ? 'native' : 'unmigrated';
 
     return {
       name: nameData.name,
@@ -408,7 +413,7 @@ export class MetadataService {
       version: nameData.version,
       network: nameData.network,
       description: this.generateDescription(nameData.name, nameData.version === 'v2'),
-      image: this.generateImageUrl(nameData.name),
+      image: this.generateImageUrl(nameData.name, migrationStatus),
       attributes: this.buildAttributesFromBlockchain(nameData, label),
       external_url: `https://app.ens.domains/name/${nameData.name}`,
     };
@@ -421,6 +426,7 @@ export class MetadataService {
     registryType: string
   ): Promise<MetadataResponse> {
     const label = getLabel(record.name);
+    const migrationStatus = record.is_migrated ? 'native' : 'unmigrated';
 
     return {
       name: record.name,
@@ -428,7 +434,7 @@ export class MetadataService {
       version: record.is_migrated ? 'v2' : 'v1',
       network,
       description: this.generateDescription(record.name, record.is_migrated),
-      image: this.generateImageUrl(record.name),
+      image: this.generateImageUrl(record.name, migrationStatus),
       attributes: this.buildAttributesFromD1Record(record, label),
       external_url: `https://app.ens.domains/name/${record.name}`,
     };
@@ -604,9 +610,17 @@ export class MetadataService {
   }
 
   // Generate image URL
-  private generateImageUrl(name: string): string {
-    // TODO: Integrate with SVG generation service
-    return `https://metadata.ens.domains/${name}/image`;
+  private generateImageUrl(name: string, migrationStatus?: MigrationStatus): string {
+    // Use current domain for image generation
+    const baseUrl = 'https://metadata.ens.domains'; // TODO: Make configurable
+
+    const params = new URLSearchParams();
+    if (migrationStatus) {
+      params.set('status', migrationStatus);
+    }
+
+    const queryString = params.toString();
+    return `${baseUrl}/${encodeURIComponent(name)}/image${queryString ? `?${queryString}` : ''}`;
   }
 
   // Get domain level
