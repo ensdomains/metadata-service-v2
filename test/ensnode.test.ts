@@ -69,7 +69,7 @@ vi.mock("../src/utils/ens", () => ({
 vi.mock("graphql-request", () => ({
   GraphQLClient: class {
     constructor(public endpoint: string) {}
-    async request(query: string, variables?: any) {
+    async request(query: string, variables?: Record<string, unknown>) {
       await new Promise((resolve) => setTimeout(resolve, 1));
 
       // Health check query

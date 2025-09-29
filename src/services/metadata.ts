@@ -13,7 +13,45 @@ import type {
   BatchMetadataResponse,
 } from '../types/api';
 import type { NetworkName, MigrationStatus } from '../types';
-import { validateEnsName, getLabel, isEthDomain, namehash, getCharacterSet, getSegmentLength } from '../utils/ens';
+import { validateEnsName, getLabel, namehash, getCharacterSet, getSegmentLength } from '../utils/ens';
+
+export interface BlockchainEnvironment {
+  MAINNET_RPC_URL: string;
+  NAMECHAIN_RPC_URL: string;
+  MAINNET_FALLBACK_RPC_1?: string;
+  MAINNET_FALLBACK_RPC_2?: string;
+  MAINNET_FALLBACK_RPC_3?: string;
+  NAMECHAIN_FALLBACK_RPC_1?: string;
+  NAMECHAIN_FALLBACK_RPC_2?: string;
+}
+
+export interface BlockchainNameData {
+  name: string;
+  tokenId: string;
+  version: 'v1' | 'v2';
+  network: string;
+  resolver?: {
+    isWrapped?: boolean;
+    owner?: string;
+    resolver?: string;
+    id?: string;
+    address?: string;
+  };
+  owner?: {
+    id?: string;
+  };
+  parent?: BlockchainNameData;
+}
+
+export interface D1RecordData {
+  name: string;
+  labelhash: string;
+  is_migrated: boolean;
+  data_source: string;
+  expiryDate?: string;
+  expiry_date?: string;
+  created_at?: string;
+}
 
 export interface MetadataServiceConfig {
   ensnodeEndpoint: string;
@@ -36,7 +74,7 @@ export class MetadataService {
   constructor(
     config: MetadataServiceConfig,
     kv: KVNamespace,
-    blockchainEnv: any,
+    blockchainEnv: BlockchainEnvironment,
     db?: D1Database
   ) {
     this.ensnode = new EnsnodeService({
@@ -98,7 +136,7 @@ export class MetadataService {
       let metadata: MetadataResponse;
 
       if (source === 'ensnode') {
-        metadata = await this.buildMetadataFromEnsnode(domain as any, network, registryType);
+        metadata = await this.buildMetadataFromEnsnode(domain as EnsnodeDomain, network);
 
         // Store in D1 if enabled
         if (this.d1 && this.sync) {
@@ -108,7 +146,7 @@ export class MetadataService {
         }
       } else {
         // Built from blockchain data
-        metadata = await this.buildMetadataFromBlockchain(domain as any, registryType);
+        metadata = await this.buildMetadataFromBlockchain(domain as unknown as BlockchainNameData);
       }
 
       if (usedFallback) {
@@ -116,7 +154,7 @@ export class MetadataService {
       }
 
       return metadata;
-    } catch (error) {
+    } catch {
       // Try D1 as last resort if available
       if (this.d1) {
         try {
@@ -125,7 +163,7 @@ export class MetadataService {
             console.warn(`Using stale D1 data for ${identifier} due to all other sources failing`);
 
             // Convert D1 record to metadata
-            const metadata = await this.buildMetadataFromD1Record(d1Record, network, registryType);
+            const metadata = await this.buildMetadataFromD1Record(d1Record as D1RecordData, network);
             return metadata;
           }
         } catch (d1Error) {
@@ -133,7 +171,6 @@ export class MetadataService {
         }
       }
 
-      console.error(`All fallback options failed for ${identifier}:`, error);
       throw new Error(`Failed to resolve metadata for ${identifier}`);
     }
   }
@@ -304,8 +341,7 @@ export class MetadataService {
           if (domain) {
             const metadata = await this.buildMetadataFromEnsnode(
               domain,
-              network || 'namechain',
-              'registry'
+              network || 'namechain'
             );
             return { name, metadata };
           } else {
@@ -317,7 +353,7 @@ export class MetadataService {
                 name
               );
               return { name, metadata };
-            } catch (error) {
+            } catch {
               return { name, error: `Failed to resolve ${name}` };
             }
           }
@@ -354,7 +390,7 @@ export class MetadataService {
               name
             );
             return { name, metadata };
-          } catch (fallbackError) {
+          } catch {
             return { name, error: `Failed to resolve ${name}` };
           }
         })
@@ -378,10 +414,8 @@ export class MetadataService {
   // Build metadata response from ensnode domain data
   private async buildMetadataFromEnsnode(
     domain: EnsnodeDomain,
-    network: NetworkName,
-    registryType: string
+    network: NetworkName
   ): Promise<MetadataResponse> {
-    const label = getLabel(domain.name);
     const migrationStatus = EnsnodeService.convertMigrationStatus({
       name: domain.name,
       isMigrated: domain.isMigrated || false,
@@ -394,17 +428,15 @@ export class MetadataService {
       network,
       description: this.generateDescription(domain.name, domain.isMigrated || false),
       image: this.generateImageUrl(domain.name, migrationStatus),
-      attributes: this.buildAttributes(domain, label),
+      attributes: this.buildAttributes(domain),
       external_url: `https://app.ens.domains/name/${domain.name}`,
     };
   }
 
   // Build metadata response from blockchain data
   private async buildMetadataFromBlockchain(
-    nameData: any,
-    registryType: string
+    nameData: BlockchainNameData
   ): Promise<MetadataResponse> {
-    const label = getLabel(nameData.name);
     const migrationStatus = nameData.version === 'v2' ? 'native' : 'unmigrated';
 
     return {
@@ -414,18 +446,16 @@ export class MetadataService {
       network: nameData.network,
       description: this.generateDescription(nameData.name, nameData.version === 'v2'),
       image: this.generateImageUrl(nameData.name, migrationStatus),
-      attributes: this.buildAttributesFromBlockchain(nameData, label),
+      attributes: this.buildAttributesFromBlockchain(nameData),
       external_url: `https://app.ens.domains/name/${nameData.name}`,
     };
   }
 
   // Build metadata response from D1 record
   private async buildMetadataFromD1Record(
-    record: any,
-    network: NetworkName,
-    registryType: string
+    record: D1RecordData,
+    network: NetworkName
   ): Promise<MetadataResponse> {
-    const label = getLabel(record.name);
     const migrationStatus = record.is_migrated ? 'native' : 'unmigrated';
 
     return {
@@ -435,14 +465,14 @@ export class MetadataService {
       network,
       description: this.generateDescription(record.name, record.is_migrated),
       image: this.generateImageUrl(record.name, migrationStatus),
-      attributes: this.buildAttributesFromD1Record(record, label),
+      attributes: this.buildAttributesFromD1Record(record),
       external_url: `https://app.ens.domains/name/${record.name}`,
     };
   }
 
   // Build hierarchy response from ensnode data
   private buildHierarchyResponse(
-    hierarchy: any,
+    hierarchy: EnsnodeDomain,
     name: string
   ): RegistryHierarchyResponse {
     const levels: Array<{
@@ -452,20 +482,15 @@ export class MetadataService {
       level: number;
     }> = [];
 
-    let current = hierarchy;
-    let level = this.getDomainLevel(name);
+    const level = this.getDomainLevel(name);
 
-    while (current) {
-      levels.push({
-        name: current.name,
-        owner: current.owner?.id || '0x0000000000000000000000000000000000000000',
-        resolver: current.resolver?.address || '0x0000000000000000000000000000000000000000',
-        level,
-      });
-
-      current = current.parent;
-      level--;
-    }
+    // Just add the current domain for now
+    levels.push({
+      name: hierarchy.name,
+      owner: hierarchy.owner?.id || '0x0000000000000000000000000000000000000000',
+      resolver: hierarchy.resolver?.address || '0x0000000000000000000000000000000000000000',
+      level,
+    });
 
     return {
       name,
@@ -475,7 +500,7 @@ export class MetadataService {
 
   // Build hierarchy response from blockchain data
   private buildHierarchyResponseFromBlockchain(
-    hierarchy: any,
+    hierarchy: BlockchainNameData,
     name: string
   ): RegistryHierarchyResponse {
     // The FallbackService returns a hierarchy object with parent chain
@@ -486,20 +511,15 @@ export class MetadataService {
       level: number;
     }> = [];
 
-    let current = hierarchy;
-    let level = this.getDomainLevel(name);
+    const level = this.getDomainLevel(name);
 
-    while (current) {
-      levels.push({
-        name: current.name,
-        owner: current.owner?.id || '0x0000000000000000000000000000000000000000',
-        resolver: current.resolver?.address || '0x0000000000000000000000000000000000000000',
-        level,
-      });
-
-      current = current.parent;
-      level--;
-    }
+    // Just add the current domain for now
+    levels.push({
+      name: hierarchy.name,
+      owner: hierarchy.owner?.id || '0x0000000000000000000000000000000000000000',
+      resolver: hierarchy.resolver?.address || '0x0000000000000000000000000000000000000000',
+      level,
+    });
 
     return {
       name,
@@ -531,7 +551,7 @@ export class MetadataService {
   }
 
   // Build attributes array
-  private buildAttributes(domain: EnsnodeDomain, label: string) {
+  private buildAttributes(domain: EnsnodeDomain) {
     const attributes = [
       { trait_type: 'Character Set', value: getCharacterSet(domain.name) },
       { trait_type: 'Length', value: getSegmentLength(domain.name) },
@@ -556,7 +576,7 @@ export class MetadataService {
   }
 
   // Build attributes from blockchain data
-  private buildAttributesFromBlockchain(nameData: any, label: string) {
+  private buildAttributesFromBlockchain(nameData: BlockchainNameData) {
     return [
       { trait_type: 'Character Set', value: getCharacterSet(nameData.name) },
       { trait_type: 'Length', value: getSegmentLength(nameData.name) },
@@ -566,7 +586,7 @@ export class MetadataService {
   }
 
   // Build attributes from D1 record
-  private buildAttributesFromD1Record(record: any, label: string) {
+  private buildAttributesFromD1Record(record: D1RecordData) {
     const attributes = [
       { trait_type: 'Character Set', value: getCharacterSet(record.name) },
       { trait_type: 'Length', value: getSegmentLength(record.name) },
@@ -679,7 +699,7 @@ export class MetadataService {
             resolver: nameData.resolver.resolver || '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
             level,
           });
-        } catch (error) {
+        } catch {
           // If we can't resolve a level, fill with defaults
           hierarchy.push({
             name: domainName,

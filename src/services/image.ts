@@ -1,7 +1,7 @@
 // SVG-based NFT image generation service for ENS domains
 import { createDynamicSVGImage } from "adaptive-layout-composer";
 import type { MigrationStatus } from "../types";
-import { getCharacterSet, getSegmentLength } from "../utils/ens";
+import { getCharacterSet } from "../utils/ens";
 
 export interface ImageGenerationOptions {
   name: string;
@@ -37,7 +37,6 @@ export class ImageGenerationService {
       name,
       migrationStatus = "unmigrated",
       background = "gradient",
-      style = "modern",
       size = this.defaultSize,
     } = options;
 
@@ -136,7 +135,7 @@ export class ImageGenerationService {
   // Generate background element
   private generateBackground(
     type: string,
-    colors: any,
+    colors: Record<string, string>,
     size: { width: number; height: number },
   ) {
     switch (type) {
@@ -168,7 +167,7 @@ export class ImageGenerationService {
   }
 
   // Generate migration status badge
-  private generateStatusBadge(status: MigrationStatus, colors: any) {
+  private generateStatusBadge(status: MigrationStatus, colors: Record<string, string>) {
     const badgeText = status.toUpperCase();
     const badgeWidth = Math.max(60, badgeText.length * 8 + 20);
 
@@ -188,7 +187,7 @@ export class ImageGenerationService {
   }
 
   // Generate character set indicator
-  private generateCharacterSetIndicator(characterSet: string, colors: any) {
+  private generateCharacterSetIndicator(characterSet: string, colors: Record<string, string>) {
     if (characterSet === "latin") return ""; // No indicator for standard latin
 
     const indicators = {

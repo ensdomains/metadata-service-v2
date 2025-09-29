@@ -18,14 +18,10 @@ import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
 import { CachePresets } from "./utils/cache-headers";
 import type {
-  MetadataResponse,
-  MigrationStatusResponse,
-  RegistryHierarchyResponse,
-  BatchMetadataResponse,
-  CrossChainSyncResponse,
   HealthResponse,
   ErrorResponse,
 } from "./types/api";
+import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
   // KV Namespaces
@@ -376,18 +372,18 @@ app.get(
 
     try {
       // Get query parameters for customization
-      const status = c.req.query('status') as any;
-      const style = c.req.query('style') as any;
-      const bg = c.req.query('bg') as any;
+      const status = c.req.query('status');
+      const style = c.req.query('style');
+      const bg = c.req.query('bg');
       const width = c.req.query('w');
       const height = c.req.query('h');
 
       // Build image options
-      const options: any = { name };
+      const options: ImageGenerationOptions = { name };
 
-      if (status) options.migrationStatus = status;
-      if (style) options.style = style;
-      if (bg) options.background = bg;
+      if (status) options.migrationStatus = status as 'migrated' | 'native' | 'unmigrated' | 'ejected' | 'shadow';
+      if (style) options.style = style as 'classic' | 'modern' | 'minimal';
+      if (bg) options.background = bg as 'gradient' | 'solid' | 'pattern';
       if (width && height) {
         options.size = {
           width: parseInt(width, 10),
@@ -410,7 +406,7 @@ app.get(
         try {
           const migrationStatus = await metadataService.getMigrationStatus(name);
           options.migrationStatus = migrationStatus.status;
-        } catch (error) {
+        } catch {
           // Use default if migration status lookup fails
           options.migrationStatus = 'unmigrated';
         }

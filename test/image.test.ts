@@ -52,7 +52,7 @@ describe('ImageGenerationService', () => {
       for (const background of ['gradient', 'solid', 'pattern']) {
         const result = await imageService.generateDomainImage({
           name: 'test.eth',
-          background: background as any,
+          background: background as 'gradient' | 'solid' | 'pattern',
         });
 
         expect(result.svg).toBeDefined();
@@ -63,7 +63,7 @@ describe('ImageGenerationService', () => {
       for (const style of ['classic', 'modern', 'minimal']) {
         const result = await imageService.generateDomainImage({
           name: 'test.eth',
-          style: style as any,
+          style: style as 'classic' | 'modern' | 'minimal',
         });
 
         expect(result.svg).toBeDefined();
@@ -157,7 +157,7 @@ describe('ImageGenerationService', () => {
 
         await imageService.generateDomainImage({
           name: 'test.eth',
-          migrationStatus: status as any,
+          migrationStatus: status as 'migrated' | 'native' | 'unmigrated' | 'ejected' | 'shadow',
         });
 
         expect(mockCreateSVG).toHaveBeenCalledWith(

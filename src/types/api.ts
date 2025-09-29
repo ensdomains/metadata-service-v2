@@ -23,7 +23,7 @@ export interface MetadataResponse {
 
 export interface MigrationStatusResponse {
   name: string;
-  status: 'native' | 'ejected' | 'unmigrated' | 'shadow';
+  status: 'migrated' | 'native' | 'ejected' | 'unmigrated' | 'shadow';
   l1Owner?: string;
   l2Owner?: string;
   migrationDate?: string;

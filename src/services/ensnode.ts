@@ -1,5 +1,5 @@
 import { GraphQLClient } from 'graphql-request';
-import type { MigrationStatus, NetworkName } from '../types';
+import type { MigrationStatus } from '../types';
 import { namehash } from '../utils/ens';
 
 // GraphQL query fragments

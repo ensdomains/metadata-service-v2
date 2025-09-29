@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { BlockchainService } from '../src/services/blockchain';
 
 // Mock environment
@@ -23,7 +23,7 @@ describe('BlockchainService', () => {
   });
 
   it('should throw error for unsupported network', () => {
-    expect(() => blockchainService.getClient('sepolia' as any)).toThrow('No client configured for network: sepolia');
+    expect(() => blockchainService.getClient('sepolia' as 'mainnet' | 'namechain')).toThrow('No client configured for network: sepolia');
   });
 
   it('should return network configuration', () => {

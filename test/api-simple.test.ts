@@ -89,7 +89,7 @@ describe('API Endpoints - Simple Tests', () => {
       const res = await app.request('/namechain/registry/test.eth');
       expect(res.status).toBe(200);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.name).toBe('test.eth');
       expect(data.network).toBe('namechain');
       expect(data.attributes).toBeDefined();
@@ -101,7 +101,7 @@ describe('API Endpoints - Simple Tests', () => {
       const res = await app.request('/migration-status/test.eth');
       expect(res.status).toBe(200);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.name).toBe('test.eth');
       expect(data.status).toBeDefined();
       expect(['native', 'ejected', 'unmigrated', 'shadow']).toContain(data.status);
@@ -113,10 +113,10 @@ describe('API Endpoints - Simple Tests', () => {
       const res = await app.request('/registry-hierarchy/test.eth');
       expect(res.status).toBe(200);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.name).toBe('test.eth');
       expect(Array.isArray(data.hierarchy)).toBe(true);
-      expect(data.hierarchy.length).toBeGreaterThan(0);
+      expect((data.hierarchy as unknown[]).length).toBeGreaterThan(0);
     });
   });
 
@@ -135,7 +135,7 @@ describe('API Endpoints - Simple Tests', () => {
 
       expect(res.status).toBe(200);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.results).toHaveLength(2);
       expect(data.total).toBe(2);
       expect(data.successful).toBe(2);
@@ -151,7 +151,7 @@ describe('API Endpoints - Simple Tests', () => {
 
       expect(res.status).toBe(400);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.error).toContain('Names array cannot be empty');
     });
 
@@ -166,7 +166,7 @@ describe('API Endpoints - Simple Tests', () => {
 
       expect(res.status).toBe(400);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.error).toContain('Cannot process more than 100 names');
     });
 
@@ -179,7 +179,7 @@ describe('API Endpoints - Simple Tests', () => {
 
       expect(res.status).toBe(400);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.error).toContain("must contain 'names' array");
     });
   });
@@ -189,7 +189,7 @@ describe('API Endpoints - Simple Tests', () => {
       const res = await app.request('/health');
       expect(res.status).toBe(200);
 
-      const data = await res.json() as any;
+      const data = await res.json() as Record<string, unknown>;
       expect(data.service).toBe('ENS Metadata V2');
       expect(data.version).toBe('2.0.0');
       expect(data.status).toBe('ok');

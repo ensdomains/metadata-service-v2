@@ -36,8 +36,7 @@ describe('Cross-Chain Sync', () => {
 
   it('should compare metadata across chains', async () => {
     // Mock getMetadata to return different results for each network
-    const originalGetMetadata = metadataService.getMetadata;
-    vi.spyOn(metadataService, 'getMetadata').mockImplementation(async (network, registryType, name) => {
+    vi.spyOn(metadataService, 'getMetadata').mockImplementation(async (network) => {
       if (network === 'mainnet') {
         return {
           name: 'test.eth',
@@ -82,7 +81,7 @@ describe('Cross-Chain Sync', () => {
   });
 
   it('should handle domain only on mainnet', async () => {
-    vi.spyOn(metadataService, 'getMetadata').mockImplementation(async (network, registryType, name) => {
+    vi.spyOn(metadataService, 'getMetadata').mockImplementation(async (network) => {
       if (network === 'mainnet') {
         return {
           name: 'unmigrated.eth',
@@ -112,7 +111,7 @@ describe('Cross-Chain Sync', () => {
   });
 
   it('should handle domain only on namechain', async () => {
-    vi.spyOn(metadataService, 'getMetadata').mockImplementation(async (network, registryType, name) => {
+    vi.spyOn(metadataService, 'getMetadata').mockImplementation(async (network) => {
       if (network === 'namechain') {
         return {
           name: 'migrated.eth',

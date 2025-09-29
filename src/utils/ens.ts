@@ -275,7 +275,6 @@ function _checkNormalized(name: string): boolean {
 }
 
 // Error classes
-export interface BaseError {}
 export class BaseError extends Error {
   code: number;
   constructor(message?: string, code: number = 500) {
@@ -286,14 +285,10 @@ export class BaseError extends Error {
   }
 }
 
-export interface ResolverNotFound {}
 export class ResolverNotFound extends BaseError {}
 
-export interface TextRecordNotFound {}
 export class TextRecordNotFound extends BaseError {}
 
-export interface UnsupportedNetwork {}
 export class UnsupportedNetwork extends BaseError {}
 
-export interface ExpiredNameError {}
 export class ExpiredNameError extends BaseError {}

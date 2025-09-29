@@ -130,7 +130,7 @@ export function getMockNamehash(name: string): string {
 }
 
 // Mock GraphQL responses based on query patterns
-export function createMockEnsnodeResponse(query: string, variables: any) {
+export function createMockEnsnodeResponse(query: string, variables: Record<string, unknown>) {
   // Domain query by name (namehash)
   if (variables?.name && query.includes("domain(id:")) {
     const domain = Object.values(mockDomains).find(
@@ -204,8 +204,8 @@ export function createMockEnsnodeResponse(query: string, variables: any) {
       .map((namehash: string) =>
         Object.values(mockDomains).find((d) => d.id === namehash),
       )
-      .filter(Boolean)
-      .map((domain: MockDomain) => ({
+      .filter((domain): domain is MockDomain => Boolean(domain))
+      .map((domain) => ({
         id: domain.id,
         name: domain.name,
         labelName: domain.labelName,
@@ -241,7 +241,7 @@ export const mockGraphQLClient = vi
   .fn()
   .mockImplementation((endpoint: string) => ({
     endpoint,
-    async request(query: string, variables?: any) {
+    async request(query: string, variables?: Record<string, unknown>) {
       // Simulate network latency
       await new Promise((resolve) =>
         setTimeout(resolve, Math.random() * 10 + 1),
@@ -252,7 +252,7 @@ export const mockGraphQLClient = vi
         throw new Error("Network error - fallback endpoint");
       }
 
-      return createMockEnsnodeResponse(query, variables);
+      return createMockEnsnodeResponse(query, variables || {} as Record<string, unknown>);
     },
   }));
 

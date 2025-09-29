@@ -1,12 +1,7 @@
 // D1 service for local ensnode data storage and fast queries
 import { namehash } from '../utils/ens';
 import type { EnsnodeDomain } from './ensnode';
-import type { MigrationStatus, NetworkName } from '../types';
-import type {
-  MetadataResponse,
-  MigrationStatusResponse,
-  RegistryHierarchyResponse,
-} from '../types/api';
+import type { MigrationStatus } from '../types';
 
 export interface D1DomainRecord {
   id: string; // namehash

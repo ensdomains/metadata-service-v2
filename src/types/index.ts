@@ -5,7 +5,7 @@ export type NetworkName = 'mainnet' | 'namechain';
 export type ENSVersion = 'v1' | 'v2';
 
 // Migration status types
-export type MigrationStatus = 'native' | 'ejected' | 'unmigrated' | 'shadow';
+export type MigrationStatus = 'migrated' | 'native' | 'ejected' | 'unmigrated' | 'shadow';
 
 // Registry type for routing
 export type RegistryType = 'registrar' | 'wrapper' | 'legacy';
