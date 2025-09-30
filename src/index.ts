@@ -16,6 +16,7 @@ import { MetadataService } from "./services/metadata";
 import { WebhookService } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
+import { AvatarService } from "./services/avatar";
 import { CachePresets } from "./utils/cache-headers";
 import type {
   HealthResponse,
@@ -77,7 +78,10 @@ function getServices(env: Env) {
     requireAuth: false, // TODO: Configure based on environment
   });
 
-  const imageService = new ImageGenerationService();
+  // Create avatar service with mainnet RPC for avatar resolution
+  const avatarService = new AvatarService(env.MAINNET_RPC_URL);
+
+  const imageService = new ImageGenerationService(avatarService);
 
   return { metadataService, webhookService, cacheService, imageService };
 }
@@ -362,12 +366,14 @@ app.get("/health", async (c) => {
 });
 
 
-// Image generation endpoint: /{name}/image
+// Image generation endpoint: /{network}/{registryType}/{identifier}/image
 app.get(
-  "/:name/image",
-  validateEnsNameParam,
+  "/:network/:registryType/:identifier/image",
+  validateNetwork,
+  validateRegistryType,
+  validateIdentifier,
   async (c) => {
-    const { name } = c.req.param();
+    const { network, identifier } = c.req.param();
     const { imageService, metadataService } = getServices(c.env);
 
     try {
@@ -379,7 +385,7 @@ app.get(
       const height = c.req.query('h');
 
       // Build image options
-      const options: ImageGenerationOptions = { name };
+      const options: ImageGenerationOptions = { name: identifier };
 
       if (status) options.migrationStatus = status as 'migrated' | 'native' | 'unmigrated' | 'ejected' | 'shadow';
       if (style) options.style = style as 'classic' | 'modern' | 'minimal';
@@ -404,7 +410,7 @@ app.get(
       // Try to get migration status from metadata service if not provided
       if (!status) {
         try {
-          const migrationStatus = await metadataService.getMigrationStatus(name);
+          const migrationStatus = await metadataService.getMigrationStatus(identifier);
           options.migrationStatus = migrationStatus.status;
         } catch {
           // Use default if migration status lookup fails
@@ -415,12 +421,16 @@ app.get(
       // Generate image
       const image = await imageService.generateDomainImage(options);
 
-      // Set appropriate headers
-      c.header('Content-Type', image.contentType);
-      c.header('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
-      c.header('Content-Length', image.svg.length.toString());
+      // Ensure SVG is a string
+      const svgString = typeof image.svg === 'string' ? image.svg : String(image.svg);
 
-      return c.body(image.svg);
+      // Set appropriate headers
+      c.header('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+
+      // Return SVG as text with proper content type
+      return c.text(svgString, 200, {
+        'Content-Type': image.contentType,
+      });
     } catch (error) {
       console.error("Image generation error:", error);
       const errorResponse: ErrorResponse = {

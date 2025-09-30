@@ -1,5 +1,20 @@
 -- Initial schema for ENS Metadata V2
 
+-- Domains table for D1 fallback
+CREATE TABLE IF NOT EXISTS domains (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    labelhash TEXT NOT NULL,
+    is_migrated BOOLEAN NOT NULL DEFAULT FALSE,
+    data_source TEXT NOT NULL,
+    expiry_date TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_domains_name ON domains(name);
+CREATE INDEX IF NOT EXISTS idx_domains_labelhash ON domains(labelhash);
+
 -- Migration status tracking
 CREATE TABLE IF NOT EXISTS migration_status (
     name TEXT PRIMARY KEY,
@@ -31,11 +46,12 @@ CREATE TABLE IF NOT EXISTS ensnode_sync (
     data_json TEXT NOT NULL,
     source_chain TEXT NOT NULL,
     sync_timestamp INTEGER NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    INDEX idx_ensnode_name ON ensnode_sync(name),
-    INDEX idx_ensnode_type ON ensnode_sync(data_type),
-    INDEX idx_ensnode_chain ON ensnode_sync(source_chain)
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_ensnode_name ON ensnode_sync(name);
+CREATE INDEX IF NOT EXISTS idx_ensnode_type ON ensnode_sync(data_type);
+CREATE INDEX IF NOT EXISTS idx_ensnode_chain ON ensnode_sync(source_chain);
 
 -- Analytics and monitoring
 CREATE TABLE IF NOT EXISTS request_analytics (
@@ -50,11 +66,12 @@ CREATE TABLE IF NOT EXISTS request_analytics (
     error_message TEXT,
     user_agent TEXT,
     ip_address TEXT,
-    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    INDEX idx_analytics_endpoint ON request_analytics(endpoint),
-    INDEX idx_analytics_timestamp ON request_analytics(timestamp),
-    INDEX idx_analytics_name ON request_analytics(name)
+    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_analytics_endpoint ON request_analytics(endpoint);
+CREATE INDEX IF NOT EXISTS idx_analytics_timestamp ON request_analytics(timestamp);
+CREATE INDEX IF NOT EXISTS idx_analytics_name ON request_analytics(name);
 
 -- Cache invalidation tracking
 CREATE TABLE IF NOT EXISTS cache_invalidation (
@@ -62,10 +79,11 @@ CREATE TABLE IF NOT EXISTS cache_invalidation (
     cache_key TEXT NOT NULL,
     reason TEXT NOT NULL,
     triggered_by TEXT NOT NULL CHECK (triggered_by IN ('webhook', 'manual', 'ttl_expired')),
-    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-    INDEX idx_cache_invalidation_key ON cache_invalidation(cache_key),
-    INDEX idx_cache_invalidation_timestamp ON cache_invalidation(timestamp)
+    timestamp INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_cache_invalidation_key ON cache_invalidation(cache_key);
+CREATE INDEX IF NOT EXISTS idx_cache_invalidation_timestamp ON cache_invalidation(timestamp);
 
 -- Triggers for updating timestamps
 CREATE TRIGGER IF NOT EXISTS update_migration_status_timestamp

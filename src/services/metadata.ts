@@ -29,7 +29,7 @@ export interface BlockchainNameData {
   name: string;
   tokenId: string;
   version: 'v1' | 'v2';
-  network: string;
+  network: NetworkName;
   resolver?: {
     isWrapped?: boolean;
     owner?: string;
@@ -154,7 +154,8 @@ export class MetadataService {
       }
 
       return metadata;
-    } catch {
+    } catch (error) {
+      console.error(`Failed to resolve metadata for ${identifier}:`, error);
       // Try D1 as last resort if available
       if (this.d1) {
         try {
@@ -427,7 +428,7 @@ export class MetadataService {
       version: domain.isMigrated ? 'v2' : 'v1',
       network,
       description: this.generateDescription(domain.name, domain.isMigrated || false),
-      image: this.generateImageUrl(domain.name, migrationStatus),
+      image: this.generateImageUrl(domain.name, network, migrationStatus),
       attributes: this.buildAttributes(domain),
       external_url: `https://app.ens.domains/name/${domain.name}`,
     };
@@ -445,7 +446,7 @@ export class MetadataService {
       version: nameData.version,
       network: nameData.network,
       description: this.generateDescription(nameData.name, nameData.version === 'v2'),
-      image: this.generateImageUrl(nameData.name, migrationStatus),
+      image: this.generateImageUrl(nameData.name, nameData.network, migrationStatus),
       attributes: this.buildAttributesFromBlockchain(nameData),
       external_url: `https://app.ens.domains/name/${nameData.name}`,
     };
@@ -464,7 +465,7 @@ export class MetadataService {
       version: record.is_migrated ? 'v2' : 'v1',
       network,
       description: this.generateDescription(record.name, record.is_migrated),
-      image: this.generateImageUrl(record.name, migrationStatus),
+      image: this.generateImageUrl(record.name, network, migrationStatus),
       attributes: this.buildAttributesFromD1Record(record),
       external_url: `https://app.ens.domains/name/${record.name}`,
     };
@@ -559,10 +560,21 @@ export class MetadataService {
     ];
 
     if (domain.expiryDate) {
-      attributes.push({
-        trait_type: 'Expiration Date',
-        value: new Date(domain.expiryDate).toISOString().split('T')[0],
-      });
+      try {
+        // Handle both Unix timestamp (seconds) and ISO string formats
+        const expiryMs = typeof domain.expiryDate === 'number'
+          ? domain.expiryDate * 1000
+          : domain.expiryDate;
+        const date = new Date(expiryMs);
+        if (!isNaN(date.getTime())) {
+          attributes.push({
+            trait_type: 'Expiration Date',
+            value: date.toISOString().split('T')[0],
+          });
+        }
+      } catch (error) {
+        console.warn(`Invalid expiry date for ${domain.name}:`, domain.expiryDate);
+      }
     }
 
     if (domain.isMigrated !== undefined) {
@@ -630,9 +642,12 @@ export class MetadataService {
   }
 
   // Generate image URL
-  private generateImageUrl(name: string, migrationStatus?: MigrationStatus): string {
+  private generateImageUrl(name: string, network: NetworkName, migrationStatus?: MigrationStatus): string {
     // Use current domain for image generation
     const baseUrl = 'https://metadata.ens.domains'; // TODO: Make configurable
+
+    // Default to registry for now (can be enhanced later to detect wrapper vs registry)
+    const registryType = 'registry';
 
     const params = new URLSearchParams();
     if (migrationStatus) {
@@ -640,7 +655,7 @@ export class MetadataService {
     }
 
     const queryString = params.toString();
-    return `${baseUrl}/${encodeURIComponent(name)}/image${queryString ? `?${queryString}` : ''}`;
+    return `${baseUrl}/${network}/${registryType}/${encodeURIComponent(name)}/image${queryString ? `?${queryString}` : ''}`;
   }
 
   // Get domain level

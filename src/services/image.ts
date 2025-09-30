@@ -2,6 +2,7 @@
 import { createDynamicSVGImage } from "adaptive-layout-composer";
 import type { MigrationStatus } from "../types";
 import { getCharacterSet } from "../utils/ens";
+import type { AvatarService } from "./avatar";
 
 export interface ImageGenerationOptions {
   name: string;
@@ -13,6 +14,8 @@ export interface ImageGenerationOptions {
     width: number;
     height: number;
   };
+  avatarBase64?: string;
+  avatarMimeType?: string;
 }
 
 export interface GeneratedImage {
@@ -26,8 +29,11 @@ export interface GeneratedImage {
 
 export class ImageGenerationService {
   private readonly defaultSize = { width: 518, height: 518 };
+  private avatarService?: AvatarService;
 
-  constructor() {}
+  constructor(avatarService?: AvatarService) {
+    this.avatarService = avatarService;
+  }
 
   // Generate SVG image for ENS domain
   async generateDomainImage(
@@ -40,32 +46,66 @@ export class ImageGenerationService {
       size = this.defaultSize,
     } = options;
 
+    let { avatarBase64, avatarMimeType } = options;
+
+    // Fetch avatar if not provided and avatar service is available
+    if (!avatarBase64 && this.avatarService) {
+      try {
+        const avatar = await this.avatarService.getAvatarBase64(name);
+        if (avatar) {
+          avatarBase64 = avatar.base64;
+          avatarMimeType = avatar.mimeType;
+        }
+      } catch (error) {
+        console.warn(`Failed to fetch avatar for ${name}:`, error);
+      }
+    }
+
     // Analyze domain characteristics
     const characterSet = getCharacterSet(name);
 
     // Choose colors based on migration status and characteristics
     const colors = this.getColorScheme(migrationStatus, characterSet);
 
-    // Generate background
-    const backgroundElement = this.generateBackground(background, colors, size);
-
     try {
-      const svg = await createDynamicSVGImage({
+      // Create data URI for avatar if available
+      const backgroundImageUrl = avatarBase64
+        ? `data:${avatarMimeType};base64,${avatarBase64}`
+        : null;
+
+      const result = await createDynamicSVGImage({
         text: name,
         width: size.width,
         height: size.height,
         autoFontSize: true,
         textColor: colors.text,
-        backgroundColor: colors.background,
+        backgroundColor: avatarBase64 ? 'transparent' : colors.background,
+        backgroundImageUrl, // Pass avatar as data URI
         customElements: [
-          backgroundElement,
           this.generateStatusBadge(migrationStatus, colors),
           this.generateCharacterSetIndicator(characterSet, colors),
         ].filter(Boolean),
       });
 
+      // The result might be a string, Buffer, typed array, or an object with svg property
+      let svg: string;
+      if (typeof result === 'string') {
+        svg = result;
+      } else if (Buffer.isBuffer(result)) {
+        svg = result.toString('utf-8');
+      } else if (result && typeof result === 'object' && 'length' in result && typeof result[0] === 'number') {
+        // It's an array-like object with numeric values (Uint8Array or similar)
+        // Convert to Buffer first, then to string
+        const buffer = Buffer.from(result as any);
+        svg = buffer.toString('utf-8');
+      } else if (result && typeof result === 'object' && 'svg' in result) {
+        svg = result.svg;
+      } else {
+        svg = String(result);
+      }
+
       return {
-        svg,
+        svg: typeof svg === 'string' ? svg : String(svg),
         contentType: "image/svg+xml",
         size,
       };
@@ -133,39 +173,6 @@ export class ImageGenerationService {
   }
 
   // Generate background element
-  private generateBackground(
-    type: string,
-    colors: Record<string, string>,
-    size: { width: number; height: number },
-  ) {
-    switch (type) {
-      case "gradient":
-        return `
-          <defs>
-            <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" style="stop-color:${colors.background};stop-opacity:1" />
-              <stop offset="100%" style="stop-color:${colors.accent};stop-opacity:1" />
-            </linearGradient>
-          </defs>
-          <rect width="${size.width}" height="${size.height}" fill="url(#bg-gradient)" />
-        `;
-
-      case "pattern":
-        return `
-          <defs>
-            <pattern id="bg-pattern" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse">
-              <rect width="20" height="20" fill="${colors.background}" />
-              <circle cx="10" cy="10" r="2" fill="${colors.accent}" opacity="0.3" />
-            </pattern>
-          </defs>
-          <rect width="${size.width}" height="${size.height}" fill="url(#bg-pattern)" />
-        `;
-
-      default: // solid
-        return `<rect width="${size.width}" height="${size.height}" fill="${colors.background}" />`;
-    }
-  }
-
   // Generate migration status badge
   private generateStatusBadge(status: MigrationStatus, colors: Record<string, string>) {
     const badgeText = status.toUpperCase();
