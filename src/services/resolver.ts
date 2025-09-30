@@ -67,6 +67,8 @@ export class ResolverService {
   ): Promise<NameData> {
     try {
       // Get basic registry data using enhanced methods
+      // TODO: For ENS v2 support, use blockchain.getResolverV2(network, name) instead of getResolver(network, node)
+      // This will properly route between unmigrated v1, ejected L1, and L2 names
       const [owner, resolver] = await Promise.all([
         this.blockchain.getOwner(network, node),
         this.blockchain.getResolver(network, node)
