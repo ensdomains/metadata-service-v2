@@ -1,19 +1,19 @@
 declare module 'adaptive-layout-composer' {
   export interface SVGImageOptions {
-    text: string;
-    width: number;
-    height: number;
+    width?: number;
+    height?: number;
+    text?: string;
+    textColor?: [number, number, number, number] | string;
+    backgroundColor?: [number, number, number, number] | string;
+    backgroundImageUrl?: string | null;
+    textX?: number | null;
+    textY?: number | null;
+    maxTextWidth?: number | null;
     autoFontSize?: boolean;
-    minFontSize?: number;
+    ensStyle?: boolean;
     maxFontSize?: number;
-    textColor?: string;
-    backgroundColor?: string;
-    padding?: number;
-    fontFamily?: string;
-    textAlign?: 'left' | 'center' | 'right';
-    verticalAlign?: 'top' | 'middle' | 'bottom';
     customElements?: string[];
   }
 
-  export function createDynamicSVGImage(options: SVGImageOptions): Promise<string>;
+  export function createDynamicSVGImage(options?: SVGImageOptions): Promise<Uint8Array>;
 }

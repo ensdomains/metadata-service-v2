@@ -1,6 +1,6 @@
-import { GraphQLClient } from 'graphql-request';
-import type { MigrationStatus } from '../types';
-import { namehash } from '../utils/ens';
+import { GraphQLClient } from "graphql-request";
+import type { MigrationStatus } from "../types";
+import { namehash } from "../utils/ens";
 
 // GraphQL query fragments
 const DOMAIN_FRAGMENT = `
@@ -171,18 +171,18 @@ export class EnsnodeService {
       primaryEndpoint: string;
       fallbackEndpoint?: string;
       timeout?: number;
-    }
+    },
   ) {
     this.client = new GraphQLClient(config.primaryEndpoint, {
       headers: {
-        'User-Agent': 'ENS-Metadata-V2/2.0.0',
+        "User-Agent": "ENS-Metadata-V2/2.0.0",
       },
     });
 
     if (config.fallbackEndpoint) {
       this.fallbackClient = new GraphQLClient(config.fallbackEndpoint, {
         headers: {
-          'User-Agent': 'ENS-Metadata-V2/2.0.0',
+          "User-Agent": "ENS-Metadata-V2/2.0.0",
         },
       });
     }
@@ -191,21 +191,26 @@ export class EnsnodeService {
   // Execute query with automatic fallback
   private async executeQuery<T>(
     query: string,
-    variables?: Record<string, any>
+    variables?: Record<string, any>,
   ): Promise<{ data: T; usedFallback: boolean }> {
     try {
       const data = await this.client.request<T>(query, variables);
       return { data, usedFallback: false };
     } catch (error) {
-      console.warn('Primary ensnode endpoint failed:', error);
+      console.warn("Primary ensnode endpoint failed:", error);
 
       if (this.fallbackClient) {
         try {
           const data = await this.fallbackClient.request<T>(query, variables);
           return { data, usedFallback: true };
         } catch (fallbackError) {
-          console.error('Fallback ensnode endpoint also failed:', fallbackError);
-          throw new Error(`All ensnode endpoints failed. Last error: ${fallbackError}`);
+          console.error(
+            "Fallback ensnode endpoint also failed:",
+            fallbackError,
+          );
+          throw new Error(
+            `All ensnode endpoints failed. Last error: ${fallbackError}`,
+          );
         }
       }
 
@@ -214,45 +219,50 @@ export class EnsnodeService {
   }
 
   // Get single domain data
-  async getDomain(name: string): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
+  async getDomain(
+    name: string,
+  ): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
     const nameHash = namehash(name.toLowerCase());
-    const { data, usedFallback } = await this.executeQuery<{ domain: EnsnodeDomain | null }>(
-      GET_DOMAIN_QUERY,
-      { name: nameHash }
-    );
+    const { data, usedFallback } = await this.executeQuery<{
+      domain: EnsnodeDomain | null;
+    }>(GET_DOMAIN_QUERY, { name: nameHash });
 
     return { domain: data.domain, usedFallback };
   }
 
   // Get multiple domains in batch
-  async getDomains(names: string[]): Promise<{ domains: EnsnodeDomain[]; usedFallback: boolean }> {
-    const nameHashes = names.map(name => namehash(name.toLowerCase()));
-    const { data, usedFallback } = await this.executeQuery<{ domains: EnsnodeDomain[] }>(
-      GET_DOMAINS_QUERY,
-      { ids: nameHashes }
-    );
+  async getDomains(
+    names: string[],
+  ): Promise<{ domains: EnsnodeDomain[]; usedFallback: boolean }> {
+    const nameHashes = names.map((name) => namehash(name.toLowerCase()));
+    const { data, usedFallback } = await this.executeQuery<{
+      domains: EnsnodeDomain[];
+    }>(GET_DOMAINS_QUERY, { ids: nameHashes });
 
     return { domains: data.domains, usedFallback };
   }
 
   // Get migration status
-  async getMigrationStatus(name: string): Promise<{ status: EnsnodeMigrationStatus | null; usedFallback: boolean }> {
+  async getMigrationStatus(
+    name: string,
+  ): Promise<{ status: EnsnodeMigrationStatus | null; usedFallback: boolean }> {
     const nameHash = namehash(name.toLowerCase());
-    const { data, usedFallback } = await this.executeQuery<{ domain: EnsnodeMigrationStatus | null }>(
-      GET_MIGRATION_STATUS_QUERY,
-      { id: nameHash }
-    );
+    const { data, usedFallback } = await this.executeQuery<{
+      domain: EnsnodeMigrationStatus | null;
+    }>(GET_MIGRATION_STATUS_QUERY, { id: nameHash });
 
     return { status: data.domain, usedFallback };
   }
 
   // Get domain hierarchy
-  async getHierarchy(name: string): Promise<{ hierarchy: EnsnodeHierarchyItem | null; usedFallback: boolean }> {
+  async getHierarchy(name: string): Promise<{
+    hierarchy: EnsnodeHierarchyItem | null;
+    usedFallback: boolean;
+  }> {
     const nameHash = namehash(name.toLowerCase());
-    const { data, usedFallback } = await this.executeQuery<{ domain: EnsnodeHierarchyItem | null }>(
-      GET_HIERARCHY_QUERY,
-      { id: nameHash }
-    );
+    const { data, usedFallback } = await this.executeQuery<{
+      domain: EnsnodeHierarchyItem | null;
+    }>(GET_HIERARCHY_QUERY, { id: nameHash });
 
     return { hierarchy: data.domain, usedFallback };
   }
@@ -261,12 +271,12 @@ export class EnsnodeService {
   async healthCheck(): Promise<{
     primary: boolean;
     fallback?: boolean;
-    latency: { primary?: number; fallback?: number }
+    latency: { primary?: number; fallback?: number };
   }> {
     const results = {
       primary: false,
       fallback: undefined as boolean | undefined,
-      latency: {} as { primary?: number; fallback?: number }
+      latency: {} as { primary?: number; fallback?: number },
     };
 
     // Test primary endpoint
@@ -282,7 +292,7 @@ export class EnsnodeService {
       results.primary = true;
       results.latency.primary = Date.now() - start;
     } catch (error) {
-      console.warn('Primary ensnode health check failed:', error);
+      console.warn("Primary ensnode health check failed:", error);
     }
 
     // Test fallback endpoint if available
@@ -299,7 +309,7 @@ export class EnsnodeService {
         results.fallback = true;
         results.latency.fallback = Date.now() - start;
       } catch (error) {
-        console.warn('Fallback ensnode health check failed:', error);
+        console.warn("Fallback ensnode health check failed:", error);
         results.fallback = false;
       }
     }
@@ -307,23 +317,24 @@ export class EnsnodeService {
     return results;
   }
 
-  // Convert ensnode migration status to our internal format
-  static convertMigrationStatus(ensnode: EnsnodeMigrationStatus): MigrationStatus {
-    if (!ensnode.isMigrated) {
-      return 'unmigrated';
-    }
-
-    // Basic migration status mapping
-    // TODO: Implement more sophisticated status detection based on L1/L2 state
-    return 'native';
+  // Use blockchain.isUnmigratedName() and blockchain.isEjectedName()
+  static convertMigrationStatus(
+    ensnode: EnsnodeMigrationStatus,
+  ): MigrationStatus {
+    // This method is deprecated and should not be used for ENS v2 migration status
+    // ensnode's isMigrated field refers to the 2019 migration, not current L2 migration
+    console.warn(
+      "convertMigrationStatus is deprecated - use blockchain service to check actual migration status",
+    );
+    return "unmigrated"; // Conservative default
   }
 
   // Build cache key for ensnode responses
   static getCacheKey(operation: string, params: Record<string, any>): string {
     const sortedParams = Object.keys(params)
       .sort()
-      .map(key => `${key}:${params[key]}`)
-      .join(',');
+      .map((key) => `${key}:${params[key]}`)
+      .join(",");
 
     return `ensnode:${operation}:${sortedParams}`;
   }

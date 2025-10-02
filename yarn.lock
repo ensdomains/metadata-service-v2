@@ -232,24 +232,23 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@ensdomains/ens-avatar@npm:^1.0.3":
-  version: 1.0.3
-  resolution: "@ensdomains/ens-avatar@npm:1.0.3"
+"@ensdomains/ens-avatar@portal:/Users/mdt./Projects/ENS/ens-avatar::locator=ens-metadata-v2%40workspace%3A.":
+  version: 0.0.0-use.local
+  resolution: "@ensdomains/ens-avatar@portal:/Users/mdt./Projects/ENS/ens-avatar::locator=ens-metadata-v2%40workspace%3A."
   dependencies:
     "@ethersproject/contracts": "npm:^5.7.0"
     "@ethersproject/providers": "npm:^5.7.0"
     assert: "npm:^2.1.0"
-    axios: "npm:^0.27.2"
-    axios-cache-interceptor: "npm:^0.9.3"
+    axios: "npm:^1.12.2"
+    axios-cache-interceptor: "npm:^1.8.3"
     buffer: "npm:^6.0.3"
     dompurify: "npm:^3.0.6"
     ethers: "npm:6.12.0"
     is-svg: "npm:^4.3.2"
     multiformats: "npm:^9.6.2"
     url-join: "npm:^4.0.1"
-  checksum: 10c0/100af267e436546d95194906db958b76ef1778f90d30a4375bebeb35bd3c6e086dd98fe3a38f889b5bae62d0289a5dcddffe9e14c016c8cb123bd005584597d0
   languageName: node
-  linkType: hard
+  linkType: soft
 
 "@ensdomains/ensjs@npm:^3.7.0":
   version: 3.7.0
@@ -2126,24 +2125,27 @@ __metadata:
   languageName: node
   linkType: hard
 
-"axios-cache-interceptor@npm:^0.9.3":
-  version: 0.9.3
-  resolution: "axios-cache-interceptor@npm:0.9.3"
+"axios-cache-interceptor@npm:^1.8.3":
+  version: 1.8.3
+  resolution: "axios-cache-interceptor@npm:1.8.3"
   dependencies:
-    cache-parser: "npm:^1.2.2"
-    fast-defer: "npm:^1.1.5"
-    object-code: "npm:^1.2.0"
-  checksum: 10c0/990ed50789060b19e5a8c0adfad7a233218f59a266c93c1ec14f9e075e15e41e01765ba26144becbcaa9e7c2626d13851760a611c4b0b2e018fd0cf62525ec31
+    cache-parser: "npm:1.2.5"
+    fast-defer: "npm:1.1.8"
+    object-code: "npm:1.3.3"
+  peerDependencies:
+    axios: ^1
+  checksum: 10c0/a106b3525d54bab6658e4b7a77c3b963296d0c7c24863800f9b04d671c2173545f53b9d7369bb89a03506c38310ade048cdd7025a9e00422ab2e4826ac39b85b
   languageName: node
   linkType: hard
 
-"axios@npm:^0.27.2":
-  version: 0.27.2
-  resolution: "axios@npm:0.27.2"
+"axios@npm:^1.12.2":
+  version: 1.12.2
+  resolution: "axios@npm:1.12.2"
   dependencies:
-    follow-redirects: "npm:^1.14.9"
-    form-data: "npm:^4.0.0"
-  checksum: 10c0/76d673d2a90629944b44d6f345f01e58e9174690f635115d5ffd4aca495d99bcd8f95c590d5ccb473513f5ebc1d1a6e8934580d0c57cdd0498c3a101313ef771
+    follow-redirects: "npm:^1.15.6"
+    form-data: "npm:^4.0.4"
+    proxy-from-env: "npm:^1.1.0"
+  checksum: 10c0/80b063e318cf05cd33a4d991cea0162f3573481946f9129efb7766f38fde4c061c34f41a93a9f9521f02b7c9565ccbc197c099b0186543ac84a24580017adfed
   languageName: node
   linkType: hard
 
@@ -2261,10 +2263,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"cache-parser@npm:^1.2.2":
-  version: 1.2.6
-  resolution: "cache-parser@npm:1.2.6"
-  checksum: 10c0/a4842831936984782f6f55b7a543dea52be6c1bee5e780ff49d798ac5bed3e0ad6a6e7d48cb8f796d61a7b550d8552e96ac4ea17c4702239d7e9a4e11336f8e5
+"cache-parser@npm:1.2.5":
+  version: 1.2.5
+  resolution: "cache-parser@npm:1.2.5"
+  checksum: 10c0/08ef9b465a0af87565f12448a2c250934f4c02f1247a9c519759139a0e2db5584f45ffa8401ce721f7e5a8f8ba1faf3ddc1e99c29e5e93aba01f7e1f4ee8ef9a
   languageName: node
   linkType: hard
 
@@ -3142,10 +3144,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"fast-defer@npm:^1.1.5":
-  version: 1.1.9
-  resolution: "fast-defer@npm:1.1.9"
-  checksum: 10c0/dd1109220810c4dcf362e685922164f2155e7ad42fee71e990d764c0728ae2e4082a7f81c7f3ed68e708b700c08af42f152f29bc559982690b9916e25208faca
+"fast-defer@npm:1.1.8":
+  version: 1.1.8
+  resolution: "fast-defer@npm:1.1.8"
+  checksum: 10c0/4537cf81ce3e1505adba01dfe232231271162c8365427b360e0e86c8e4bf65f08d9e6ced1bd063fbafb48376f2ff152d1cad3cb25237126492921a15ce203e88
   languageName: node
   linkType: hard
 
@@ -3253,7 +3255,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"follow-redirects@npm:^1.14.9":
+"follow-redirects@npm:^1.15.6":
   version: 1.15.11
   resolution: "follow-redirects@npm:1.15.11"
   peerDependenciesMeta:
@@ -3282,7 +3284,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"form-data@npm:^4.0.0":
+"form-data@npm:^4.0.4":
   version: 4.0.4
   resolution: "form-data@npm:4.0.4"
   dependencies:
@@ -4509,10 +4511,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"object-code@npm:^1.2.0":
-  version: 1.3.4
-  resolution: "object-code@npm:1.3.4"
-  checksum: 10c0/a9ed151555dbf1df8f989a3bfedd832f91fd69dbbd578f3c073e753a73e43e0f99f3fc3282961ad29c8ad849c80398232e153cdb67304848ee9edc4b393e1225
+"object-code@npm:1.3.3":
+  version: 1.3.3
+  resolution: "object-code@npm:1.3.3"
+  checksum: 10c0/804650eb9b7f23f612c5ba7afbfccc0406f622d701491a690d0492f6e01252096cfba85186fd39883fda6b0e04d623aa8d9485395830223af2395df32d55a75e
   languageName: node
   linkType: hard
 
@@ -4786,6 +4788,13 @@ __metadata:
     err-code: "npm:^2.0.2"
     retry: "npm:^0.12.0"
   checksum: 10c0/9c7045a1a2928094b5b9b15336dcd2a7b1c052f674550df63cc3f36cd44028e5080448175b6f6ca32b642de81150f5e7b1a98b728f15cb069f2dd60ac2616b96
+  languageName: node
+  linkType: hard
+
+"proxy-from-env@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "proxy-from-env@npm:1.1.0"
+  checksum: 10c0/fe7dd8b1bdbbbea18d1459107729c3e4a2243ca870d26d34c2c1bcd3e4425b7bcc5112362df2d93cc7fb9746f6142b5e272fd1cc5c86ddf8580175186f6ad42b
   languageName: node
   linkType: hard
 

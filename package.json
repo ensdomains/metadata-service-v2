@@ -39,5 +39,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "resolutions": {
+    "@ensdomains/ens-avatar": "portal:/Users/mdt./Projects/ENS/ens-avatar"
   }
 }

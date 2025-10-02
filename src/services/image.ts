@@ -99,7 +99,7 @@ export class ImageGenerationService {
         const buffer = Buffer.from(result as any);
         svg = buffer.toString('utf-8');
       } else if (result && typeof result === 'object' && 'svg' in result) {
-        svg = result.svg;
+        svg = String((result as any).svg);
       } else {
         svg = String(result);
       }
