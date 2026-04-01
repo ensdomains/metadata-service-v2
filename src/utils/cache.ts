@@ -80,13 +80,10 @@ export class CacheManager {
   getCacheConfig(migrationStatus: string): CacheConfig {
     switch (migrationStatus) {
       case 'native':
+      case 'migrated':
         return { ttl: 24 * 60 * 60, layer: 'kv' }; // 24 hours
-      case 'ejected':
-        return { ttl: 12 * 60 * 60, layer: 'kv' }; // 12 hours
       case 'unmigrated':
         return { ttl: 5 * 60, layer: 'memory' }; // 5 minutes
-      case 'shadow':
-        return { ttl: 60 * 60, layer: 'kv' }; // 1 hour
       default:
         return { ttl: 60 * 60, layer: 'kv' }; // 1 hour default
     }

@@ -4,10 +4,10 @@ import { BlockchainService } from '../src/services/blockchain';
 // Mock environment
 const mockEnv = {
   MAINNET_RPC_URL: 'https://ethereum.publicnode.com',
-  NAMECHAIN_RPC_URL: 'https://namechain.rpc.url',
+  SEPOLIA_RPC_URL: 'https://sepolia.rpc.url',
   MAINNET_FALLBACK_RPC_1: 'https://rpc.ankr.com/eth',
   MAINNET_FALLBACK_RPC_2: 'https://cloudflare-eth.com',
-  NAMECHAIN_FALLBACK_RPC_1: 'https://namechain-fallback.rpc.url',
+  SEPOLIA_FALLBACK_RPC_1: 'https://sepolia-fallback.rpc.url',
 };
 
 describe('BlockchainService', () => {
@@ -19,11 +19,11 @@ describe('BlockchainService', () => {
 
   it('should initialize clients for both networks', () => {
     expect(() => blockchainService.getClient('mainnet')).not.toThrow();
-    expect(() => blockchainService.getClient('namechain')).not.toThrow();
+    expect(() => blockchainService.getClient('sepolia')).not.toThrow();
   });
 
   it('should throw error for unsupported network', () => {
-    expect(() => blockchainService.getClient('sepolia' as 'mainnet' | 'namechain')).toThrow('No client configured for network: sepolia');
+    expect(() => blockchainService.getClient('goerli' as any)).toThrow('No client configured for network: goerli');
   });
 
   it('should return network configuration', () => {
@@ -38,22 +38,22 @@ describe('BlockchainService', () => {
 
   it('should get contract instances', () => {
     expect(() => blockchainService.getContract('mainnet', 'registry')).not.toThrow();
-    expect(() => blockchainService.getContract('namechain', 'nameWrapper')).not.toThrow();
+    expect(() => blockchainService.getContract('sepolia', 'nameWrapper')).not.toThrow();
   });
 
   it('should have fallback clients configured from environment', () => {
     const mainnetClients = blockchainService.getAllClients('mainnet');
-    const namechainClients = blockchainService.getAllClients('namechain');
+    const sepoliaClients = blockchainService.getAllClients('sepolia');
 
     // Should have primary + fallbacks (2 fallbacks configured in mock)
     expect(mainnetClients.length).toBe(3); // Primary + 2 fallbacks
-    expect(namechainClients.length).toBe(2); // Primary + 1 fallback
+    expect(sepoliaClients.length).toBe(2); // Primary + 1 fallback
   });
 
   it('should use default fallbacks when no env vars provided', () => {
     const envWithoutFallbacks = {
       MAINNET_RPC_URL: 'https://ethereum.publicnode.com',
-      NAMECHAIN_RPC_URL: 'https://namechain.rpc.url',
+      SEPOLIA_RPC_URL: 'https://sepolia.rpc.url',
     };
 
     const serviceWithoutFallbacks = new BlockchainService(envWithoutFallbacks);

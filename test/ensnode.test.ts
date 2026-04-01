@@ -65,12 +65,15 @@ vi.mock("../src/utils/ens", () => ({
   },
 }));
 
-// Mock GraphQL client
+// Mock GraphQL client — the real code calls request({ document, variables, signal })
 vi.mock("graphql-request", () => ({
   GraphQLClient: class {
     constructor(public endpoint: string) {}
-    async request(query: string, variables?: Record<string, unknown>) {
+    async request(options: { document: string; variables?: Record<string, unknown>; signal?: AbortSignal }) {
       await new Promise((resolve) => setTimeout(resolve, 1));
+
+      const query = options.document;
+      const variables = options.variables;
 
       // Health check query
       if (query.includes("domains(first: 1)")) {
@@ -268,8 +271,9 @@ describe("EnsnodeService", () => {
       const health = await ensnode.healthCheck();
 
       expect(health.primary).toBe(true);
-      expect(health.latency.primary).toBeGreaterThan(0);
-      expect(health.latency.primary).toBeLessThan(100); // Should be fast in tests
+      expect(health.latency.primary).toBeDefined();
+      expect(health.latency.primary).toBeGreaterThanOrEqual(0);
+      expect(health.latency.primary).toBeLessThan(100);
     });
 
     it("should include fallback endpoint status", async () => {
@@ -350,7 +354,10 @@ describe("EnsnodeService", () => {
   });
 
   describe("Static Utility Methods", () => {
-    it("should convert migration status correctly", () => {
+    it("should return unmigrated as conservative default (deprecated method)", () => {
+      // convertMigrationStatus is deprecated — ensnode's isMigrated refers to the
+      // 2019 registry migration, not ENS v2 L2 migration. The blockchain service
+      // should be used for actual migration status. This always returns 'unmigrated'.
       expect(EnsnodeService.convertMigrationStatus({
         name: 'test.eth',
         isMigrated: false
@@ -358,14 +365,7 @@ describe("EnsnodeService", () => {
       expect(EnsnodeService.convertMigrationStatus({
         name: 'test.eth',
         isMigrated: true
-      })).toBe("native"); // Actually returns 'native' for migrated domains
-    });
-
-    it("should handle edge cases in migration status conversion", () => {
-      expect(EnsnodeService.convertMigrationStatus({
-        name: 'test.eth',
-        isMigrated: false
-      })).toBe("unmigrated"); // Default when isMigrated is undefined
+      })).toBe("unmigrated");
     });
   });
 

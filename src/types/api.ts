@@ -1,31 +1,33 @@
 // API request and response types
 export interface MetadataRequest {
-  network: 'mainnet' | 'namechain';
+  network: 'mainnet' | 'sepolia';
   registryType: 'registry' | 'namewrapper';
   identifier: string;
 }
 
+export interface MetadataAttribute {
+  trait_type: string;
+  display_type: 'string' | 'number' | 'date';
+  value: string | number;
+}
+
 export interface MetadataResponse {
+  is_normalized: boolean;
   name: string;
-  tokenId: string;
-  version: 'v1' | 'v2';
-  network: string;
   description: string;
+  attributes: MetadataAttribute[];
+  url: string;
+  last_request_date: number;
+  version: number;
+  background_image: string;
   image: string;
-  attributes: Array<{
-    trait_type: string;
-    value: string | number;
-  }>;
-  background_image?: string;
-  external_url?: string;
-  animation_url?: string;
+  image_url: string;
 }
 
 export interface MigrationStatusResponse {
   name: string;
-  status: 'migrated' | 'native' | 'ejected' | 'unmigrated' | 'shadow';
+  status: 'migrated' | 'native' | 'unmigrated';
   l1Owner?: string;
-  l2Owner?: string;
   migrationDate?: string;
   expirationDate?: string;
 }
@@ -42,7 +44,7 @@ export interface RegistryHierarchyResponse {
 
 export interface BatchMetadataRequest {
   names: string[];
-  network?: 'mainnet' | 'namechain';
+  network?: 'mainnet' | 'sepolia';
 }
 
 export interface BatchMetadataResponse {
@@ -56,23 +58,6 @@ export interface BatchMetadataResponse {
   failed: number;
 }
 
-export interface CrossChainSyncResponse {
-  name: string;
-  mainnet: {
-    exists: boolean;
-    metadata?: MetadataResponse;
-    error?: string;
-  };
-  namechain: {
-    exists: boolean;
-    metadata?: MetadataResponse;
-    error?: string;
-  };
-  consistent: boolean;
-  differences: string[];
-  recommendation: 'migrated' | 'unmigrated' | 'inconsistent' | 'error';
-}
-
 export interface HealthResponse {
   service: string;
   version: string;
@@ -81,7 +66,7 @@ export interface HealthResponse {
   dependencies: {
     ensnode: 'ok' | 'degraded' | 'error' | 'unknown';
     mainnet: 'ok' | 'degraded' | 'error' | 'unknown';
-    namechain: 'ok' | 'degraded' | 'error' | 'unknown';
+    sepolia: 'ok' | 'degraded' | 'error' | 'unknown';
   };
 }
 

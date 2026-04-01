@@ -404,12 +404,15 @@ export class SyncService {
 
     // Walk up the hierarchy tree
     while (current) {
-      levels.unshift({
-        name: current.name,
-        owner: current.owner?.id || '0x0000000000000000000000000000000000000000',
-        resolver: current.resolver?.address || '0x0000000000000000000000000000000000000000',
-        level,
-      });
+      // The ENS subgraph root node (above TLDs) has no name — skip it
+      if (current.name) {
+        levels.unshift({
+          name: current.name,
+          owner: current.owner?.id || '0x0000000000000000000000000000000000000000',
+          resolver: current.resolver?.address || '0x0000000000000000000000000000000000000000',
+          level,
+        });
+      }
 
       current = current.parent;
       level--;

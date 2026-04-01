@@ -2,6 +2,7 @@
 import type { Context } from 'hono';
 import { CacheService, CacheKeys } from './cache';
 import { validateEnsName } from '../utils/ens';
+import type { StorageManager } from '../utils/storage';
 
 // Webhook payload types
 export interface EnsnodeWebhookEvent {
@@ -14,7 +15,7 @@ export interface EnsnodeWebhookEvent {
     expiry?: string;
   };
   timestamp: string;
-  network: 'mainnet' | 'namechain';
+  network: 'mainnet' | 'sepolia';
 }
 
 export interface WebhookValidationConfig {
@@ -24,10 +25,21 @@ export interface WebhookValidationConfig {
 }
 
 export class WebhookService {
+  private svgCacheKv?: KVNamespace;
+  private metadataCacheKv?: KVNamespace;
+  private storageManager?: StorageManager;
+
   constructor(
     private cache: CacheService,
-    private config: WebhookValidationConfig = { requireAuth: false }
-  ) {}
+    private config: WebhookValidationConfig = { requireAuth: false },
+    svgCacheKv?: KVNamespace,
+    storageManager?: StorageManager,
+    metadataCacheKv?: KVNamespace,
+  ) {
+    this.svgCacheKv = svgCacheKv;
+    this.storageManager = storageManager;
+    this.metadataCacheKv = metadataCacheKv;
+  }
 
   // Handle incoming webhook
   async handleWebhook(c: Context): Promise<Response> {
@@ -149,7 +161,7 @@ export class WebhookService {
     }
 
     // Validate network
-    if (!['mainnet', 'namechain'].includes(payload.network)) {
+    if (!['mainnet', 'sepolia'].includes(payload.network)) {
       return { valid: false, error: 'Invalid network' };
     }
 
@@ -197,11 +209,60 @@ export class WebhookService {
           break;
       }
 
+      // Invalidate endpoint-level metadata cache (meta:*:*:name keys)
+      await this.invalidateMetadataCache(domainName);
+
+      // Invalidate image caches (KV SVG + R2 avatar/SVG)
+      await this.invalidateImageCaches(domainName);
+
       console.log(`Cache invalidation completed for ${domainName}`);
 
     } catch (error) {
       console.error(`Failed to process webhook for ${domainName}:`, error);
       throw error;
+    }
+  }
+
+  // Invalidate endpoint-level metadata cache entries for a domain
+  private async invalidateMetadataCache(domainName: string): Promise<void> {
+    if (!this.metadataCacheKv) return;
+    try {
+      // MetadataCacheService writes keys as meta:{network}:{registryType}:{name}
+      const list = await this.metadataCacheKv.list({ prefix: 'meta:' });
+      const matching = list.keys.filter(k => k.name.endsWith(`:${domainName}`));
+      if (matching.length > 0) {
+        await Promise.all(matching.map(k => this.metadataCacheKv!.delete(k.name)));
+      }
+    } catch (err) {
+      console.warn(`Failed to invalidate metadata cache for ${domainName}:`, err);
+    }
+  }
+
+  // Invalidate image caches (SVG KV entries + R2 avatar/SVG assets)
+  private async invalidateImageCaches(domainName: string): Promise<void> {
+    // KV: list and delete all SVG cache entries for this domain
+    if (this.svgCacheKv) {
+      try {
+        const prefix = `svg:${domainName}:`;
+        const list = await this.svgCacheKv.list({ prefix });
+        if (list.keys.length > 0) {
+          await Promise.all(list.keys.map((k) => this.svgCacheKv!.delete(k.name)));
+        }
+      } catch (err) {
+        console.warn(`Failed to invalidate SVG KV cache for ${domainName}:`, err);
+      }
+    }
+
+    // R2: delete avatar and SVG assets for this domain
+    if (this.storageManager) {
+      try {
+        await Promise.all([
+          this.storageManager.delete(`avatars/${domainName}`),
+          this.storageManager.deleteByPrefix(`svg/svg:${domainName}:`),
+        ]);
+      } catch (err) {
+        console.warn(`Failed to invalidate R2 assets for ${domainName}:`, err);
+      }
     }
   }
 

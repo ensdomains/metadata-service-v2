@@ -25,8 +25,6 @@ export const CacheTTL = {
   // Health check cache
   health: 120, // 2 minutes
 
-  // Cross-chain comparison (changes frequently)
-  crossChain: 60, // 1 minute
 };
 
 // Generate appropriate cache headers for Cloudflare
@@ -111,14 +109,6 @@ export const CachePresets = {
       staleWhileRevalidate: 60,
     }),
 
-  // Cross-chain sync (changes frequently)
-  crossChain: (name: string): Record<string, string> =>
-    getCacheHeaders({
-      ttl: CacheTTL.crossChain,
-      tags: ['crosschain', `domain:${name}`],
-      priority: 'normal',
-    }),
-
   // Health check
   health: (): Record<string, string> =>
     getCacheHeaders({
@@ -150,7 +140,7 @@ export const CacheInvalidation = {
   forDomain: (name: string) => [`domain:${name}`],
 
   // Invalidate by type
-  forType: (type: 'migrated' | 'metadata' | 'migration' | 'hierarchy' | 'crosschain') => [type],
+  forType: (type: 'migrated' | 'metadata' | 'migration' | 'hierarchy') => [type],
 
   // Invalidate all metadata
   allMetadata: () => ['metadata'],

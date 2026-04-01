@@ -8,6 +8,7 @@ import { D1Service } from "./d1";
 import { SyncService, DEFAULT_SYNC_CONFIG } from "./sync";
 import type {
   MetadataResponse,
+  MetadataAttribute,
   MigrationStatusResponse,
   RegistryHierarchyResponse,
   BatchMetadataResponse,
@@ -19,16 +20,17 @@ import {
   namehash,
   getCharacterSet,
   getSegmentLength,
+  isNormalized,
 } from "../utils/ens";
 
 export interface BlockchainEnvironment {
   MAINNET_RPC_URL: string;
-  NAMECHAIN_RPC_URL: string;
+  SEPOLIA_RPC_URL: string;
   MAINNET_FALLBACK_RPC_1?: string;
   MAINNET_FALLBACK_RPC_2?: string;
   MAINNET_FALLBACK_RPC_3?: string;
-  NAMECHAIN_FALLBACK_RPC_1?: string;
-  NAMECHAIN_FALLBACK_RPC_2?: string;
+  SEPOLIA_FALLBACK_RPC_1?: string;
+  SEPOLIA_FALLBACK_RPC_2?: string;
 }
 
 export interface BlockchainNameData {
@@ -134,6 +136,7 @@ export class MetadataService {
     network: NetworkName,
     registryType: "registry" | "namewrapper",
     identifier: string,
+    baseUrl?: string,
   ): Promise<MetadataResponse> {
     // Validate identifier as ENS name
     if (!validateEnsName(identifier)) {
@@ -154,6 +157,7 @@ export class MetadataService {
         metadata = await this.buildMetadataFromEnsnode(
           domain as EnsnodeDomain,
           network,
+          baseUrl,
         );
 
         // Store in D1 if enabled
@@ -168,6 +172,7 @@ export class MetadataService {
         // Built from blockchain data
         metadata = await this.buildMetadataFromBlockchain(
           domain as unknown as BlockchainNameData,
+          baseUrl,
         );
       }
 
@@ -191,6 +196,7 @@ export class MetadataService {
             const metadata = await this.buildMetadataFromD1Record(
               d1Record as D1RecordData,
               network,
+              baseUrl,
             );
             return metadata;
           }
@@ -256,8 +262,8 @@ export class MetadataService {
             const fallbackResponse: MigrationStatusResponse = {
               name: d1Record.name,
               status: d1Record.status,
-              l1Owner: d1Record.l1_owner,
-              expirationDate: d1Record.expiration_date,
+              l1Owner: d1Record.l1_owner ?? undefined,
+              expirationDate: d1Record.expiration_date ?? undefined,
             };
 
             return fallbackResponse;
@@ -378,6 +384,7 @@ export class MetadataService {
   async getBatchMetadata(
     names: string[],
     network?: NetworkName,
+    baseUrl?: string,
   ): Promise<BatchMetadataResponse> {
     // Validate all names
     const validNames = names.filter((name) => validateEnsName(name));
@@ -403,16 +410,18 @@ export class MetadataService {
           if (domain) {
             const metadata = await this.buildMetadataFromEnsnode(
               domain,
-              network || "namechain",
+              network || "mainnet",
+              baseUrl,
             );
             return { name, metadata };
           } else {
             // Try individual fallback for missing domains
             try {
               const metadata = await this.getMetadata(
-                network || "namechain",
+                network || "mainnet",
                 "registry",
                 name,
+                baseUrl,
               );
               return { name, metadata };
             } catch {
@@ -453,9 +462,10 @@ export class MetadataService {
         validNames.map(async (name) => {
           try {
             const metadata = await this.getMetadata(
-              network || "namechain",
+              network || "mainnet",
               "registry",
               name,
+              baseUrl,
             );
             return { name, metadata };
           } catch {
@@ -485,12 +495,11 @@ export class MetadataService {
   private async buildMetadataFromEnsnode(
     domain: EnsnodeDomain,
     network: NetworkName,
+    baseUrl?: string,
   ): Promise<MetadataResponse> {
     // NOTE: ensnode's isMigrated refers to 2019 permanent registrar migration, NOT ENS v2
     // We must verify on-chain ENS v2 migration status until it's being provided
     const isUnmigrated = await this.blockchain.isUnmigratedName(domain.name);
-    const isEjected =
-      !isUnmigrated && (await this.blockchain.isEjectedName(domain.name));
 
     let v2MigrationStatus: MigrationStatus;
     let isMigrated: boolean;
@@ -498,48 +507,47 @@ export class MetadataService {
     if (isUnmigrated) {
       v2MigrationStatus = "unmigrated";
       isMigrated = false;
-    } else if (isEjected) {
-      v2MigrationStatus = "ejected";
-      isMigrated = false;
     } else {
       v2MigrationStatus = "native";
       isMigrated = true;
     }
 
+    const origin = baseUrl || this.getDefaultBaseUrl();
+    const imageUrl = `${origin}/${network}/registry/${encodeURIComponent(domain.name)}/image`;
+
     return {
+      is_normalized: isNormalized(domain.name),
       name: domain.name,
-      tokenId: domain.labelhash,
-      version: isMigrated ? "v2" : "v1",
-      network,
-      description: this.generateDescription(domain.name, isMigrated),
-      image: this.generateImageUrl(domain.name, network, v2MigrationStatus),
+      description: this.generateDescription(domain.name),
       attributes: this.buildAttributes(domain, v2MigrationStatus),
-      external_url: `https://app.ens.domains/name/${domain.name}`,
+      url: `https://app.ens.domains/name/${domain.name}`,
+      last_request_date: Date.now(),
+      version: 0,
+      background_image: `${origin}/${network}/avatar/${domain.name}`,
+      image: imageUrl,
+      image_url: imageUrl,
     };
   }
 
   // Build metadata response from blockchain data
   private async buildMetadataFromBlockchain(
     nameData: BlockchainNameData,
+    baseUrl?: string,
   ): Promise<MetadataResponse> {
-    const migrationStatus = nameData.version === "v2" ? "native" : "unmigrated";
+    const origin = baseUrl || this.getDefaultBaseUrl();
+    const imageUrl = `${origin}/${nameData.network}/registry/${encodeURIComponent(nameData.name)}/image`;
 
     return {
+      is_normalized: isNormalized(nameData.name),
       name: nameData.name,
-      tokenId: nameData.tokenId,
-      version: nameData.version,
-      network: nameData.network,
-      description: this.generateDescription(
-        nameData.name,
-        nameData.version === "v2",
-      ),
-      image: this.generateImageUrl(
-        nameData.name,
-        nameData.network,
-        migrationStatus,
-      ),
+      description: this.generateDescription(nameData.name),
       attributes: this.buildAttributesFromBlockchain(nameData),
-      external_url: `https://app.ens.domains/name/${nameData.name}`,
+      url: `https://app.ens.domains/name/${nameData.name}`,
+      last_request_date: Date.now(),
+      version: 0,
+      background_image: `${origin}/${nameData.network}/avatar/${nameData.name}`,
+      image: imageUrl,
+      image_url: imageUrl,
     };
   }
 
@@ -547,18 +555,22 @@ export class MetadataService {
   private async buildMetadataFromD1Record(
     record: D1RecordData,
     network: NetworkName,
+    baseUrl?: string,
   ): Promise<MetadataResponse> {
-    const migrationStatus = record.is_migrated ? "native" : "unmigrated";
+    const origin = baseUrl || this.getDefaultBaseUrl();
+    const imageUrl = `${origin}/${network}/registry/${encodeURIComponent(record.name)}/image`;
 
     return {
+      is_normalized: isNormalized(record.name),
       name: record.name,
-      tokenId: record.labelhash,
-      version: record.is_migrated ? "v2" : "v1",
-      network,
-      description: this.generateDescription(record.name, record.is_migrated),
-      image: this.generateImageUrl(record.name, network, migrationStatus),
+      description: this.generateDescription(record.name),
       attributes: this.buildAttributesFromD1Record(record),
-      external_url: `https://app.ens.domains/name/${record.name}`,
+      url: `https://app.ens.domains/name/${record.name}`,
+      last_request_date: Date.now(),
+      version: 0,
+      background_image: `${origin}/${network}/avatar/${record.name}`,
+      image: imageUrl,
+      image_url: imageUrl,
     };
   }
 
@@ -648,132 +660,110 @@ export class MetadataService {
     return { name, hierarchy };
   }
 
-  // Build attributes array
+  // Build attributes array (v1-compatible format with display_type and epoch ms dates)
   private buildAttributes(
     domain: EnsnodeDomain,
     v2MigrationStatus: MigrationStatus,
-  ) {
-    const attributes = [
-      { trait_type: "Character Set", value: getCharacterSet(domain.name) },
-      { trait_type: "Length", value: getSegmentLength(domain.name) },
-      { trait_type: "Registration Date", value: domain.createdAt || "Unknown" },
-    ];
+  ): MetadataAttribute[] {
+    const label = getLabel(domain.name);
+    const attributes: MetadataAttribute[] = [];
 
-    if (domain.expiryDate) {
-      try {
-        // Handle both Unix timestamp (seconds) and ISO string formats
-        const expiryMs =
-          typeof domain.expiryDate === "number"
-            ? domain.expiryDate * 1000
-            : domain.expiryDate;
-        const date = new Date(expiryMs);
-        if (!isNaN(date.getTime())) {
-          attributes.push({
-            trait_type: "Expiration Date",
-            value: date.toISOString().split("T")[0],
-          });
-        }
-      } catch (error) {
-        console.warn(
-          `Invalid expiry date for ${domain.name}:`,
-          domain.expiryDate,
-        );
+    // Created Date (epoch ms)
+    if (domain.createdAt) {
+      const createdMs = this.toEpochMs(domain.createdAt);
+      if (createdMs) {
+        attributes.push({ trait_type: "Created Date", display_type: "date", value: createdMs });
       }
     }
 
-    // Use actual ENS v2 migration status, not ensnode's 2019 migration flag
-    const statusLabels: Record<MigrationStatus, string> = {
-      unmigrated: "Unmigrated",
-      native: "Migrated",
-      migrated: "Migrated",
-      ejected: "Ejected",
-      shadow: "Shadow",
-    };
+    // Registration Date (same as created for ensnode data)
+    if (domain.createdAt) {
+      const registrationMs = this.toEpochMs(domain.createdAt);
+      if (registrationMs) {
+        attributes.push({ trait_type: "Registration Date", display_type: "date", value: registrationMs });
+      }
+    }
 
-    attributes.push({
-      trait_type: "Migration Status",
-      value: statusLabels[v2MigrationStatus],
-    });
+    // Expiration Date (epoch ms)
+    if (domain.expiryDate) {
+      const expiryMs = this.toEpochMs(domain.expiryDate);
+      if (expiryMs) {
+        attributes.push({ trait_type: "Expiration Date", display_type: "date", value: expiryMs });
+      }
+    }
+
+    // Length (string code unit length of label)
+    attributes.push({ trait_type: "Length", display_type: "number", value: label.length });
+
+    // Segment Length (grapheme cluster count)
+    attributes.push({ trait_type: "Segment Length", display_type: "number", value: getSegmentLength(domain.name) });
+
+    // Character Set
+    attributes.push({ trait_type: "Character Set", display_type: "string", value: getCharacterSet(domain.name) });
 
     return attributes;
   }
 
-  // Build attributes from blockchain data
-  private buildAttributesFromBlockchain(nameData: BlockchainNameData) {
-    return [
-      { trait_type: "Character Set", value: getCharacterSet(nameData.name) },
-      { trait_type: "Length", value: getSegmentLength(nameData.name) },
-      { trait_type: "Network", value: nameData.network },
-      {
-        trait_type: "Registry Type",
-        value: nameData.resolver?.isWrapped ? "NameWrapper" : "Registry",
-      },
+  // Build attributes from blockchain data (v1-compatible)
+  private buildAttributesFromBlockchain(nameData: BlockchainNameData): MetadataAttribute[] {
+    const label = getLabel(nameData.name);
+    const attributes: MetadataAttribute[] = [
+      { trait_type: "Length", display_type: "number", value: label.length },
+      { trait_type: "Segment Length", display_type: "number", value: getSegmentLength(nameData.name) },
+      { trait_type: "Character Set", display_type: "string", value: getCharacterSet(nameData.name) },
     ];
+
+    return attributes;
   }
 
-  // Build attributes from D1 record
-  private buildAttributesFromD1Record(record: D1RecordData) {
-    const attributes = [
-      { trait_type: "Character Set", value: getCharacterSet(record.name) },
-      { trait_type: "Length", value: getSegmentLength(record.name) },
-      { trait_type: "Data Source", value: record.data_source },
-    ];
+  // Build attributes from D1 record (v1-compatible)
+  private buildAttributesFromD1Record(record: D1RecordData): MetadataAttribute[] {
+    const label = getLabel(record.name);
+    const attributes: MetadataAttribute[] = [];
 
     if (record.created_at) {
-      attributes.push({
-        trait_type: "Registration Date",
-        value: new Date(record.created_at).toISOString().split("T")[0],
-      });
+      const createdMs = new Date(record.created_at).getTime();
+      if (!isNaN(createdMs)) {
+        attributes.push({ trait_type: "Created Date", display_type: "date", value: createdMs });
+        attributes.push({ trait_type: "Registration Date", display_type: "date", value: createdMs });
+      }
     }
 
-    if (record.expiry_date) {
-      attributes.push({
-        trait_type: "Expiration Date",
-        value: new Date(record.expiry_date).toISOString().split("T")[0],
-      });
+    if (record.expiry_date || record.expiryDate) {
+      const expiryStr = record.expiry_date || record.expiryDate;
+      const expiryMs = this.toEpochMs(expiryStr!);
+      if (expiryMs) {
+        attributes.push({ trait_type: "Expiration Date", display_type: "date", value: expiryMs });
+      }
     }
 
-    attributes.push({
-      trait_type: "Migration Status",
-      value: record.is_migrated ? "Migrated" : "Unmigrated",
-    });
+    attributes.push({ trait_type: "Length", display_type: "number", value: label.length });
+    attributes.push({ trait_type: "Segment Length", display_type: "number", value: getSegmentLength(record.name) });
+    attributes.push({ trait_type: "Character Set", display_type: "string", value: getCharacterSet(record.name) });
 
     return attributes;
   }
 
-  // Generate description text
-  private generateDescription(name: string, isMigrated: boolean): string {
-    const label = getLabel(name);
-    const tld = name.substring(name.lastIndexOf(".") + 1);
-
-    let description = `${label}.${tld}, an ENS name.`;
-
-    if (isMigrated) {
-      description += " This name has been migrated to ENS v2.";
-    }
-
-    return description;
+  // Generate description text (v1-compatible)
+  private generateDescription(name: string): string {
+    return `${name}, an ENS name.`;
   }
 
-  // Generate image URL
-  private generateImageUrl(
-    name: string,
-    network: NetworkName,
-    migrationStatus?: MigrationStatus,
-  ): string {
-    // Use current domain for image generation
-    const baseUrl = "https://metadata.ens.domains"; // TODO: Make configurable
+  // Fallback base URL when request origin is not available
+  private getDefaultBaseUrl(): string {
+    return "https://metadata.ens.domains";
+  }
 
-    // Default to registry for now (can be enhanced later to detect wrapper vs registry)
-    const registryType = "registry";
-
-    const params = new URLSearchParams();
-    if (migrationStatus) {
-      params.set("status", migrationStatus);
+  // Convert a timestamp string (Unix seconds or ISO) to epoch milliseconds
+  private toEpochMs(value: string): number | null {
+    // Try as Unix timestamp in seconds (all-digit string)
+    if (/^\d+$/.test(value)) {
+      const seconds = parseInt(value, 10);
+      return seconds * 1000;
     }
-
-    const queryString = params.toString();
-    return `${baseUrl}/${network}/${registryType}/${encodeURIComponent(name)}/image${queryString ? `?${queryString}` : ""}`;
+    // Try as ISO string or other Date-parseable format
+    const ms = new Date(value).getTime();
+    return isNaN(ms) ? null : ms;
   }
 
   // Get domain level
@@ -789,17 +779,11 @@ export class MetadataService {
       const nameData = await this.resolver.resolveName(
         name,
         namehash(name),
-        "namechain",
+        "mainnet",
       );
 
-      // Determine migration status based on where we found the data
-      let status: MigrationStatus = "unmigrated";
-
-      if (nameData.network === "namechain") {
-        status = nameData.migrationStatus || "native";
-      } else if (nameData.network === "mainnet") {
-        status = "unmigrated";
-      }
+      // Determine migration status based on v1 vs v2 registry check
+      const status: MigrationStatus = nameData.migrationStatus || "unmigrated";
 
       return {
         name,
@@ -838,7 +822,7 @@ export class MetadataService {
           const nameData = await this.resolver.resolveName(
             domainName,
             namehash(domainName),
-            "namechain",
+            "mainnet",
           );
 
           hierarchy.push({
@@ -883,7 +867,7 @@ export class MetadataService {
           .healthCheck()
           .catch(() => ({
             mainnet: { primary: false },
-            namechain: { primary: false },
+            sepolia: { primary: false },
           })),
         Promise.resolve(this.fallback.getStatus()),
         this.d1
@@ -899,7 +883,7 @@ export class MetadataService {
           : "error",
       blockchain: {
         mainnet: blockchainHealth.mainnet.primary ? "ok" : "error",
-        namechain: blockchainHealth.namechain.primary ? "ok" : "error",
+        sepolia: blockchainHealth.sepolia.primary ? "ok" : "error",
       },
       fallback: {
         ensnodeHealthy: fallbackStatus.ensnode.healthy,
@@ -998,136 +982,4 @@ export class MetadataService {
     return this.sync !== undefined;
   }
 
-  // Cross-chain sync - compare ensnode data from both chains
-  // Primarily used for monitoring migration contract behavior and debugging edge cases
-  // Under normal ENS v2 operation, inconsistencies should be extremely rare
-  async getCrossChainSync(name: string): Promise<{
-    name: string;
-    mainnet: {
-      exists: boolean;
-      metadata?: MetadataResponse;
-      error?: string;
-    };
-    namechain: {
-      exists: boolean;
-      metadata?: MetadataResponse;
-      error?: string;
-    };
-    consistent: boolean;
-    differences: string[];
-    recommendation: "migrated" | "unmigrated" | "inconsistent" | "error";
-  }> {
-    if (!validateEnsName(name)) {
-      throw new Error("Invalid ENS name format");
-    }
-
-    const results = {
-      name,
-      mainnet: { exists: false } as any,
-      namechain: { exists: false } as any,
-      consistent: false,
-      differences: [] as string[],
-      recommendation: "error" as any,
-    };
-
-    // Try to resolve from both networks in parallel
-    const [mainnetResult, namechainResult] = await Promise.allSettled([
-      this.getMetadata("mainnet", "registry", name).catch((error) => ({
-        error: error.message,
-      })),
-      this.getMetadata("namechain", "registry", name).catch((error) => ({
-        error: error.message,
-      })),
-    ]);
-
-    // Process mainnet result
-    if (mainnetResult.status === "fulfilled") {
-      if ("error" in mainnetResult.value) {
-        results.mainnet.error = mainnetResult.value.error;
-      } else {
-        results.mainnet.exists = true;
-        results.mainnet.metadata = mainnetResult.value;
-      }
-    } else {
-      results.mainnet.error =
-        mainnetResult.reason?.message || "Failed to resolve from mainnet";
-    }
-
-    // Process namechain result
-    if (namechainResult.status === "fulfilled") {
-      if ("error" in namechainResult.value) {
-        results.namechain.error = namechainResult.value.error;
-      } else {
-        results.namechain.exists = true;
-        results.namechain.metadata = namechainResult.value;
-      }
-    } else {
-      results.namechain.error =
-        namechainResult.reason?.message || "Failed to resolve from namechain";
-    }
-
-    // Determine consistency and differences
-    if (results.mainnet.exists && results.namechain.exists) {
-      const mainnetMeta = results.mainnet.metadata!;
-      const namechainMeta = results.namechain.metadata!;
-
-      // Compare key fields
-      const differences: string[] = [];
-
-      if (mainnetMeta.version !== namechainMeta.version) {
-        differences.push(
-          `version: mainnet=${mainnetMeta.version}, namechain=${namechainMeta.version}`,
-        );
-      }
-
-      if (mainnetMeta.tokenId !== namechainMeta.tokenId) {
-        differences.push(
-          `tokenId: mainnet=${mainnetMeta.tokenId}, namechain=${namechainMeta.tokenId}`,
-        );
-      }
-
-      // Compare attributes
-      const mainnetMigrated = mainnetMeta.attributes?.find(
-        (a: any) => a.trait_type === "Migration Status",
-      )?.value;
-      const namechainMigrated = namechainMeta.attributes?.find(
-        (a: any) => a.trait_type === "Migration Status",
-      )?.value;
-
-      if (mainnetMigrated !== namechainMigrated) {
-        differences.push(
-          `migration status: mainnet=${mainnetMigrated}, namechain=${namechainMigrated}`,
-        );
-      }
-
-      results.differences = differences;
-      results.consistent = differences.length === 0;
-
-      // Determine recommendation
-      if (results.consistent) {
-        results.recommendation =
-          namechainMeta.version === "v2" ? "migrated" : "unmigrated";
-      } else {
-        results.recommendation = "inconsistent";
-      }
-    } else if (results.namechain.exists && !results.mainnet.exists) {
-      // Only exists on namechain - fully migrated
-      results.recommendation = "migrated";
-      results.differences.push(
-        "domain only exists on namechain (fully migrated)",
-      );
-    } else if (results.mainnet.exists && !results.namechain.exists) {
-      // Only exists on mainnet - unmigrated
-      results.recommendation = "unmigrated";
-      results.differences.push("domain only exists on mainnet (not migrated)");
-    } else {
-      // Doesn't exist on either chain or both failed
-      results.recommendation = "error";
-      if (!results.mainnet.exists && !results.namechain.exists) {
-        results.differences.push("domain not found on either chain");
-      }
-    }
-
-    return results;
-  }
 }

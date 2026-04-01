@@ -35,6 +35,31 @@ export class StorageManager {
     });
   }
 
+  // Keyed SVG operations (for tiered image cache)
+  async getSvgByKey(cacheKey: string): Promise<string | null> {
+    const key = `svg/${cacheKey}.svg`;
+    const object = await this.r2Bucket.get(key);
+    return object ? await object.text() : null;
+  }
+
+  async setSvgByKey(cacheKey: string, svg: string, maxAge: number = 86400): Promise<void> {
+    const key = `svg/${cacheKey}.svg`;
+    await this.r2Bucket.put(key, svg, {
+      httpMetadata: {
+        contentType: 'image/svg+xml',
+        cacheControl: `public, max-age=${maxAge}`,
+      },
+    });
+  }
+
+  // Delete all R2 objects matching a prefix
+  async deleteByPrefix(prefix: string): Promise<number> {
+    const keys = await this.list(prefix, 1000);
+    if (keys.length === 0) return 0;
+    await Promise.all(keys.map((key) => this.r2Bucket.delete(key)));
+    return keys.length;
+  }
+
   // Static assets operations
   async getStaticAsset(path: string): Promise<ArrayBuffer | null> {
     const key = `static/${path}`;

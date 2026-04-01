@@ -19,9 +19,7 @@ CREATE TABLE domains (
   -- Metadata fields
   data_source TEXT NOT NULL DEFAULT 'ensnode', -- 'ensnode' | 'blockchain'
   last_updated INTEGER NOT NULL, -- Unix timestamp
-  sync_version INTEGER NOT NULL DEFAULT 1,
-
-  FOREIGN KEY (parent_id) REFERENCES domains(id)
+  sync_version INTEGER NOT NULL DEFAULT 1
 );
 
 -- Migration status tracking
@@ -52,10 +50,7 @@ CREATE TABLE registry_hierarchy (
 
   -- Sync metadata
   last_updated INTEGER NOT NULL,
-  sync_version INTEGER NOT NULL DEFAULT 1,
-
-  FOREIGN KEY (parent_id) REFERENCES registry_hierarchy(id),
-  FOREIGN KEY (root_domain_id) REFERENCES domains(id)
+  sync_version INTEGER NOT NULL DEFAULT 1
 );
 
 -- Sync status tracking for ensnode operations

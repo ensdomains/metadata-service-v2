@@ -28,32 +28,17 @@ export interface NameData {
 export class ResolverService {
   constructor(private blockchain: BlockchainService) {}
 
-  // Resolve name data from either L1 or L2
-  async resolveName(name: string, tokenId: string, preferredNetwork: NetworkName = 'namechain'): Promise<NameData> {
+  // Resolve name data from the requested network
+  async resolveName(name: string, tokenId: string, preferredNetwork: NetworkName = 'mainnet'): Promise<NameData> {
     const version = getTokenIdVersion(tokenId, name);
     const node = namehash(name);
 
-    // Try preferred network first (usually L2/namechain for better performance)
     try {
       const data = await this.resolveFromNetwork(name, tokenId, node, preferredNetwork, version);
-      if (data.resolver.owner && !isEmptyAddress(data.resolver.owner)) {
-        return data;
-      }
-    } catch (error) {
-      console.warn(`Failed to resolve from ${preferredNetwork}:`, error);
-    }
-
-    // Fallback to other network
-    const fallbackNetwork: NetworkName = preferredNetwork === 'namechain' ? 'mainnet' : 'namechain';
-    
-    try {
-      const data = await this.resolveFromNetwork(name, tokenId, node, fallbackNetwork, version);
-      // Mark as using fallback
-      data.migrationStatus = this.determineMigrationStatus(preferredNetwork, fallbackNetwork, data.resolver.owner);
       return data;
     } catch (error) {
-      console.error(`Failed to resolve from both networks:`, error);
-      throw new Error(`Unable to resolve ${name} from any network`);
+      console.error(`Failed to resolve ${name} from ${preferredNetwork}:`, error);
+      throw new Error(`Unable to resolve ${name} from ${preferredNetwork}`);
     }
   }
 
@@ -68,7 +53,7 @@ export class ResolverService {
     try {
       // Get basic registry data using enhanced methods
       // TODO: For ENS v2 support, use blockchain.getResolverV2(network, name) instead of getResolver(network, node)
-      // This will properly route between unmigrated v1, ejected L1, and L2 names
+      // This will properly route between unmigrated v1 and migrated v2 names
       const [owner, resolver] = await Promise.all([
         this.blockchain.getOwner(network, node),
         this.blockchain.getResolver(network, node)
@@ -149,8 +134,8 @@ export class ResolverService {
         }
       }
 
-      // Determine migration status
-      const migrationStatus = this.determineMigrationStatus('namechain', network, owner);
+      // Determine migration status based on v1 vs v2 registry check
+      const migrationStatus = this.determineMigrationStatus(network, owner);
 
       // Calculate registration and expiration dates
       let registrationDate: Date | undefined;
@@ -191,7 +176,7 @@ export class ResolverService {
   // Resolve multiple names in parallel
   async resolveMultiple(
     names: Array<{ name: string; tokenId: string }>,
-    preferredNetwork: NetworkName = 'namechain'
+    preferredNetwork: NetworkName = 'mainnet'
   ): Promise<NameData[]> {
     const batchSize = 10; // Process in batches to avoid overwhelming RPC
     const results: NameData[] = [];
@@ -236,30 +221,18 @@ export class ResolverService {
     }
   }
 
-  // Determine migration status based on where name was found
+  // Determine migration status based on v1 vs v2 registry check on the target network
   private determineMigrationStatus(
-    preferredNetwork: NetworkName,
-    actualNetwork: NetworkName,
+    network: NetworkName,
     owner: string
   ): MigrationStatus {
     if (isEmptyAddress(owner)) {
       return 'unmigrated';
     }
 
-    if (preferredNetwork === 'namechain') {
-      if (actualNetwork === 'namechain') {
-        return 'native';
-      } else {
-        return 'ejected';
-      }
-    } else {
-      // Legacy case - most names start on mainnet
-      if (actualNetwork === 'mainnet') {
-        return 'unmigrated';
-      } else {
-        return 'native';
-      }
-    }
+    // TODO: Check v2 registry to determine if name is native v2 or migrated
+    // For now, names with owners are considered unmigrated (v1) by default
+    return 'unmigrated';
   }
 
   // Get registration history for analytics
@@ -271,23 +244,5 @@ export class ResolverService {
     // This would involve scanning historical events
     // For now, return empty object as placeholder
     return {};
-  }
-
-  // Validate name resolution across networks
-  async validateCrossChain(name: string, tokenId: string): Promise<{
-    mainnet: boolean;
-    namechain: boolean;
-    consistent: boolean;
-  }> {
-    const [mainnetExists, namechainExists] = await Promise.all([
-      this.nameExists(name, 'mainnet'),
-      this.nameExists(name, 'namechain'),
-    ]);
-
-    return {
-      mainnet: mainnetExists,
-      namechain: namechainExists,
-      consistent: mainnetExists === namechainExists,
-    };
   }
 }

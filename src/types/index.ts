@@ -1,11 +1,11 @@
 // Network types
-export type NetworkName = 'mainnet' | 'namechain';
+export type NetworkName = 'mainnet' | 'sepolia';
 
 // ENS version types
 export type ENSVersion = 'v1' | 'v2';
 
 // Migration status types
-export type MigrationStatus = 'migrated' | 'native' | 'ejected' | 'unmigrated' | 'shadow';
+export type MigrationStatus = 'migrated' | 'native' | 'unmigrated';
 
 // Registry type for routing
 export type RegistryType = 'registrar' | 'wrapper' | 'legacy';
@@ -45,6 +45,24 @@ export interface NetworkConfig {
     registrar?: string;
     nameWrapper?: string;
   };
+}
+
+// SVG cache entry stored in KV as JSON envelope
+export interface SvgCacheEntry {
+  svg: string;
+  createdAt: number;    // epoch ms
+  softTtl: number;      // seconds — serve but revalidate after this
+  avatarHash: string;   // SHA-256 hex of avatar content (empty if no avatar)
+  migrationStatus: string;
+}
+
+// Parameters used to build image cache keys
+export interface ImageCacheParams {
+  migrationStatus: string;
+  style: string;
+  background: string;
+  width: number;
+  height: number;
 }
 
 // Error types

@@ -5,9 +5,9 @@ import { validateEnsName } from '../utils/ens';
 export const validateNetwork = async (c: Context, next: Next) => {
   const network = c.req.param('network');
 
-  if (network && !['mainnet', 'namechain'].includes(network)) {
+  if (network && !['mainnet', 'sepolia'].includes(network)) {
     return c.json({
-      error: "Invalid network. Must be 'mainnet' or 'namechain'",
+      error: "Invalid network. Must be 'mainnet' or 'sepolia'",
       timestamp: new Date().toISOString()
     }, 400);
   }

@@ -35,6 +35,17 @@ export class ImageGenerationService {
     this.avatarService = avatarService;
   }
 
+  // Fetch avatar for a name (exposed for parallel fetching)
+  async fetchAvatar(name: string): Promise<{ base64: string; mimeType: string } | null> {
+    if (!this.avatarService) return null;
+    try {
+      return await this.avatarService.getAvatarBase64(name);
+    } catch (error) {
+      console.warn(`Failed to fetch avatar for ${name}:`, error);
+      return null;
+    }
+  }
+
   // Generate SVG image for ENS domain
   async generateDomainImage(
     options: ImageGenerationOptions,
@@ -137,18 +148,6 @@ export class ImageGenerationService {
         text: "#F9FAFB",
         accent: "#6B7280",
         badge: "#F59E0B", // Amber
-      },
-      ejected: {
-        background: "#DC2626", // Red
-        text: "#FFFFFF",
-        accent: "#FCA5A5",
-        badge: "#EF4444",
-      },
-      shadow: {
-        background: "#374151", // Cool gray
-        text: "#F3F4F6",
-        accent: "#9CA3AF",
-        badge: "#6B7280",
       },
     };
 

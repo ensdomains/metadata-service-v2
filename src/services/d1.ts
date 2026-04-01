@@ -8,13 +8,13 @@ export interface D1DomainRecord {
   name: string;
   label_name: string;
   labelhash: string;
-  parent_id?: string;
-  owner_id?: string;
-  resolver_id?: string;
-  registrant_id?: string;
-  expiry_date?: string;
-  created_at?: string;
-  ttl?: number;
+  parent_id: string | null;
+  owner_id: string | null;
+  resolver_id: string | null;
+  registrant_id: string | null;
+  expiry_date: string | null;
+  created_at: string | null;
+  ttl: number | null;
   is_migrated: boolean;
   data_source: 'ensnode' | 'blockchain';
   last_updated: number;
@@ -25,9 +25,9 @@ export interface D1MigrationRecord {
   id: string; // namehash
   name: string;
   status: MigrationStatus;
-  l1_owner?: string;
-  expiration_date?: string;
-  migration_date?: string;
+  l1_owner: string | null;
+  expiration_date: string | null;
+  migration_date: string | null;
   last_updated: number;
   sync_version: number;
 }
@@ -38,7 +38,7 @@ export interface D1HierarchyRecord {
   owner: string;
   resolver: string;
   level: number;
-  parent_id?: string;
+  parent_id: string | null;
   root_domain_id: string;
   last_updated: number;
   sync_version: number;
@@ -50,7 +50,7 @@ export interface D1SyncStatus {
   last_successful_sync: number;
   sync_count: number;
   error_count: number;
-  last_error?: string;
+  last_error: string | null;
 }
 
 export class D1Service {
@@ -63,13 +63,13 @@ export class D1Service {
       name: domain.name,
       label_name: domain.labelName || domain.name.split('.')[0],
       labelhash: domain.labelhash || namehash(domain.name.split('.')[0]),
-      parent_id: domain.parentId,
-      owner_id: domain.ownerId,
-      resolver_id: domain.resolverId,
-      registrant_id: domain.registrantId,
-      expiry_date: domain.expiryDate,
-      created_at: domain.createdAt,
-      ttl: domain.ttl || undefined,
+      parent_id: domain.parentId || null,
+      owner_id: domain.ownerId || null,
+      resolver_id: domain.resolverId || null,
+      registrant_id: domain.registrantId || null,
+      expiry_date: domain.expiryDate || null,
+      created_at: domain.createdAt || null,
+      ttl: domain.ttl || null,
       is_migrated: domain.isMigrated || false,
       data_source: dataSource,
       last_updated: Date.now(),
@@ -126,9 +126,9 @@ export class D1Service {
       id: namehash(name),
       name,
       status,
-      l1_owner: data.l1Owner,
-      expiration_date: data.expirationDate,
-      migration_date: data.migrationDate,
+      l1_owner: data.l1Owner || null,
+      expiration_date: data.expirationDate || null,
+      migration_date: data.migrationDate || null,
       last_updated: Date.now(),
     };
 
@@ -174,7 +174,7 @@ export class D1Service {
         owner: level.owner,
         resolver: level.resolver,
         level: level.level,
-        parent_id: level.level > 1 ? namehash(hierarchy.find(h => h.level === level.level - 1)?.name || '') : undefined,
+        parent_id: level.level > 1 ? namehash(hierarchy.find(h => h.level === level.level - 1)?.name || '') : null,
         root_domain_id: rootDomainId,
         last_updated: Date.now(),
       };

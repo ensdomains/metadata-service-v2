@@ -1,27 +1,7 @@
-import { createPublicClient, http, PublicClient, getContract, keccak256, toBytes } from 'viem';
-import { mainnet } from 'viem/chains';
+import { createPublicClient, http, PublicClient, getContract } from 'viem';
+import { mainnet, sepolia } from 'viem/chains';
 import { NetworkName, NetworkConfig } from '../types';
 import { namehash } from '../utils/ens';
-
-// Create Namechain L2 configuration dynamically
-function createNamechainConfig(rpcUrl: string) {
-  return {
-    id: 1337803,
-    name: 'Namechain',
-    nativeCurrency: {
-      decimals: 18,
-      name: 'Ether',
-      symbol: 'ETH',
-    },
-    rpcUrls: {
-      public: { http: [rpcUrl] },
-      default: { http: [rpcUrl] },
-    },
-    blockExplorers: {
-      default: { name: 'Explorer', url: 'https://explorer.namechain.network' },
-    },
-  } as const;
-}
 
 // ENS v1 Contract addresses (legacy - for unmigrated names)
 export const CONTRACTS = {
@@ -31,7 +11,7 @@ export const CONTRACTS = {
     nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
     resolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
   },
-  namechain: {
+  sepolia: {
     registry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
     registrar: '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85',
     nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
@@ -44,25 +24,28 @@ export const CONTRACTS = {
 // Contracts repo: https://github.com/ensdomains/namechain
 export const ENS_V2_CONTRACTS = {
   mainnet: {
-    // ENS v2 L1 contracts
-    rootRegistry: 'ROOT_REGISTRY_L1_ADDRESS', // Root registry for all TLDs
-    ethRegistry: 'MIGRATED_WRAPPED_NAME_REGISTRY_L1_ADDRESS', // MigratedWrappedNameRegistry for ejected .eth names
-    fallbackResolver: 'ETH_TLD_RESOLVER_L1_ADDRESS', // ETHTLDResolver - Uses CCIP-Read to query L2
-    migrationContract: 'L1_MIGRATION_CONTROLLER_ADDRESS', // L1UnlockedMigrationController or L1LockedMigrationController
-    ejectionController: 'L1_BRIDGE_CONTROLLER_ADDRESS', // L1BridgeController for ejection
+    // ENS v2 contracts on Ethereum mainnet
+    rootRegistry: 'ROOT_REGISTRY_ADDRESS', // Root registry for all TLDs
+    ethRegistry: 'ETH_REGISTRY_ADDRESS', // .eth registry
+    registryDatastore: 'REGISTRY_DATASTORE_ADDRESS', // RegistryDatastore - Universal storage for all registries
+    migrationContract: 'MIGRATION_CONTROLLER_ADDRESS', // Migration controller
 
     // Legacy v1 contracts (keep for unmigrated name compatibility)
     legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
     legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
     legacyResolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
   },
-  namechain: {
-    // ENS v2 L2 contracts
-    rootRegistry: 'ROOT_REGISTRY_L2_ADDRESS', // Root registry (same structure as L1)
-    ethRegistry: 'ETH_REGISTRY_L2_ADDRESS', // PermissionedRegistry - Authoritative .eth registry on L2
-    registryDatastore: 'REGISTRY_DATASTORE_L2_ADDRESS', // RegistryDatastore - Universal storage for all registries
-    migrationContract: 'L2_MIGRATION_CONTROLLER_ADDRESS', // L2 migration controller
-    ejectionController: 'L2_BRIDGE_CONTROLLER_ADDRESS', // L2BridgeController for ejection
+  sepolia: {
+    // ENS v2 contracts on Sepolia testnet (placeholders)
+    rootRegistry: 'SEPOLIA_ROOT_REGISTRY_ADDRESS',
+    ethRegistry: 'SEPOLIA_ETH_REGISTRY_ADDRESS',
+    registryDatastore: 'SEPOLIA_REGISTRY_DATASTORE_ADDRESS',
+    migrationContract: 'SEPOLIA_MIGRATION_CONTROLLER_ADDRESS',
+
+    // Legacy v1 contracts on Sepolia
+    legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
+    legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
+    legacyResolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
   },
 } as const;
 
@@ -199,33 +182,6 @@ export const REGISTRY_DATASTORE_ABI = [
   },
 ] as const;
 
-// ENS v2 L1 Fallback Resolver ABI (ETHTLDResolver)
-// This resolver uses CCIP-Read to fetch data from L2 (viem handles CCIP-Read automatically)
-// Based on: https://github.com/ensdomains/namechain/blob/main/contracts/src/L1/ETHTLDResolver.sol
-export const FALLBACK_RESOLVER_ABI = [
-  {
-    inputs: [{ name: 'node', type: 'bytes32' }],
-    name: 'addr',
-    outputs: [{ name: '', type: 'address' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'node', type: 'bytes32' }, { name: 'key', type: 'string' }],
-    name: 'text',
-    outputs: [{ name: '', type: 'string' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'node', type: 'bytes32' }, { name: 'contentType', type: 'uint256' }],
-    name: 'contenthash',
-    outputs: [{ name: '', type: 'bytes' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-] as const;
-
 export const RESOLVER_ABI = [
   {
     inputs: [{ name: 'node', type: 'bytes32' }],
@@ -256,12 +212,12 @@ export class BlockchainService {
 
   constructor(private env: {
     MAINNET_RPC_URL: string;
-    NAMECHAIN_RPC_URL: string;
+    SEPOLIA_RPC_URL: string;
     MAINNET_FALLBACK_RPC_1?: string;
     MAINNET_FALLBACK_RPC_2?: string;
     MAINNET_FALLBACK_RPC_3?: string;
-    NAMECHAIN_FALLBACK_RPC_1?: string;
-    NAMECHAIN_FALLBACK_RPC_2?: string;
+    SEPOLIA_FALLBACK_RPC_1?: string;
+    SEPOLIA_FALLBACK_RPC_2?: string;
   }) {
     this.initializeClients();
   }
@@ -277,11 +233,10 @@ export class BlockchainService {
       }),
     });
 
-    // Primary namechain client
-    const namechainConfig = createNamechainConfig(this.env.NAMECHAIN_RPC_URL);
-    const namechainClient = createPublicClient({
-      chain: namechainConfig,
-      transport: http(this.env.NAMECHAIN_RPC_URL, {
+    // Primary sepolia client
+    const sepoliaClient = createPublicClient({
+      chain: sepolia,
+      transport: http(this.env.SEPOLIA_RPC_URL, {
         timeout: 30_000,
         retryCount: 3,
         retryDelay: 1000,
@@ -289,7 +244,7 @@ export class BlockchainService {
     });
 
     this.clients.set('mainnet', mainnetClient);
-    this.clients.set('namechain', namechainClient);
+    this.clients.set('sepolia', sepoliaClient);
 
     // Setup fallback clients
     this.setupFallbackClients();
@@ -324,24 +279,23 @@ export class BlockchainService {
 
     this.fallbackClients.set('mainnet', mainnetFallbacks);
 
-    // Namechain fallbacks from environment variables
-    const namechainFallbackUrls = [
-      this.env.NAMECHAIN_FALLBACK_RPC_1,
-      this.env.NAMECHAIN_FALLBACK_RPC_2,
+    // Sepolia fallbacks from environment variables
+    const sepoliaFallbackUrls = [
+      this.env.SEPOLIA_FALLBACK_RPC_1,
+      this.env.SEPOLIA_FALLBACK_RPC_2,
     ].filter(Boolean) as string[];
 
-    const namechainFallbacks = namechainFallbackUrls.map(url => {
-      const namechainConfig = createNamechainConfig(url);
-      return createPublicClient({
-        chain: namechainConfig,
+    const sepoliaFallbacks = sepoliaFallbackUrls.map(url =>
+      createPublicClient({
+        chain: sepolia,
         transport: http(url, {
           timeout: 30_000,
           retryCount: 2,
         }),
-      });
-    });
+      })
+    );
 
-    this.fallbackClients.set('namechain', namechainFallbacks);
+    this.fallbackClients.set('sepolia', sepoliaFallbacks);
   }
 
   // Get primary client for network
@@ -432,7 +386,7 @@ export class BlockchainService {
   // Health check for blockchain connectivity
   async healthCheck(): Promise<{
     mainnet: { primary: boolean; fallbacks: boolean[] };
-    namechain: { primary: boolean; fallbacks: boolean[] };
+    sepolia: { primary: boolean; fallbacks: boolean[] };
   }> {
     const checkClient = async (client: PublicClient): Promise<boolean> => {
       try {
@@ -443,14 +397,14 @@ export class BlockchainService {
       }
     };
 
-    const [mainnetResults, namechainResults] = await Promise.all([
+    const [mainnetResults, sepoliaResults] = await Promise.all([
       Promise.all([
         checkClient(this.clients.get('mainnet')!),
-        ...this.fallbackClients.get('mainnet')!.map(checkClient),
+        ...(this.fallbackClients.get('mainnet') || []).map(checkClient),
       ]),
       Promise.all([
-        checkClient(this.clients.get('namechain')!),
-        ...this.fallbackClients.get('namechain')!.map(checkClient),
+        checkClient(this.clients.get('sepolia')!),
+        ...(this.fallbackClients.get('sepolia') || []).map(checkClient),
       ]),
     ]);
 
@@ -459,9 +413,9 @@ export class BlockchainService {
         primary: mainnetResults[0],
         fallbacks: mainnetResults.slice(1),
       },
-      namechain: {
-        primary: namechainResults[0],
-        fallbacks: namechainResults.slice(1),
+      sepolia: {
+        primary: sepoliaResults[0],
+        fallbacks: sepoliaResults.slice(1),
       },
     };
   }
@@ -490,33 +444,6 @@ export class BlockchainService {
     }
   }
 
-  // ENS v2: Check if a name is ejected back to L1
-  async isEjectedName(name: string): Promise<boolean> {
-    try {
-      // Only check for .eth 2LDs (ejection only applies to them)
-      const labels = name.split('.');
-      if (labels.length !== 2 || labels[1] !== 'eth') {
-        return false;
-      }
-
-      const label = labels[0];
-      const tokenId = BigInt(keccak256(toBytes(label)));
-
-      const l1Registry = getContract({
-        address: ENS_V2_CONTRACTS.mainnet.ethRegistry as `0x${string}`,
-        abi: [...REGISTRY_V2_ABI, ...NAME_WRAPPER_ABI], // Needs ownerOf from ERC1155
-        client: this.getClient('mainnet'),
-      });
-
-      // Try to get owner - if it succeeds and is not zero, name is ejected
-      const owner = await l1Registry.read.ownerOf([tokenId]) as string;
-      return owner !== '0x0000000000000000000000000000000000000000';
-    } catch (error) {
-      // If call fails, name doesn't exist on L1 v2 registry (not ejected)
-      return false;
-    }
-  }
-
   // Enhanced ENS resolution: get owner directly from registry
   async getOwner(network: NetworkName, node: string): Promise<string> {
     return this.executeWithFallback(network, async (client) => {
@@ -532,52 +459,14 @@ export class BlockchainService {
 
   // ENS v2: Get resolver with v2-aware routing logic
   async getResolverV2(network: NetworkName, name: string): Promise<string> {
-    // For mainnet, check migration state and route appropriately
-    if (network === 'mainnet') {
-      // Case 1: Unmigrated - use legacy v1 registry
-      if (await this.isUnmigratedName(name)) {
-        const node = namehash(name);
-        return await this.getResolver('mainnet', node);
-      }
-
-      // Case 2: Ejected to L1 - use hierarchical L1 v2 query
-      if (await this.isEjectedName(name)) {
-        return await this.getResolverHierarchical('mainnet', name);
-      }
-
-      // Case 3: On L2 - use L1 Fallback Resolver
-      // This triggers CCIP-Read to L2 (viem handles it automatically!)
-      return await this.getResolverViaFallback(name);
-    }
-
-    // For L2, use hierarchical query directly
-    return await this.getResolverHierarchical(network, name);
-  }
-
-  // ENS v2: Get resolver via L1 Fallback Resolver (CCIP-Read to L2)
-  // Viem automatically handles the CCIP-Read dance!
-  private async getResolverViaFallback(name: string): Promise<string> {
-    try {
+    // Case 1: Unmigrated - use legacy v1 registry
+    if (await this.isUnmigratedName(name)) {
       const node = namehash(name);
-
-      const fallbackResolver = getContract({
-        address: ENS_V2_CONTRACTS.mainnet.fallbackResolver as `0x${string}`,
-        abi: FALLBACK_RESOLVER_ABI,
-        client: this.getClient('mainnet'), // L1 client!
-      });
-
-      // This call will trigger CCIP-Read if needed
-      // Viem handles the gateway requests and proof verification!
-      // For now, we just try to get an addr record to verify resolver exists
-      const addr = await fallbackResolver.read.addr([node as `0x${string}`]) as string;
-
-      // If we got a response, the resolver exists and works
-      // Return the fallback resolver address itself as it handles all queries
-      return ENS_V2_CONTRACTS.mainnet.fallbackResolver;
-    } catch (error) {
-      console.error('CCIP-Read fallback failed:', error);
-      return '0x0000000000000000000000000000000000000000';
+      return await this.getResolver(network, node);
     }
+
+    // Case 2: Migrated to v2 - use hierarchical v2 query
+    return await this.getResolverHierarchical(network, name);
   }
 
   // ENS v2: Hierarchical resolver lookup (for v2 registries)
@@ -727,7 +616,7 @@ export class BlockchainService {
 
     return {
       name: network,
-      rpcUrl: network === 'mainnet' ? this.env.MAINNET_RPC_URL : this.env.NAMECHAIN_RPC_URL,
+      rpcUrl: network === 'mainnet' ? this.env.MAINNET_RPC_URL : this.env.SEPOLIA_RPC_URL,
       contracts: {
         registry: contracts.registry,
         registrar: contracts.registrar,

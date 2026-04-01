@@ -90,12 +90,12 @@ export const createMockEnv = () => ({
   // Environment Variables
   ENSNODE_GRAPHQL_URL: "https://api.ensnode.test/graphql",
   MAINNET_RPC_URL: "https://mainnet.test.rpc",
-  NAMECHAIN_RPC_URL: "https://namechain.test.rpc",
+  SEPOLIA_RPC_URL: "https://sepolia.test.rpc",
   MAINNET_FALLBACK_RPC_1: "https://mainnet-fallback-1.test.rpc",
   MAINNET_FALLBACK_RPC_2: "https://mainnet-fallback-2.test.rpc",
   MAINNET_FALLBACK_RPC_3: "https://mainnet-fallback-3.test.rpc",
-  NAMECHAIN_FALLBACK_RPC_1: "https://namechain-fallback-1.test.rpc",
-  NAMECHAIN_FALLBACK_RPC_2: "https://namechain-fallback-2.test.rpc",
+  SEPOLIA_FALLBACK_RPC_1: "https://sepolia-fallback-1.test.rpc",
+  SEPOLIA_FALLBACK_RPC_2: "https://sepolia-fallback-2.test.rpc",
   LOG_LEVEL: "info",
 });
 
@@ -121,11 +121,11 @@ export const testRequest = async (
 // Helper to create test scenarios
 export const createTestScenarios = () => ({
   validMetadataRequest: {
-    path: "/namechain/registry/test.eth",
+    path: "/mainnet/registry/test.eth",
     expected: {
       status: 200,
       name: "test.eth",
-      network: "namechain",
+      network: "mainnet",
     },
   },
   invalidNetworkRequest: {
@@ -136,7 +136,7 @@ export const createTestScenarios = () => ({
     },
   },
   invalidRegistryRequest: {
-    path: "/namechain/invalid-registry/test.eth",
+    path: "/mainnet/invalid-registry/test.eth",
     expected: {
       status: 400,
       error: "Invalid registry type",
@@ -163,7 +163,7 @@ export const createTestScenarios = () => ({
     method: "POST",
     body: {
       names: ["test.eth", "migrated.eth"],
-      network: "namechain",
+      network: "mainnet",
     },
     expected: {
       status: 200,

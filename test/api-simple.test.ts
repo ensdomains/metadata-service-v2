@@ -4,17 +4,24 @@ import { Hono } from 'hono';
 // Create a simple test app that mirrors the main app structure
 const app = new Hono();
 
-// Mock successful responses for all endpoints
+// Mock successful responses for all endpoints (v1-compatible format)
 app.get('/:network/registry/:identifier', (c) => {
+  const { network } = c.req.param();
   return c.json({
+    is_normalized: true,
     name: 'test.eth',
-    tokenId: '0x1234567890abcdef',
-    version: 'v1',
-    network: 'namechain',
     description: 'test.eth, an ENS name.',
-    image: 'https://metadata.ens.domains/test.eth/image',
-    attributes: [],
-    external_url: 'https://app.ens.domains/name/test.eth',
+    attributes: [
+      { trait_type: 'Length', display_type: 'number', value: 4 },
+      { trait_type: 'Segment Length', display_type: 'number', value: 4 },
+      { trait_type: 'Character Set', display_type: 'string', value: 'letter' },
+    ],
+    url: 'https://app.ens.domains/name/test.eth',
+    last_request_date: Date.now(),
+    version: 0,
+    background_image: `https://metadata.ens.domains/${network}/avatar/test.eth`,
+    image: `https://metadata.ens.domains/${network}/registry/test.eth/image`,
+    image_url: `https://metadata.ens.domains/${network}/registry/test.eth/image`,
   });
 });
 
@@ -78,7 +85,7 @@ app.get('/health', (c) => {
     status: 'ok',
     dependencies: {
       ensnode: 'ok',
-      blockchain: { mainnet: 'ok', namechain: 'ok' },
+      blockchain: { mainnet: 'ok', sepolia: 'ok' },
     },
   });
 });
@@ -86,13 +93,15 @@ app.get('/health', (c) => {
 describe('API Endpoints - Simple Tests', () => {
   describe('Metadata endpoint', () => {
     it('should return metadata for valid request', async () => {
-      const res = await app.request('/namechain/registry/test.eth');
+      const res = await app.request('/mainnet/registry/test.eth');
       expect(res.status).toBe(200);
 
       const data = await res.json() as Record<string, unknown>;
       expect(data.name).toBe('test.eth');
-      expect(data.network).toBe('namechain');
+      expect(data.is_normalized).toBe(true);
+      expect(data.version).toBe(0);
       expect(data.attributes).toBeDefined();
+      expect(Array.isArray(data.attributes)).toBe(true);
     });
   });
 
@@ -104,7 +113,7 @@ describe('API Endpoints - Simple Tests', () => {
       const data = await res.json() as Record<string, unknown>;
       expect(data.name).toBe('test.eth');
       expect(data.status).toBeDefined();
-      expect(['native', 'ejected', 'unmigrated', 'shadow']).toContain(data.status);
+      expect(['native', 'migrated', 'unmigrated']).toContain(data.status);
     });
   });
 
@@ -124,7 +133,7 @@ describe('API Endpoints - Simple Tests', () => {
     it('should process valid batch request', async () => {
       const requestBody = {
         names: ['test.eth', 'example.eth'],
-        network: 'namechain'
+        network: 'mainnet'
       };
 
       const res = await app.request('/batch-metadata', {

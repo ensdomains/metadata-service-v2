@@ -50,9 +50,9 @@ export class FallbackService {
     let retries = 0;
 
     // Try ensnode first if it's enabled and healthy
-    if (this.config.ensnode.enabled && await this.isEnsnodeHealthy()) {
+    if (this.config.ensnode.enabled && this.isEnsnodeHealthy()) {
       try {
-        const data = await this.withRetry(operation.ensnode, operationName);
+        const data = await operation.ensnode();
         return {
           data,
           source: 'ensnode',
@@ -61,16 +61,17 @@ export class FallbackService {
         };
       } catch (error) {
         lastError = error as Error;
-        console.warn(`Ensnode ${operationName} failed:`, error);
+        console.warn(`Ensnode ${operationName} failed, falling back to blockchain:`, error);
         this.markEnsnodeUnhealthy();
         retries++;
       }
     }
 
     // Fallback to blockchain if ensnode failed or is disabled
+    // No retries here — BlockchainService.executeWithFallback already cycles through RPC endpoints
     if (this.config.blockchain.enabled) {
       try {
-        const data = await this.withRetry(operation.blockchain, operationName);
+        const data = await operation.blockchain();
         return {
           data,
           source: 'blockchain',
@@ -90,31 +91,20 @@ export class FallbackService {
     );
   }
 
-  // Check if ensnode is healthy
-  private async isEnsnodeHealthy(): Promise<boolean> {
-    const now = Date.now();
-
-    // Use cached result if recent
-    if (now - this.lastHealthCheck < this.config.ensnode.healthCheckIntervalMs) {
-      return this.ensnodeHealthy;
-    }
-
-    try {
-      const health = await this.ensnode.healthCheck();
-      this.ensnodeHealthy = health.primary || (health.fallback ?? false);
-      this.lastHealthCheck = now;
-
-      if (this.ensnodeHealthy) {
-        console.log('Ensnode is healthy again');
+  // Check if ensnode is healthy based on recent request outcomes (no proactive health check query)
+  private isEnsnodeHealthy(): boolean {
+    // If marked unhealthy, respect the cooldown period before retrying
+    if (!this.ensnodeHealthy) {
+      const now = Date.now();
+      if (now - this.lastHealthCheck < this.config.ensnode.healthCheckIntervalMs) {
+        return false;
       }
-
-      return this.ensnodeHealthy;
-    } catch (error) {
-      console.error('Ensnode health check failed:', error);
-      this.ensnodeHealthy = false;
-      this.lastHealthCheck = now;
-      return false;
+      // Cooldown expired — optimistically try again
+      console.log('Ensnode cooldown expired, will retry on next request');
+      this.ensnodeHealthy = true;
     }
+
+    return this.ensnodeHealthy;
   }
 
   // Mark ensnode as unhealthy
@@ -349,6 +339,6 @@ export const DEFAULT_FALLBACK_CONFIG: FallbackConfig = {
   },
   blockchain: {
     enabled: true,
-    preferredNetwork: 'namechain',
+    preferredNetwork: 'mainnet',
   },
 };

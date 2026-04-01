@@ -36,16 +36,17 @@ preview_database_id = "ens-metadata-database-preview-id"
 
 # Environment variables
 [vars]
-ENSNODE_GRAPHQL_URL = "https://api.ensnode.xyz/graphql"
-MAINNET_RPC_URL = "https://ethereum.publicnode.com"
-NAMECHAIN_RPC_URL = "https://namechain.rpc.url"
+ENSNODE_GRAPHQL_URL = "https://api.mainnet.ensnode.io/subgraph"
+MAINNET_RPC_URL = "https://eth.llamarpc.com"
+SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
-NAMECHAIN_FALLBACK_RPC_1 = "https://namechain-fallback-1.rpc.url"
+SEPOLIA_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth_sepolia"
 LOG_LEVEL = "info"
 
 # Production-specific environment variables
 [env.production.vars]
-ENSNODE_GRAPHQL_URL = "https://api.ensnode.xyz/graphql"
+ENSNODE_GRAPHQL_URL = "https://api.mainnet.ensnode.io/subgraph"
+MAINNET_RPC_URL = "https://eth.llamarpc.com"
 LOG_LEVEL = "warn"

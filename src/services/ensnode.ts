@@ -165,6 +165,7 @@ export interface EnsnodeHierarchyItem {
 export class EnsnodeService {
   private client: GraphQLClient;
   private fallbackClient?: GraphQLClient;
+  private timeout: number;
 
   constructor(
     private config: {
@@ -173,6 +174,8 @@ export class EnsnodeService {
       timeout?: number;
     },
   ) {
+    this.timeout = config.timeout || 2000;
+    console.log(`[ensnode] initialized with endpoint: ${config.primaryEndpoint}, timeout: ${this.timeout}ms`);
     this.client = new GraphQLClient(config.primaryEndpoint, {
       headers: {
         "User-Agent": "ENS-Metadata-V2/2.0.0",
@@ -194,14 +197,22 @@ export class EnsnodeService {
     variables?: Record<string, any>,
   ): Promise<{ data: T; usedFallback: boolean }> {
     try {
-      const data = await this.client.request<T>(query, variables);
+      const data = await this.client.request<T>({
+        document: query,
+        variables,
+        signal: AbortSignal.timeout(this.timeout),
+      });
       return { data, usedFallback: false };
     } catch (error) {
       console.warn("Primary ensnode endpoint failed:", error);
 
       if (this.fallbackClient) {
         try {
-          const data = await this.fallbackClient.request<T>(query, variables);
+          const data = await this.fallbackClient.request<T>({
+            document: query,
+            variables,
+            signal: AbortSignal.timeout(this.timeout),
+          });
           return { data, usedFallback: true };
         } catch (fallbackError) {
           console.error(
@@ -279,16 +290,15 @@ export class EnsnodeService {
       latency: {} as { primary?: number; fallback?: number },
     };
 
+    const healthQuery = `query HealthCheck { domains(first: 1) { id } }`;
+
     // Test primary endpoint
     try {
       const start = Date.now();
-      await this.client.request(`
-        query HealthCheck {
-          domains(first: 1) {
-            id
-          }
-        }
-      `);
+      await this.client.request({
+        document: healthQuery,
+        signal: AbortSignal.timeout(this.timeout),
+      });
       results.primary = true;
       results.latency.primary = Date.now() - start;
     } catch (error) {
@@ -299,13 +309,10 @@ export class EnsnodeService {
     if (this.fallbackClient) {
       try {
         const start = Date.now();
-        await this.fallbackClient.request(`
-          query HealthCheck {
-            domains(first: 1) {
-              id
-            }
-          }
-        `);
+        await this.fallbackClient.request({
+          document: healthQuery,
+          signal: AbortSignal.timeout(this.timeout),
+        });
         results.fallback = true;
         results.latency.fallback = Date.now() - start;
       } catch (error) {

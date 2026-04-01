@@ -1,7 +1,7 @@
 {
   "name": "ens-metadata-v2",
   "version": "2.0.0",
-  "description": "ENS Metadata Service V2 - Cloudflare Workers implementation with L1/L2 support",
+  "description": "ENS Metadata Service V2 - Cloudflare Workers implementation for ENS v1 and v2 on Ethereum",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {

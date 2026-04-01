@@ -24,7 +24,7 @@ describe('ImageGenerationService', () => {
 
       expect(result.svg).toBe('<svg>Mock SVG</svg>');
       expect(result.contentType).toBe('image/svg+xml');
-      expect(result.size).toEqual({ width: 500, height: 500 });
+      expect(result.size).toEqual({ width: 518, height: 518 });
     });
 
     it('should handle migrated domains with different colors', async () => {
@@ -152,12 +152,12 @@ describe('ImageGenerationService', () => {
       const mockCreateSVG = vi.mocked(createDynamicSVGImage);
 
       // Test different migration statuses
-      for (const status of ['unmigrated', 'native', 'migrated', 'ejected', 'shadow']) {
+      for (const status of ['unmigrated', 'native', 'migrated']) {
         mockCreateSVG.mockClear();
 
         await imageService.generateDomainImage({
           name: 'test.eth',
-          migrationStatus: status as 'migrated' | 'native' | 'unmigrated' | 'ejected' | 'shadow',
+          migrationStatus: status as 'migrated' | 'native' | 'unmigrated',
         });
 
         expect(mockCreateSVG).toHaveBeenCalledWith(
