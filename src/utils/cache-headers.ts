@@ -53,44 +53,8 @@ export function getCacheHeaders(options: CacheHeaderOptions): Record<string, str
   return headers;
 }
 
-// Smart cache TTL based on domain characteristics
-export function getTTLForDomain(domain: any): number {
-  if (!domain) return CacheTTL.error;
-
-  if (domain.isMigrated) return CacheTTL.migrated;
-
-  if (domain.expiryDate) {
-    const expiry = new Date(domain.expiryDate).getTime();
-    const now = Date.now();
-    const daysUntilExpiry = (expiry - now) / (1000 * 60 * 60 * 24);
-
-    if (daysUntilExpiry < 7) return CacheTTL.expiring;
-    if (daysUntilExpiry < 30) return CacheTTL.normal / 2;
-  }
-
-  return CacheTTL.normal;
-}
-
 // Cache header presets for different response types
 export const CachePresets = {
-  // Migrated domain metadata - long cache with high priority
-  migratedDomain: (domain: any): Record<string, string> =>
-    getCacheHeaders({
-      ttl: CacheTTL.migrated,
-      tags: ['migrated', 'metadata', `domain:${domain.name}`],
-      priority: 'high',
-      staleWhileRevalidate: 300,
-    }),
-
-  // Standard domain metadata
-  standardDomain: (domain: any): Record<string, string> =>
-    getCacheHeaders({
-      ttl: getTTLForDomain(domain),
-      tags: ['metadata', `domain:${domain.name}`],
-      priority: 'normal',
-      staleWhileRevalidate: 60,
-    }),
-
   // Migration status
   migrationStatus: (name: string): Record<string, string> =>
     getCacheHeaders({

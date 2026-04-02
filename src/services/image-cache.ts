@@ -39,7 +39,7 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 
 // Build a deterministic cache key from name + image params
 function buildCacheKey(name: string, params: ImageCacheParams): string {
-  return `svg:${name}:${params.migrationStatus}:${params.style}:${params.background}:${params.width}:${params.height}`;
+  return `svg:${name}:${params.migrationStatus}:${params.width}:${params.height}`;
 }
 
 export class ImageCacheService {
@@ -71,8 +71,6 @@ export class ImageCacheService {
   ): Promise<ImageCacheResult> {
     const params: ImageCacheParams = {
       migrationStatus: options.migrationStatus || 'unmigrated',
-      style: options.style || 'classic',
-      background: options.background || 'gradient',
       width: options.size?.width || 518,
       height: options.size?.height || 518,
     };

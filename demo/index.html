@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ENS Metadata V2 — Endpoint Tester</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #13131a;
+      --border: #23233a;
+      --text: #e4e4ef;
+      --muted: #7a7a8e;
+      --accent: #5b8af5;
+      --accent-dim: #2d4480;
+      --green: #3dd68c;
+      --red: #f55b5b;
+      --yellow: #f5c842;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    header { padding: 24px 32px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+    header h1 { font-size: 18px; font-weight: 600; }
+    header .tag { font-size: 11px; font-family: var(--mono); background: var(--accent-dim); color: var(--accent); padding: 2px 8px; border-radius: 4px; }
+    .config-bar { padding: 16px 32px; border-bottom: 1px solid var(--border); display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    .config-bar label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .config-bar input { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; font-family: var(--mono); font-size: 13px; width: 320px; }
+    .config-bar select { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; font-size: 13px; }
+    .config-bar input:focus, .config-bar select:focus { outline: none; border-color: var(--accent); }
+    main { padding: 24px 32px; display: flex; flex-direction: column; gap: 16px; }
+    .section-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-top: 12px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .card-header { padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
+    .card-header h3 { font-size: 14px; font-weight: 500; }
+    .card-header .method { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+    .card-header .method.get { background: #1a3a2a; color: var(--green); }
+    .card-header .method.post { background: #3a2a1a; color: var(--yellow); }
+    .card-actions { display: flex; gap: 8px; align-items: center; }
+    .card-url { padding: 10px 18px; font-family: var(--mono); font-size: 12px; color: var(--muted); background: #0d0d14; border-bottom: 1px solid var(--border); word-break: break-all; }
+    .card-body { padding: 14px 18px; }
+    .card-body.empty { color: var(--muted); font-size: 13px; font-style: italic; }
+    button { font-size: 12px; font-weight: 500; padding: 6px 16px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.15s; }
+    button.run { background: var(--accent); color: #fff; }
+    button.run:hover { background: #6d9af7; }
+    button.run:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.run-all { background: var(--accent-dim); color: var(--accent); margin-top:18px; }
+    button.run-all:hover { background: #3a5590; }
+    .status-badge { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+    .status-badge.ok { background: #1a3a2a; color: var(--green); }
+    .status-badge.err { background: #3a1a1a; color: var(--red); }
+    .status-badge.pending { background: #2a2a1a; color: var(--yellow); }
+    .status-badge.idle { background: #1a1a2a; color: var(--muted); }
+    pre { font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; color: var(--text); }
+    .result-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 8px; display: flex; gap: 16px; }
+    .image-preview { max-width: 100%; height: auto; border-radius: 8px; background: #1a1a2a; }
+    .avatar-preview { width: 200px; height: 200px; object-fit: cover; border-radius: 50%; background: #1a1a2a; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+    .input-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .input-row label { font-size: 12px; color: var(--muted); min-width: 80px; }
+    .input-row input, .input-row select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 4px; font-family: var(--mono); font-size: 12px; flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ENS Metadata V2</h1>
+    <span class="tag">endpoint tester</span>
+  </header>
+
+  <div class="config-bar">
+    <div>
+      <label>API Base URL</label><br>
+      <input type="text" id="baseUrl" value="http://localhost:8787" />
+    </div>
+    <div>
+      <label>Network</label><br>
+      <select id="network">
+        <option value="mainnet" selected>mainnet</option>
+        <option value="sepolia">sepolia</option>
+      </select>
+    </div>
+    <div>
+      <label>Name</label><br>
+      <input type="text" id="ensName" value="tanrikulu.eth" />
+    </div>
+    <div>
+        <button class="run-all" onclick="runAll()">Run All</button>
+    </div>
+  </div>
+
+  <main id="app"></main>
+
+  <script>
+    // ---- Config ----
+    const $ = (sel) => document.querySelector(sel);
+    const getBase = () => $('#baseUrl').value.replace(/\/+$/, '');
+    const getNetwork = () => $('#network').value;
+    const getName = () => $('#ensName').value.trim();
+
+    // Known contract addresses for v1 route testing
+    const CONTRACTS = {
+      mainnet: {
+        registrar: '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85',
+        nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
+      },
+      sepolia: {
+        registrar: '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85',
+        nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
+      },
+    };
+
+    // A known tokenId for testing (nick.eth labelhash as decimal)
+    // labelhash("nick") = 0x05a67c0ee82964c4f7394f63c0f0a09f37dfd7b4d52e0c4d1fa4d7e67c80e1c8
+    // as uint256 decimal = 2552516546498183981153029125532570076979207671373282839498542105849220918728
+    // For simplicity, we'll compute from the name input
+
+    // ---- Endpoint definitions ----
+    function buildEndpoints() {
+      const base = getBase();
+      const net = getNetwork();
+      const name = getName();
+      const contracts = CONTRACTS[net] || CONTRACTS.mainnet;
+
+      return [
+        {
+          id: 'health-root',
+          section: 'Health',
+          title: 'Root Health Check',
+          method: 'GET',
+          url: `${base}/`,
+          type: 'json',
+        },
+        {
+          id: 'health-detailed',
+          section: 'Health',
+          title: 'Detailed Health Check',
+          method: 'GET',
+          url: `${base}/health`,
+          type: 'json',
+        },
+        {
+          id: 'v2-metadata',
+          section: 'v2 Metadata (name-based)',
+          title: `Metadata — ${name}`,
+          method: 'GET',
+          url: `${base}/${net}/registry/${name}`,
+          type: 'json',
+        },
+        {
+          id: 'v2-metadata-nw',
+          section: 'v2 Metadata (name-based)',
+          title: `Metadata via NameWrapper — ${name}`,
+          method: 'GET',
+          url: `${base}/${net}/namewrapper/${name}`,
+          type: 'json',
+        },
+        {
+          id: 'v2-image',
+          section: 'v2 Image',
+          title: `Image — ${name}`,
+          method: 'GET',
+          url: `${base}/${net}/registry/${name}/image`,
+          type: 'image',
+        },
+        {
+          id: 'v2-image-sized',
+          section: 'v2 Image',
+          title: `Image (800x400) — ${name}`,
+          method: 'GET',
+          url: `${base}/${net}/registry/${name}/image?w=800&h=400`,
+          type: 'image',
+        },
+        {
+          id: 'v1-metadata',
+          section: 'v1 Legacy (contractAddress/tokenId)',
+          title: `v1 Metadata via BaseRegistrar`,
+          method: 'GET',
+          // tokenId will be filled dynamically using labelhash
+          url: `${base}/${net}/${contracts.registrar}/{tokenId}`,
+          type: 'json',
+          needsTokenId: 'registrar',
+        },
+        {
+          id: 'v1-image',
+          section: 'v1 Legacy (contractAddress/tokenId)',
+          title: `v1 Image via BaseRegistrar`,
+          method: 'GET',
+          url: `${base}/${net}/${contracts.registrar}/{tokenId}/image`,
+          type: 'image',
+          needsTokenId: 'registrar',
+        },
+        {
+          id: 'avatar',
+          section: 'Avatar',
+          title: `Avatar — ${name}`,
+          method: 'GET',
+          url: `${base}/${net}/avatar/${name}`,
+          type: 'avatar',
+        },
+        {
+          id: 'migration',
+          section: 'Domain Info',
+          title: `Migration Status — ${name}`,
+          method: 'GET',
+          url: `${base}/migration-status/${name}`,
+          type: 'json',
+        },
+        {
+          id: 'hierarchy',
+          section: 'Domain Info',
+          title: `Registry Hierarchy — ${name}`,
+          method: 'GET',
+          url: `${base}/registry-hierarchy/${name}`,
+          type: 'json',
+        },
+        {
+          id: 'batch',
+          section: 'Batch',
+          title: 'Batch Metadata',
+          method: 'POST',
+          url: `${base}/batch-metadata`,
+          type: 'json',
+          body: { names: [name, 'nick.eth', 'vitalik.eth'], network: net },
+        },
+      ];
+    }
+
+    // ---- Labelhash computation (keccak256 via SubtleCrypto) ----
+    // We need keccak256 for labelhash. Since SubtleCrypto doesn't support keccak,
+    // we use a tiny JS keccak implementation.
+
+    // Minimal keccak-256 (adapted from https://github.com/nicolo-ribaudo/sha3-wasm)
+    // For the demo only — we just need to hash short labels
+    const KECCAK_ROUNDS = 24;
+    const KECCAK_RC = [
+      1n,0x8082n,0x800000000000808an,0x8000000080008000n,0x808bn,0x80000001n,
+      0x8000000080008081n,0x8000000000008009n,0x8an,0x88n,0x80008009n,0x8000000an,
+      0x8000808bn,0x800000000000008bn,0x8000000000008089n,0x8000000000008003n,
+      0x8000000000008002n,0x8000000000000080n,0x800an,0x800000008000000an,
+      0x8000000080008081n,0x8000000000008080n,0x80000001n,0x8000000080008008n
+    ];
+    const KECCAK_ROTC = [1,3,6,10,15,21,28,36,45,55,2,14,27,41,56,8,25,43,62,18,39,61,20,44];
+    const KECCAK_PILN = [10,7,11,17,18,3,5,16,8,21,24,4,15,23,19,13,12,2,20,14,22,9,6,1];
+
+    function keccak256(data) {
+      const rate = 136;
+      const state = new Array(25).fill(0n);
+      const buf = new Uint8Array(rate);
+      let bufLen = 0;
+
+      for (let i = 0; i < data.length; i++) {
+        buf[bufLen++] = data[i];
+        if (bufLen === rate) { absorb(state, buf, rate); bufLen = 0; }
+      }
+      buf[bufLen] = 0x01;
+      for (let i = bufLen + 1; i < rate; i++) buf[i] = 0;
+      buf[rate - 1] |= 0x80;
+      absorb(state, buf, rate);
+
+      const out = new Uint8Array(32);
+      const view = new DataView(out.buffer);
+      for (let i = 0; i < 4; i++) {
+        view.setBigUint64(i * 8, state[i], true);
+      }
+      return out;
+    }
+
+    function absorb(state, buf, rate) {
+      for (let i = 0; i < rate / 8; i++) {
+        let v = 0n;
+        for (let j = 7; j >= 0; j--) v = (v << 8n) | BigInt(buf[i * 8 + j]);
+        state[i] ^= v;
+      }
+      keccakF(state);
+    }
+
+    function keccakF(state) {
+      for (let round = 0; round < KECCAK_ROUNDS; round++) {
+        // Theta
+        const c = new Array(5);
+        for (let x = 0; x < 5; x++) c[x] = state[x] ^ state[x+5] ^ state[x+10] ^ state[x+15] ^ state[x+20];
+        for (let x = 0; x < 5; x++) {
+          const d = c[(x+4)%5] ^ rot64(c[(x+1)%5], 1n);
+          for (let y = 0; y < 25; y += 5) state[x+y] ^= d;
+        }
+        // Rho + Pi
+        let t = state[1];
+        for (let i = 0; i < 24; i++) {
+          const j = KECCAK_PILN[i];
+          const tmp = state[j];
+          state[j] = rot64(t, BigInt(KECCAK_ROTC[i]));
+          t = tmp;
+        }
+        // Chi
+        for (let y = 0; y < 25; y += 5) {
+          const t0 = state[y], t1 = state[y+1], t2 = state[y+2], t3 = state[y+3], t4 = state[y+4];
+          state[y]   = t0 ^ (~t1 & t2);
+          state[y+1] = t1 ^ (~t2 & t3);
+          state[y+2] = t2 ^ (~t3 & t4);
+          state[y+3] = t3 ^ (~t4 & t0);
+          state[y+4] = t4 ^ (~t0 & t1);
+        }
+        // Iota
+        state[0] ^= KECCAK_RC[round];
+      }
+    }
+
+    function rot64(x, n) {
+      x = BigInt.asUintN(64, x);
+      n = BigInt.asUintN(6, n);
+      return BigInt.asUintN(64, (x << n) | (x >> (64n - n)));
+    }
+
+    function hexFromBytes(bytes) {
+      return '0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function computeLabelhash(label) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(label);
+      return hexFromBytes(keccak256(data));
+    }
+
+    function computeTokenIdDecimal(label) {
+      const hash = computeLabelhash(label);
+      return BigInt(hash).toString();
+    }
+
+    // ---- State ----
+    const results = {};
+
+    // ---- Rendering ----
+    function render() {
+      const endpoints = buildEndpoints();
+      const sections = {};
+      for (const ep of endpoints) {
+        if (!sections[ep.section]) sections[ep.section] = [];
+        sections[ep.section].push(ep);
+      }
+
+      let html = '';
+      for (const [section, eps] of Object.entries(sections)) {
+        html += `<div class="section-title">${section}</div>`;
+        const useGrid = eps.length === 2 && eps.every(e => e.type !== 'json' || section === 'Health');
+        if (useGrid) html += '<div class="grid-2">';
+        for (const ep of eps) {
+          const r = results[ep.id];
+          const statusClass = !r ? 'idle' : r.loading ? 'pending' : r.ok ? 'ok' : 'err';
+          const statusText = !r ? 'idle' : r.loading ? 'loading...' : r.ok ? `${r.status} OK` : `${r.status} ERR`;
+          const latency = r && !r.loading ? `${r.latency}ms` : '';
+          const cacheStatus = r?.headers?.['x-cache-status'] || '';
+
+          let displayUrl = ep.url;
+          if (ep.needsTokenId) {
+            const label = getName().split('.')[0];
+            const tokenId = computeTokenIdDecimal(label);
+            displayUrl = ep.url.replace('{tokenId}', tokenId);
+          }
+
+          html += `
+            <div class="card" id="card-${ep.id}">
+              <div class="card-header">
+                <div style="display:flex;gap:10px;align-items:center">
+                  <span class="method ${ep.method.toLowerCase()}">${ep.method}</span>
+                  <h3>${ep.title}</h3>
+                </div>
+                <div class="card-actions">
+                  ${cacheStatus ? `<span class="status-badge ok" style="margin-right:4px">cache: ${cacheStatus}</span>` : ''}
+                  ${latency ? `<span style="font-family:var(--mono);font-size:11px;color:var(--muted)">${latency}</span>` : ''}
+                  <span class="status-badge ${statusClass}">${statusText}</span>
+                  <button class="run" onclick="runEndpoint('${ep.id}')" ${r?.loading ? 'disabled' : ''}>Run</button>
+                </div>
+              </div>
+              <div class="card-url">${displayUrl}</div>
+              <div class="card-body ${!r || r.loading ? 'empty' : ''}">
+                ${renderResult(ep, r)}
+              </div>
+            </div>
+          `;
+        }
+        if (useGrid) html += '</div>';
+      }
+
+      $('#app').innerHTML = html;
+    }
+
+    function renderResult(ep, r) {
+      if (!r) return 'Click "Run" to test this endpoint';
+      if (r.loading) return 'Loading...';
+
+      let meta = `<div class="result-meta">
+        <span>Status: ${r.status}</span>
+        <span>Time: ${r.latency}ms</span>
+        ${r.headers?.['content-type'] ? `<span>Type: ${r.headers['content-type']}</span>` : ''}
+        ${r.headers?.['x-cache-status'] ? `<span>Cache: ${r.headers['x-cache-status']}</span>` : ''}
+      </div>`;
+
+      if (!r.ok) {
+        return meta + `<pre style="color:var(--red)">${escapeHtml(r.body)}</pre>`;
+      }
+
+      if (ep.type === 'image') {
+        return meta + `<img class="image-preview" src="${r.blobUrl}" alt="${ep.title}" />`;
+      }
+
+      if (ep.type === 'avatar') {
+        if (r.status === 404) {
+          return meta + `<pre style="color:var(--yellow)">${escapeHtml(r.body)}</pre>`;
+        }
+        return meta + `<img class="avatar-preview" src="${r.blobUrl}" alt="avatar" />`;
+      }
+
+      // JSON
+      try {
+        const parsed = JSON.parse(r.body);
+        return meta + `<pre>${syntaxHighlight(parsed)}</pre>`;
+      } catch {
+        return meta + `<pre>${escapeHtml(r.body)}</pre>`;
+      }
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function syntaxHighlight(obj) {
+      const json = JSON.stringify(obj, null, 2);
+      return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+        let cls = 'color:#b5cea8'; // number
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) cls = 'color:#9cdcfe'; // key
+          else cls = 'color:#ce9178'; // string
+        } else if (/true|false/.test(match)) cls = 'color:#569cd6'; // bool
+        else if (/null/.test(match)) cls = 'color:#569cd6'; // null
+        return `<span style="${cls}">${match}</span>`;
+      });
+    }
+
+    // ---- API calls ----
+    async function runEndpoint(id) {
+      const endpoints = buildEndpoints();
+      const ep = endpoints.find(e => e.id === id);
+      if (!ep) return;
+
+      results[id] = { loading: true };
+      render();
+
+      let url = ep.url;
+      if (ep.needsTokenId) {
+        const label = getName().split('.')[0];
+        const tokenId = computeTokenIdDecimal(label);
+        url = ep.url.replace('{tokenId}', tokenId);
+      }
+
+      const start = performance.now();
+
+      try {
+        const opts = { method: ep.method };
+        if (ep.body) {
+          opts.headers = { 'Content-Type': 'application/json' };
+          opts.body = JSON.stringify(ep.body);
+        }
+
+        const res = await fetch(url, opts);
+        const latency = Math.round(performance.now() - start);
+        const headers = {};
+        for (const [k, v] of res.headers.entries()) headers[k] = v;
+
+        if (ep.type === 'image' || (ep.type === 'avatar' && res.ok)) {
+          const blob = await res.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          results[id] = { ok: res.ok, status: res.status, latency, headers, blobUrl, loading: false };
+        } else {
+          const body = await res.text();
+          results[id] = { ok: res.ok, status: res.status, latency, headers, body, loading: false };
+        }
+      } catch (err) {
+        const latency = Math.round(performance.now() - start);
+        results[id] = { ok: false, status: 0, latency, body: `Network error: ${err.message}`, loading: false };
+      }
+
+      render();
+    }
+
+    async function runAll() {
+      const endpoints = buildEndpoints();
+      // Run sequentially to avoid overwhelming the local dev server
+      for (const ep of endpoints) {
+        await runEndpoint(ep.id);
+      }
+    }
+
+    // Re-render when config changes
+    $('#baseUrl').addEventListener('input', () => { Object.keys(results).forEach(k => delete results[k]); render(); });
+    $('#network').addEventListener('change', () => { Object.keys(results).forEach(k => delete results[k]); render(); });
+    $('#ensName').addEventListener('input', () => { Object.keys(results).forEach(k => delete results[k]); render(); });
+
+    // Initial render
+    render();
+  </script>
+</body>
+</html>

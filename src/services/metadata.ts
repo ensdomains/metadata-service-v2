@@ -21,7 +21,11 @@ import {
   getCharacterSet,
   getSegmentLength,
   isNormalized,
+  constructEthNameHash,
+  Version,
+  tokenIdToHex,
 } from "../utils/ens";
+import { CONTRACTS } from "./blockchain";
 
 export interface BlockchainEnvironment {
   MAINNET_RPC_URL: string;
@@ -209,6 +213,39 @@ export class MetadataService {
     }
   }
 
+  // Resolve v1 contract address + tokenId to ENS name
+  async resolveTokenId(
+    network: NetworkName,
+    contractAddress: string,
+    tokenId: string,
+  ): Promise<{ name: string; registryType: 'registry' | 'namewrapper' }> {
+    const contracts = CONTRACTS[network];
+    const addr = contractAddress.toLowerCase();
+
+    let registryType: 'registry' | 'namewrapper';
+    let nameHash: string;
+
+    if (addr === contracts.registrar.toLowerCase()) {
+      // BaseRegistrar: tokenId is labelhash → convert to .eth namehash
+      registryType = 'registry';
+      nameHash = constructEthNameHash(tokenId, Version.v1);
+    } else if (addr === contracts.nameWrapper.toLowerCase()) {
+      // NameWrapper: tokenId is already a namehash
+      registryType = 'namewrapper';
+      nameHash = tokenIdToHex(tokenId);
+    } else {
+      throw new Error(`Unknown contract address: ${contractAddress}`);
+    }
+
+    const { domain } = await this.ensnode.getDomainByNamehash(nameHash);
+
+    if (!domain?.name) {
+      throw new Error(`No domain found for tokenId ${tokenId}`);
+    }
+
+    return { name: domain.name, registryType };
+  }
+
   // Get migration status (CF cache handles API response caching)
   async getMigrationStatus(name: string): Promise<MigrationStatusResponse> {
     if (!validateEnsName(name)) {
@@ -228,7 +265,7 @@ export class MetadataService {
       if (source === "ensnode") {
         response = {
           name,
-          status: EnsnodeService.convertMigrationStatus(status as any),
+          status: 'unmigrated',
           l1Owner: (status as any).owner?.id,
           expirationDate: (status as any).expiryDate,
         };

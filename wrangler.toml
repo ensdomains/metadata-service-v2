@@ -44,6 +44,7 @@ MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
 SEPOLIA_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth_sepolia"
 LOG_LEVEL = "info"
+# WEBHOOK_SECRET — set via `wrangler secret put WEBHOOK_SECRET` (not in plaintext here)
 
 # Production-specific environment variables
 [env.production.vars]
