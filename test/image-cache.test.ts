@@ -53,11 +53,9 @@ describe('ImageCacheService', () => {
   const defaultOptions = {
     name: 'nick.eth',
     migrationStatus: 'unmigrated' as const,
-    style: 'classic' as const,
-    background: 'gradient' as const,
   };
 
-  const cacheKey = 'svg:nick.eth:unmigrated:classic:gradient:518:518';
+  const cacheKey = 'svg:nick.eth:unmigrated:518:518';
 
   describe('L1 fresh hit', () => {
     it('should return immediately from KV without touching R2 or origin', async () => {

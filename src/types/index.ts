@@ -59,8 +59,6 @@ export interface SvgCacheEntry {
 // Parameters used to build image cache keys
 export interface ImageCacheParams {
   migrationStatus: string;
-  style: string;
-  background: string;
   width: number;
   height: number;
 }

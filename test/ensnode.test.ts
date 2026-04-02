@@ -353,22 +353,6 @@ describe("EnsnodeService", () => {
     });
   });
 
-  describe("Static Utility Methods", () => {
-    it("should return unmigrated as conservative default (deprecated method)", () => {
-      // convertMigrationStatus is deprecated — ensnode's isMigrated refers to the
-      // 2019 registry migration, not ENS v2 L2 migration. The blockchain service
-      // should be used for actual migration status. This always returns 'unmigrated'.
-      expect(EnsnodeService.convertMigrationStatus({
-        name: 'test.eth',
-        isMigrated: false
-      })).toBe("unmigrated");
-      expect(EnsnodeService.convertMigrationStatus({
-        name: 'test.eth',
-        isMigrated: true
-      })).toBe("unmigrated");
-    });
-  });
-
   describe("Performance Characteristics", () => {
     it("should complete basic domain resolution quickly", async () => {
       const start = Date.now();

@@ -1,5 +1,4 @@
 import { GraphQLClient } from "graphql-request";
-import type { MigrationStatus } from "../types";
 import { namehash } from "../utils/ens";
 
 // GraphQL query fragments
@@ -241,6 +240,17 @@ export class EnsnodeService {
     return { domain: data.domain, usedFallback };
   }
 
+  // Get domain by pre-computed namehash (for v1 tokenId lookups)
+  async getDomainByNamehash(
+    nameHash: string,
+  ): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
+    const { data, usedFallback } = await this.executeQuery<{
+      domain: EnsnodeDomain | null;
+    }>(GET_DOMAIN_QUERY, { name: nameHash });
+
+    return { domain: data.domain, usedFallback };
+  }
+
   // Get multiple domains in batch
   async getDomains(
     names: string[],
@@ -322,18 +332,6 @@ export class EnsnodeService {
     }
 
     return results;
-  }
-
-  // Use blockchain.isUnmigratedName() and blockchain.isEjectedName()
-  static convertMigrationStatus(
-    ensnode: EnsnodeMigrationStatus,
-  ): MigrationStatus {
-    // This method is deprecated and should not be used for ENS v2 migration status
-    // ensnode's isMigrated field refers to the 2019 migration, not current L2 migration
-    console.warn(
-      "convertMigrationStatus is deprecated - use blockchain service to check actual migration status",
-    );
-    return "unmigrated"; // Conservative default
   }
 
   // Build cache key for ensnode responses

@@ -198,7 +198,7 @@ export class SyncService {
       const { status } = await this.ensnode.getMigrationStatus(name);
 
       if (status) {
-        await this.d1.storeMigrationStatus(name, EnsnodeService.convertMigrationStatus(status), {
+        await this.d1.storeMigrationStatus(name, 'unmigrated', {
           l1Owner: status.owner?.id,
           expirationDate: status.expiryDate,
         });

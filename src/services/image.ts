@@ -8,8 +8,6 @@ export interface ImageGenerationOptions {
   name: string;
   migrationStatus?: MigrationStatus;
   characterSet?: string;
-  background?: "gradient" | "solid" | "pattern";
-  style?: "classic" | "modern" | "minimal";
   size?: {
     width: number;
     height: number;
@@ -35,17 +33,6 @@ export class ImageGenerationService {
     this.avatarService = avatarService;
   }
 
-  // Fetch avatar for a name (exposed for parallel fetching)
-  async fetchAvatar(name: string): Promise<{ base64: string; mimeType: string } | null> {
-    if (!this.avatarService) return null;
-    try {
-      return await this.avatarService.getAvatarBase64(name);
-    } catch (error) {
-      console.warn(`Failed to fetch avatar for ${name}:`, error);
-      return null;
-    }
-  }
-
   // Generate SVG image for ENS domain
   async generateDomainImage(
     options: ImageGenerationOptions,
@@ -53,7 +40,6 @@ export class ImageGenerationService {
     const {
       name,
       migrationStatus = "unmigrated",
-      background = "gradient",
       size = this.defaultSize,
     } = options;
 
@@ -232,12 +218,6 @@ export class ImageGenerationService {
 
     if (options?.migrationStatus) {
       params.set("status", options.migrationStatus);
-    }
-    if (options?.style) {
-      params.set("style", options.style);
-    }
-    if (options?.background) {
-      params.set("bg", options.background);
     }
     if (options?.size) {
       params.set("w", options.size.width.toString());

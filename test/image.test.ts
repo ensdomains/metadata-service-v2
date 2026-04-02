@@ -31,7 +31,6 @@ describe('ImageGenerationService', () => {
       const result = await imageService.generateDomainImage({
         name: 'migrated.eth',
         migrationStatus: 'native',
-        style: 'modern',
       });
 
       expect(result.svg).toBeDefined();
@@ -46,28 +45,6 @@ describe('ImageGenerationService', () => {
       });
 
       expect(result.size).toEqual(customSize);
-    });
-
-    it('should handle different background types', async () => {
-      for (const background of ['gradient', 'solid', 'pattern']) {
-        const result = await imageService.generateDomainImage({
-          name: 'test.eth',
-          background: background as 'gradient' | 'solid' | 'pattern',
-        });
-
-        expect(result.svg).toBeDefined();
-      }
-    });
-
-    it('should handle different styles', async () => {
-      for (const style of ['classic', 'modern', 'minimal']) {
-        const result = await imageService.generateDomainImage({
-          name: 'test.eth',
-          style: style as 'classic' | 'modern' | 'minimal',
-        });
-
-        expect(result.svg).toBeDefined();
-      }
     });
   });
 
@@ -87,14 +64,10 @@ describe('ImageGenerationService', () => {
     it('should include multiple parameters', () => {
       const url = imageService.getImageUrl('test.eth', 'https://example.com', {
         migrationStatus: 'native',
-        style: 'modern',
-        background: 'gradient',
         size: { width: 800, height: 600 },
       });
 
       expect(url).toContain('status=native');
-      expect(url).toContain('style=modern');
-      expect(url).toContain('bg=gradient');
       expect(url).toContain('w=800');
       expect(url).toContain('h=600');
     });
