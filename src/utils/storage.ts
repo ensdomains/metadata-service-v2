@@ -2,10 +2,13 @@ export class StorageManager {
   constructor(private r2Bucket: R2Bucket) {}
 
   // Avatar operations
-  async getAvatar(name: string): Promise<ArrayBuffer | null> {
+  async getAvatar(name: string): Promise<{ data: ArrayBuffer; contentType: string } | null> {
     const key = `avatars/${name}`;
     const object = await this.r2Bucket.get(key);
-    return object ? await object.arrayBuffer() : null;
+    if (!object) return null;
+    const data = await object.arrayBuffer();
+    const contentType = object.httpMetadata?.contentType || 'image/png';
+    return { data, contentType };
   }
 
   async setAvatar(name: string, data: ArrayBuffer, contentType: string): Promise<void> {

@@ -64,9 +64,12 @@ export interface HealthResponse {
   status: 'ok' | 'degraded' | 'error';
   timestamp: string;
   dependencies: {
-    ensnode: 'ok' | 'degraded' | 'error' | 'unknown';
+    indexer: 'ok' | 'degraded' | 'error' | 'unknown';
     mainnet: 'ok' | 'degraded' | 'error' | 'unknown';
     sepolia: 'ok' | 'degraded' | 'error' | 'unknown';
+  };
+  latency?: {
+    indexer: number | null;
   };
 }
 

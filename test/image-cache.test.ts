@@ -253,6 +253,96 @@ describe('ImageCacheService', () => {
     });
   });
 
+  describe('Avatar RPC failure (avatarFailed)', () => {
+    it('should NOT cache SVG when avatar fetch throws', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      // Avatar RPC throws (network error, timeout, etc.)
+      vi.mocked(avatarService.getAvatarImage).mockRejectedValue(new Error('RPC timeout'));
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      expect(result.svg).toBeDefined();
+      expect(result.cacheStatus).toBe('miss');
+      // Should NOT write back — avatarFailed prevents caching no-background SVGs
+      expect(executionCtx.waitUntil).not.toHaveBeenCalled();
+    });
+
+    it('should still cache when avatar is genuinely absent (null)', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      // Avatar returns null (name has no avatar set) — not a failure
+      vi.mocked(avatarService.getAvatarImage).mockResolvedValue(null);
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      expect(result.cacheStatus).toBe('miss');
+      // SHOULD write back — no avatar is a valid state
+      expect(executionCtx.waitUntil).toHaveBeenCalledTimes(1);
+      await Promise.all(waitUntilPromises);
+      expect(svgCacheKv.put).toHaveBeenCalled();
+    });
+  });
+
+  describe('Stale revalidation with avatar failure', () => {
+    it('should skip revalidation write-back when avatar fetch fails during background refresh', async () => {
+      // Serve stale entry
+      const entry = JSON.stringify({
+        svg: '<svg>Stale</svg>',
+        createdAt: Date.now() - 400_000,
+        softTtl: 300,
+        avatarHash: '',
+        migrationStatus: 'unmigrated',
+      });
+      (svgCacheKv.get as Mock).mockResolvedValue(entry);
+      // During background revalidation, avatar RPC fails
+      vi.mocked(avatarService.getAvatarImage).mockRejectedValue(new Error('timeout'));
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      expect(result.svg).toBe('<svg>Stale</svg>');
+      expect(result.cacheStatus).toBe('stale');
+      // Background revalidation fires but should NOT overwrite cache
+      await Promise.all(waitUntilPromises);
+      expect(svgCacheKv.put).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('R2 avatar with content type', () => {
+    it('should use stored content type from R2 avatar metadata', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      // SVG miss, then avatar hit with JPEG content type
+      vi.mocked(r2Bucket.get)
+        .mockResolvedValueOnce(null) // SVG key miss
+        .mockResolvedValueOnce({     // avatar hit
+          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+          httpMetadata: { contentType: 'image/jpeg' },
+          text: vi.fn(),
+          body: null,
+          bodyUsed: false,
+        } as unknown as R2ObjectBody);
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      expect(result.cacheStatus).toBe('miss');
+      expect(result.svg).toBeDefined();
+      // Avatar RPC should NOT be called — R2 avatar was used
+      expect(avatarService.getAvatarImage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('R2 read failure', () => {
+    it('should fall through to origin when R2 read throws', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockRejectedValue(new Error('R2 unavailable'));
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      expect(result.svg).toBeDefined();
+      expect(result.cacheStatus).toBe('miss');
+    });
+  });
+
   describe('Cache key determinism', () => {
     it('should produce different keys for different params', async () => {
       (svgCacheKv.get as Mock).mockResolvedValue(null);

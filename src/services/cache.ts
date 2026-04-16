@@ -208,19 +208,11 @@ export class CacheService {
 
 // Cache key generators for internal operations
 export const CacheKeys = {
-  // For backwards compatibility
-  domain: (name: string) => `ensnode:domain:${name.toLowerCase()}`,
-  domains: (names: string[]) => `ensnode:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
-  migrationStatus: (name: string) => `ensnode:migration:${name.toLowerCase()}`,
-  hierarchy: (name: string) => `ensnode:hierarchy:${name.toLowerCase()}`,
-  health: () => "ensnode:health:status",
-
-  // New naming convention
-  ensnodeDomain: (name: string) => `ensnode:domain:${name.toLowerCase()}`,
-  ensNodeBatch: (names: string[]) => `ensnode:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
-  ensnodeMigration: (name: string) => `ensnode:migration:${name.toLowerCase()}`,
-  ensnodeHierarchy: (name: string) => `ensnode:hierarchy:${name.toLowerCase()}`,
-  ensnodeHealth: () => "ensnode:health:status",
+  domain: (name: string, network: string = 'mainnet') => `ensnode:${network}:domain:${name.toLowerCase()}`,
+  domains: (names: string[], network: string = 'mainnet') => `ensnode:${network}:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
+  migrationStatus: (name: string, network: string = 'mainnet') => `ensnode:${network}:migration:${name.toLowerCase()}`,
+  hierarchy: (name: string, network: string = 'mainnet') => `ensnode:${network}:hierarchy:${name.toLowerCase()}`,
+  health: (network: string = 'mainnet') => `ensnode:${network}:health:status`,
 };
 
 // Cache TTL helpers for internal caching

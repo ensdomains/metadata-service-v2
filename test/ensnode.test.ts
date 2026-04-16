@@ -334,7 +334,7 @@ describe("EnsnodeService", () => {
     it("should use cache service integration points", async () => {
       // Test cache key generation
       const key = CacheKeys.domain("test.eth");
-      expect(key).toBe("ensnode:domain:test.eth");
+      expect(key).toBe("ensnode:mainnet:domain:test.eth");
 
       // Test cache operations
       await cache.set("test-key", { data: "test" }, { ttl: 300 });
