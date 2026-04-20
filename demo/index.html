@@ -75,7 +75,7 @@
   <div class="config-bar">
     <div>
       <label>API Base URL</label><br>
-      <input type="text" id="baseUrl" value="http://localhost:8787" />
+      <input type="text" id="baseUrl" value="https://ens-metadata-v2.ensdomains.workers.dev" />
     </div>
     <div>
       <label>Network</label><br>
@@ -109,9 +109,15 @@
         nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
       },
       sepolia: {
-        registrar: '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85',
-        nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
+        registrar: '0x6409609247722761b8ba96371485de92a6d7b83b',
+        nameWrapper: '0xc7e033b8836e4bd55d069d113f018b98478cb091',
       },
+    };
+
+    // Suggested test names per network
+    const DEFAULT_NAMES = {
+      mainnet: 'tanrikulu.eth',
+      sepolia: 'yo-unwrapped.eth',
     };
 
     // A known tokenId for testing (nick.eth labelhash as decimal)
@@ -241,7 +247,7 @@
           method: 'POST',
           url: `${base}/batch-metadata`,
           type: 'json',
-          body: { names: [name, 'nick.eth', 'vitalik.eth'], network: net },
+          body: { names: net === 'sepolia' ? [name, 'gmyogi.eth', 'yo-fwrapped.eth'] : [name, 'nick.eth', 'vitalik.eth'], network: net },
         },
       ];
     }
@@ -545,7 +551,12 @@
 
     // Re-render when config changes
     $('#baseUrl').addEventListener('input', () => { Object.keys(results).forEach(k => delete results[k]); render(); });
-    $('#network').addEventListener('change', () => { Object.keys(results).forEach(k => delete results[k]); render(); });
+    $('#network').addEventListener('change', () => {
+      const net = getNetwork();
+      if (DEFAULT_NAMES[net]) $('#ensName').value = DEFAULT_NAMES[net];
+      Object.keys(results).forEach(k => delete results[k]);
+      render();
+    });
     $('#ensName').addEventListener('input', () => { Object.keys(results).forEach(k => delete results[k]); render(); });
     $('#ensName').addEventListener('keydown', (e) => { if (e.key === 'Enter') runAll(); });
 

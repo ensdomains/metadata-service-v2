@@ -30,11 +30,11 @@ function getTtlConfig(migrationStatus: string): TtlConfig {
   switch (migrationStatus) {
     case 'native':
     case 'migrated':
-      return { softTtl: 21600, hardTtl: 86400 };   // 6h / 24h
+      return { softTtl: 86400, hardTtl: 2592000 };   // 24h / 30 days
     case 'unmigrated':
-      return { softTtl: 300, hardTtl: 1800 };       // 5m / 30m
+      return { softTtl: 3600, hardTtl: 604800 };      // 1h / 7 days
     default:
-      return { softTtl: 3600, hardTtl: 21600 };     // 1h / 6h
+      return { softTtl: 21600, hardTtl: 604800 };     // 6h / 7 days
   }
 }
 

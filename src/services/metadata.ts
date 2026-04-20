@@ -76,6 +76,7 @@ export interface D1RecordData {
 export interface MetadataServiceConfig {
   ensnodeEndpoint: string;
   ensnodeFallbackEndpoint?: string;
+  ensnodeApiVersion?: 'v1' | 'v2';
   fallbackToBlockchain: boolean;
   internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
@@ -103,6 +104,7 @@ export class MetadataService {
     this.ensnode = new EnsnodeService({
       primaryEndpoint: config.ensnodeEndpoint,
       fallbackEndpoint: config.ensnodeFallbackEndpoint,
+      apiVersion: config.ensnodeApiVersion,
     });
 
     // Initialize internal cache for ensnode responses if enabled
@@ -314,7 +316,7 @@ export class MetadataService {
         // Built from blockchain data
         response = {
           name,
-          status: (status as any).isMigrated ? "native" : "unmigrated",
+          status: (status as any).isMigrated ? "migrated" : "unmigrated",
           l1Owner: (status as any).owner?.id,
           expirationDate: (status as any).expiryDate,
         };
@@ -596,20 +598,9 @@ export class MetadataService {
     network: NetworkName,
     baseUrl?: string,
   ): Promise<MetadataResponse> {
-    // NOTE: ensnode's isMigrated refers to 2019 permanent registrar migration, NOT ENS v2
-    // We must verify on-chain ENS v2 migration status until it's being provided
-    const isUnmigrated = await this.blockchain.isUnmigratedName(domain.name);
-
-    let v2MigrationStatus: MigrationStatus;
-    let isMigrated: boolean;
-
-    if (isUnmigrated) {
-      v2MigrationStatus = "unmigrated";
-      isMigrated = false;
-    } else {
-      v2MigrationStatus = "native";
-      isMigrated = true;
-    }
+    // Check on-chain ENS v2 migration status via ETHRegistry.getStatus()
+    const isUnmigrated = await this.blockchain.isUnmigratedName(network, domain.name);
+    const v2MigrationStatus: MigrationStatus = isUnmigrated ? "unmigrated" : "migrated";
 
     const origin = baseUrl || this.getDefaultBaseUrl();
     const imageUrl = `${origin}/${network}/registry/${encodeURIComponent(domain.name)}/image`;
@@ -799,6 +790,9 @@ export class MetadataService {
 
     // Character Set
     attributes.push({ trait_type: "Character Set", display_type: "string", value: getCharacterSet(domain.name) });
+
+    // ENS v2 Migration Status
+    attributes.push({ trait_type: "Migration Status", display_type: "string", value: v2MigrationStatus });
 
     return attributes;
   }

@@ -20,7 +20,6 @@ export interface Metadata {
   is_normalized: boolean;
   version: ENSVersion;
   migration_status?: MigrationStatus;
-  chain_location?: NetworkName;
   url?: string;
 }
 

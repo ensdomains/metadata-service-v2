@@ -112,6 +112,7 @@ function getServices(env: Env, network: string): FullServices {
   const metadataService = new MetadataService(
     {
       ensnodeEndpoint: getEnsnodeUrl(env, network),
+      ensnodeApiVersion: network === 'sepolia' ? 'v2' : 'v1',
       network,
       fallbackToBlockchain: true,
       internalCacheEnabled: true,

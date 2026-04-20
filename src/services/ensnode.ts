@@ -1,8 +1,9 @@
 import { GraphQLClient } from "graphql-request";
 import { namehash } from "../utils/ens";
 
-// GraphQL query fragments
-const DOMAIN_FRAGMENT = `
+// ---- v1 subgraph queries (mainnet — id = namehash) ----
+
+const V1_DOMAIN_FRAGMENT = `
   fragment DomainInfo on Domain {
     id
     name
@@ -28,26 +29,25 @@ const DOMAIN_FRAGMENT = `
   }
 `;
 
-// GraphQL queries
-const GET_DOMAIN_QUERY = `
+const V1_GET_DOMAIN = `
   query GetDomain($name: String!) {
     domain(id: $name) {
       ...DomainInfo
     }
   }
-  ${DOMAIN_FRAGMENT}
+  ${V1_DOMAIN_FRAGMENT}
 `;
 
-const GET_DOMAINS_QUERY = `
+const V1_GET_DOMAINS = `
   query GetDomains($ids: [String!]!) {
     domains(where: { id_in: $ids }) {
       ...DomainInfo
     }
   }
-  ${DOMAIN_FRAGMENT}
+  ${V1_DOMAIN_FRAGMENT}
 `;
 
-const GET_MIGRATION_STATUS_QUERY = `
+const V1_GET_MIGRATION_STATUS = `
   query GetMigrationStatus($id: String!) {
     domain(id: $id) {
       name
@@ -66,7 +66,7 @@ const GET_MIGRATION_STATUS_QUERY = `
   }
 `;
 
-const GET_HIERARCHY_QUERY = `
+const V1_GET_HIERARCHY = `
   query GetHierarchy($id: String!) {
     domain(id: $id) {
       name
@@ -106,6 +106,113 @@ const GET_HIERARCHY_QUERY = `
   }
 `;
 
+// ---- v2 staging queries (sepolia — id = name string) ----
+
+const V2_GET_DOMAIN = `
+  query GetDomain($name: String!) {
+    domain(id: $name) {
+      id
+      name
+      labelName
+      labelhash
+      expiryDate
+      createdAt
+      ttl
+      isMigrated
+      tokenId
+      tokenVersion
+      owner {
+        id
+      }
+      resolver {
+        address
+      }
+      registrant {
+        id
+      }
+      parent {
+        id
+        name
+      }
+    }
+  }
+`;
+
+const V2_GET_DOMAINS = `
+  query GetDomains($names: [String!]!) {
+    domains(where: { name_in: $names }) {
+      id
+      name
+      labelName
+      labelhash
+      expiryDate
+      createdAt
+      ttl
+      isMigrated
+      tokenId
+      tokenVersion
+      owner {
+        id
+      }
+      resolver {
+        address
+      }
+      registrant {
+        id
+      }
+    }
+  }
+`;
+
+const V2_GET_MIGRATION_STATUS = `
+  query GetMigrationStatus($id: String!) {
+    domain(id: $id) {
+      name
+      isMigrated
+      tokenVersion
+      expiryDate
+      owner {
+        id
+      }
+      resolver {
+        address
+      }
+    }
+  }
+`;
+
+const V2_GET_HIERARCHY = `
+  query GetHierarchy($id: String!) {
+    domain(id: $id) {
+      name
+      owner {
+        id
+      }
+      resolver {
+        address
+      }
+      parent {
+        name
+        owner {
+          id
+        }
+        resolver {
+          address
+        }
+        parent {
+          name
+          owner {
+            id
+          }
+          resolver {
+            address
+          }
+        }
+      }
+    }
+  }
+`;
+
 // Response types
 export interface EnsnodeDomain {
   id: string;
@@ -125,10 +232,16 @@ export interface EnsnodeDomain {
   registrant?: {
     id: string;
   };
+  parent?: {
+    id?: string;
+    name?: string;
+  };
   expiryDate?: string;
   createdAt?: string;
   ttl?: number;
   isMigrated?: boolean;
+  tokenId?: string;
+  tokenVersion?: number;
 }
 
 export interface EnsnodeResponse<T> {
@@ -149,6 +262,7 @@ export interface EnsnodeMigrationStatus {
   owner?: { id: string };
   resolver?: { address: string };
   expiryDate?: string;
+  tokenVersion?: number;
 }
 
 export interface EnsnodeHierarchyItem {
@@ -161,20 +275,25 @@ export interface EnsnodeHierarchyItem {
   parent?: EnsnodeHierarchyItem;
 }
 
+type ApiVersion = 'v1' | 'v2';
+
 export class EnsnodeService {
   private client: GraphQLClient;
   private fallbackClient?: GraphQLClient;
   private timeout: number;
+  private apiVersion: ApiVersion;
 
   constructor(
     private config: {
       primaryEndpoint: string;
       fallbackEndpoint?: string;
       timeout?: number;
+      apiVersion?: ApiVersion;
     },
   ) {
     this.timeout = config.timeout || 2000;
-    console.log(`[ensnode] initialized with endpoint: ${config.primaryEndpoint}, timeout: ${this.timeout}ms`);
+    this.apiVersion = config.apiVersion || 'v1';
+    console.log(`[ensnode] initialized with endpoint: ${config.primaryEndpoint}, version: ${this.apiVersion}, timeout: ${this.timeout}ms`);
     this.client = new GraphQLClient(config.primaryEndpoint, {
       headers: {
         "User-Agent": "ENS-Metadata-V2/2.0.0",
@@ -188,6 +307,14 @@ export class EnsnodeService {
         },
       });
     }
+  }
+
+  // Resolve domain ID: v1 uses namehash, v2 uses name string
+  private resolveDomainId(name: string): string {
+    if (this.apiVersion === 'v2') {
+      return name.toLowerCase();
+    }
+    return namehash(name.toLowerCase());
   }
 
   // Execute query with automatic fallback
@@ -232,10 +359,11 @@ export class EnsnodeService {
   async getDomain(
     name: string,
   ): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
-    const nameHash = namehash(name.toLowerCase());
+    const id = this.resolveDomainId(name);
+    const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
       domain: EnsnodeDomain | null;
-    }>(GET_DOMAIN_QUERY, { name: nameHash });
+    }>(query, { name: id });
 
     return { domain: data.domain, usedFallback };
   }
@@ -244,9 +372,11 @@ export class EnsnodeService {
   async getDomainByNamehash(
     nameHash: string,
   ): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
+    // v1: use namehash directly; v2: not applicable, pass through
+    const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
       domain: EnsnodeDomain | null;
-    }>(GET_DOMAIN_QUERY, { name: nameHash });
+    }>(query, { name: nameHash });
 
     return { domain: data.domain, usedFallback };
   }
@@ -255,10 +385,18 @@ export class EnsnodeService {
   async getDomains(
     names: string[],
   ): Promise<{ domains: EnsnodeDomain[]; usedFallback: boolean }> {
+    if (this.apiVersion === 'v2') {
+      const ids = names.map(n => n.toLowerCase());
+      const { data, usedFallback } = await this.executeQuery<{
+        domains: EnsnodeDomain[];
+      }>(V2_GET_DOMAINS, { names: ids });
+      return { domains: data.domains, usedFallback };
+    }
+
     const nameHashes = names.map((name) => namehash(name.toLowerCase()));
     const { data, usedFallback } = await this.executeQuery<{
       domains: EnsnodeDomain[];
-    }>(GET_DOMAINS_QUERY, { ids: nameHashes });
+    }>(V1_GET_DOMAINS, { ids: nameHashes });
 
     return { domains: data.domains, usedFallback };
   }
@@ -267,10 +405,11 @@ export class EnsnodeService {
   async getMigrationStatus(
     name: string,
   ): Promise<{ status: EnsnodeMigrationStatus | null; usedFallback: boolean }> {
-    const nameHash = namehash(name.toLowerCase());
+    const id = this.resolveDomainId(name);
+    const query = this.apiVersion === 'v2' ? V2_GET_MIGRATION_STATUS : V1_GET_MIGRATION_STATUS;
     const { data, usedFallback } = await this.executeQuery<{
       domain: EnsnodeMigrationStatus | null;
-    }>(GET_MIGRATION_STATUS_QUERY, { id: nameHash });
+    }>(query, { id });
 
     return { status: data.domain, usedFallback };
   }
@@ -280,10 +419,11 @@ export class EnsnodeService {
     hierarchy: EnsnodeHierarchyItem | null;
     usedFallback: boolean;
   }> {
-    const nameHash = namehash(name.toLowerCase());
+    const id = this.resolveDomainId(name);
+    const query = this.apiVersion === 'v2' ? V2_GET_HIERARCHY : V1_GET_HIERARCHY;
     const { data, usedFallback } = await this.executeQuery<{
       domain: EnsnodeHierarchyItem | null;
-    }>(GET_HIERARCHY_QUERY, { id: nameHash });
+    }>(query, { id });
 
     return { hierarchy: data.domain, usedFallback };
   }

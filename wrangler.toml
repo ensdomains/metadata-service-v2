@@ -4,6 +4,13 @@ compatibility_date = "2024-09-25"
 compatibility_flags = ["nodejs_compat"]
 find_additional_modules = true
 
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 # WASM rules — esbuild emits .wasm imports as files, wrangler loads them as compiled modules
 [[rules]]
 type = "CompiledWasm"
@@ -24,12 +31,12 @@ name = "ens-metadata-v2-prod"
 # KV Namespaces for caching
 [[kv_namespaces]]
 binding = "METADATA_CACHE"
-id = "2766ef05a18648ae96551372060819d6"
+id = "27a721dd79c94871a8f1e74a5e6d8716"
 preview_id = "metadata_cache_preview"
 
 [[kv_namespaces]]
 binding = "SVG_CACHE"
-id = "0f88a76b2acc408080253f51efa0333f"
+id = "9975509b9e614e6cabccd1f9b23553eb"
 preview_id = "svg_cache_preview"
 
 # R2 Buckets for asset storage
@@ -42,16 +49,14 @@ preview_bucket_name = "ens-metadata-assets-preview"
 [[d1_databases]]
 binding = "DB"
 database_name = "ens-metadata-db"
-database_id = "bbce03ba-0fe5-49f6-bd66-2442d77dc345"
+database_id = "5b6e560b-4ecf-4e8a-962e-b7d67181c01c"
 preview_database_id = "ens-metadata-database-preview-id"
 
 
 # Environment variables
 [vars]
 ENSNODE_MAINNET_URL = "https://api.mainnet.ensnode.io/subgraph"
-ENSNODE_SEPOLIA_URL = "https://api.sepolia.ensnode.io/subgraph"
-MAINNET_RPC_URL = "https://eth.llamarpc.com"
-SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
+ENSNODE_SEPOLIA_URL = "https://staging-graphql.ens.dev/graphql"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
@@ -62,6 +67,5 @@ LOG_LEVEL = "info"
 # Production-specific environment variables
 [env.production.vars]
 ENSNODE_MAINNET_URL = "https://api.mainnet.ensnode.io/subgraph"
-ENSNODE_SEPOLIA_URL = "https://api.sepolia.ensnode.io/subgraph"
-MAINNET_RPC_URL = "https://eth.llamarpc.com"
+ENSNODE_SEPOLIA_URL = "https://staging-graphql.ens.dev/graphql"
 LOG_LEVEL = "warn"
