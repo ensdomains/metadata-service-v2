@@ -1,6 +1,6 @@
 import { namehash } from "@ensdomains/ensjs/utils";
 import { ens_normalize as normalize } from "@adraffy/ens-normalize";
-import { keccak256, toBytes, hexToBigInt, numberToHex, pad } from "viem";
+import { keccak256, toBytes, numberToHex, pad } from "viem";
 
 // Type declaration for Intl.Segmenter
 declare namespace Intl {
@@ -35,31 +35,6 @@ const ETH_NAMEHASH = '4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069
 // Basic labelhash function
 export function labelhash(label: string): `0x${string}` {
   return keccak256(toBytes(label));
-}
-
-// Flexible labelhash function
-export function getLabelhash(nameOrLabelhash: string, isHex = false) {
-  const _name = nameOrLabelhash.substring(0, nameOrLabelhash.lastIndexOf('.'));
-  if (!_name) return nameOrLabelhash;
-
-  const _lhexId = labelhash(_name);
-  if (isHex) return _lhexId;
-  const _lintId = hexToBigInt(_lhexId).toString();
-  return _lintId;
-}
-
-// Flexible namehash function
-export function getNamehash(nameOrNamehash: string) {
-  const _name = nameOrNamehash.substring(0, nameOrNamehash.lastIndexOf('.'));
-  if (!_name) {
-    if (!nameOrNamehash.match(/^0x/)) {
-      return pad(numberToHex(BigInt(nameOrNamehash)), { size: 32 });
-    }
-    return nameOrNamehash;
-  }
-
-  const _lhexId = namehash(nameOrNamehash);
-  return _lhexId;
 }
 
 // ETH namehash construction
@@ -166,11 +141,11 @@ export function ensureHex(value: string | bigint): `0x${string}` {
 }
 
 // Address zero constant
-export const ZERO_ADDRESS =
+const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000" as const;
 
 // Empty hash constant
-export const EMPTY_HASH =
+const EMPTY_HASH =
   "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 // Check if address is zero/empty
@@ -205,21 +180,6 @@ export function validateEnsName(name: string): boolean {
   return true;
 }
 
-// Extract name from various input formats
-export function extractNameFromInput(input: string): string | null {
-  // Direct name
-  if (validateEnsName(input)) {
-    try {
-      return normalize(input);
-    } catch (error) {
-      return null;
-    }
-  }
-
-  // Could be tokenId - we'd need additional context to resolve
-  return null;
-}
-
 // Character set analysis
 export function getCharacterSet(name: string): CharacterSet {
   const label = getLabel(name);
@@ -251,16 +211,6 @@ export function getSegmentLength(name: string): number {
   return count;
 }
 
-// Get code point length
-export function getCodePointLength(name: string): number {
-  const label = getLabel(name);
-  let count = 0;
-  for (const _ of label) {
-    count++;
-  }
-  return count;
-}
-
 // Check if name is normalized
 export function isNormalized(name: string): boolean {
   return _checkNormalized(name);
@@ -274,21 +224,3 @@ function _checkNormalized(name: string): boolean {
   }
 }
 
-// Error classes
-export class BaseError extends Error {
-  code: number;
-  constructor(message?: string, code: number = 500) {
-    super(message);
-    this.code = code;
-    const trueProto = new.target.prototype;
-    Object.setPrototypeOf(this, trueProto);
-  }
-}
-
-export class ResolverNotFound extends BaseError {}
-
-export class TextRecordNotFound extends BaseError {}
-
-export class UnsupportedNetwork extends BaseError {}
-
-export class ExpiredNameError extends BaseError {}

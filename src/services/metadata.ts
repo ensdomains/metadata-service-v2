@@ -13,11 +13,12 @@ import type {
   RegistryHierarchyResponse,
   BatchMetadataResponse,
 } from "../types/api";
-import type { NetworkName, MigrationStatus } from "../types";
+import { MIGRATION_STATUS, type NetworkName, type MigrationStatus } from "../types";
 import {
   validateEnsName,
   getLabel,
   namehash,
+  labelhash,
   getCharacterSet,
   getSegmentLength,
   isNormalized,
@@ -26,6 +27,13 @@ import {
   tokenIdToHex,
 } from "../utils/ens";
 import { CONTRACTS } from "./blockchain";
+
+export class DomainExpiredError extends Error {
+  constructor(name: string, expiryDate: Date) {
+    super(`${name} is expired (expired ${expiryDate.toISOString()})`);
+    this.name = 'DomainExpiredError';
+  }
+}
 
 export interface BlockchainEnvironment {
   MAINNET_RPC_URL: string;
@@ -68,16 +76,19 @@ export interface D1RecordData {
 export interface MetadataServiceConfig {
   ensnodeEndpoint: string;
   ensnodeFallbackEndpoint?: string;
+  ensnodeApiVersion?: 'v1' | 'v2';
   fallbackToBlockchain: boolean;
   internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
+  network?: string;
 }
 
 export class MetadataService {
-  private ensnode: EnsnodeService;
+  private network: string;
+  public ensnode: EnsnodeService;
   private internalCache?: CacheService; // For internal optimizations only
   private cache: CacheService; // Backwards compatibility
-  private blockchain: BlockchainService;
+  public blockchain: BlockchainService;
   private resolver: ResolverService;
   private fallback: FallbackService;
   private d1?: D1Service;
@@ -89,9 +100,11 @@ export class MetadataService {
     blockchainEnv: BlockchainEnvironment,
     db?: D1Database,
   ) {
+    this.network = config.network || 'mainnet';
     this.ensnode = new EnsnodeService({
       primaryEndpoint: config.ensnodeEndpoint,
       fallbackEndpoint: config.ensnodeFallbackEndpoint,
+      apiVersion: config.ensnodeApiVersion,
     });
 
     // Initialize internal cache for ensnode responses if enabled
@@ -113,16 +126,16 @@ export class MetadataService {
     this.resolver = new ResolverService(this.blockchain);
 
     // Initialize fallback service with configuration
+    const fallbackConfig = {
+      ...DEFAULT_FALLBACK_CONFIG,
+      blockchain: {
+        ...DEFAULT_FALLBACK_CONFIG.blockchain,
+        enabled: config.fallbackToBlockchain,
+        preferredNetwork: this.network as NetworkName,
+      },
+    };
     this.fallback = new FallbackService(
-      config.fallbackToBlockchain
-        ? DEFAULT_FALLBACK_CONFIG
-        : {
-            ...DEFAULT_FALLBACK_CONFIG,
-            blockchain: {
-              ...DEFAULT_FALLBACK_CONFIG.blockchain,
-              enabled: config.fallbackToBlockchain,
-            },
-          },
+      fallbackConfig,
       this.ensnode,
       this.blockchain,
       this.resolver,
@@ -154,6 +167,20 @@ export class MetadataService {
         source,
         usedFallback,
       } = await this.fallback.getDomainMetadata(identifier);
+
+      // Check if domain is expired
+      const domainData = domain as any;
+      const expiryRaw = domainData.expiryDate || domainData.expiry_date;
+      if (expiryRaw) {
+        const expiryMs = typeof expiryRaw === 'string' && expiryRaw.includes('T')
+          ? new Date(expiryRaw).getTime()
+          : typeof expiryRaw === 'string'
+            ? parseInt(expiryRaw, 10) * 1000
+            : Number(expiryRaw) * 1000;
+        if (expiryMs > 0 && expiryMs < Date.now()) {
+          throw new DomainExpiredError(identifier, new Date(expiryMs));
+        }
+      }
 
       let metadata: MetadataResponse;
 
@@ -213,6 +240,22 @@ export class MetadataService {
     }
   }
 
+  // Check if a .eth domain is expired by querying the registrar
+  async checkExpiry(name: string): Promise<void> {
+    if (!name.endsWith('.eth') || name.split('.').length !== 2) return;
+    try {
+      const label = name.split('.')[0];
+      const hash = labelhash(label);
+      const expiry = await this.blockchain.getExpiry(this.network as NetworkName, hash);
+      if (expiry && Number(expiry) * 1000 < Date.now()) {
+        throw new DomainExpiredError(name, new Date(Number(expiry) * 1000));
+      }
+    } catch (error) {
+      if (error instanceof DomainExpiredError) throw error;
+      console.warn(`Failed to check expiry for ${name}:`, error);
+    }
+  }
+
   // Resolve v1 contract address + tokenId to ENS name
   async resolveTokenId(
     network: NetworkName,
@@ -262,22 +305,21 @@ export class MetadataService {
 
       let response: MigrationStatusResponse;
 
-      if (source === "ensnode") {
-        response = {
-          name,
-          status: 'unmigrated',
-          l1Owner: (status as any).owner?.id,
-          expirationDate: (status as any).expiryDate,
-        };
-      } else {
-        // Built from blockchain data
-        response = {
-          name,
-          status: (status as any).isMigrated ? "native" : "unmigrated",
-          l1Owner: (status as any).owner?.id,
-          expirationDate: (status as any).expiryDate,
-        };
+      // v1 subgraph isMigrated = 2019 registrar migration, not v2. Only trust for sepolia (v2 indexer).
+      let migrationStatus: MigrationStatus = MIGRATION_STATUS.UNMIGRATED;
+      if (this.network === 'sepolia' && (status as any).isMigrated) {
+        migrationStatus = MIGRATION_STATUS.MIGRATED;
+      } else if (this.network !== 'sepolia') {
+        const isUnmigrated = await this.blockchain.isUnmigratedName(this.network as NetworkName, name);
+        migrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
       }
+
+      response = {
+        name,
+        status: migrationStatus,
+        l1Owner: (status as any).owner?.id,
+        expirationDate: (status as any).expiryDate,
+      };
 
       if (usedFallback) {
         console.warn(
@@ -321,7 +363,7 @@ export class MetadataService {
       // Last resort fallback response
       const fallbackResponse: MigrationStatusResponse = {
         name,
-        status: "unmigrated",
+        status: MIGRATION_STATUS.UNMIGRATED,
       };
 
       return fallbackResponse;
@@ -334,7 +376,7 @@ export class MetadataService {
       throw new Error("Invalid ENS name format");
     }
 
-    const cacheKey = CacheKeys.hierarchy(name);
+    const cacheKey = CacheKeys.hierarchy(name, this.network);
 
     // Try cache first
     const cached = await this.cache.get<RegistryHierarchyResponse>(cacheKey);
@@ -442,9 +484,23 @@ export class MetadataService {
       // Build results
       const results = await Promise.allSettled(
         validNames.map(async (name) => {
+          // Check expiry first
+          await this.checkExpiry(name);
+
           const domain = domains.find((d) => d.name === name);
 
           if (domain) {
+            // Also check ensnode expiryDate
+            const expiryRaw = domain.expiryDate;
+            if (expiryRaw) {
+              const expiryMs = typeof expiryRaw === 'string' && expiryRaw.includes('T')
+                ? new Date(expiryRaw).getTime()
+                : parseInt(expiryRaw, 10) * 1000;
+              if (expiryMs > 0 && expiryMs < Date.now()) {
+                return { name, error: `${name} is expired` };
+              }
+            }
+
             const metadata = await this.buildMetadataFromEnsnode(
               domain,
               network || "mainnet",
@@ -461,7 +517,10 @@ export class MetadataService {
                 baseUrl,
               );
               return { name, metadata };
-            } catch {
+            } catch (err) {
+              if (err instanceof DomainExpiredError) {
+                return { name, error: err.message };
+              }
               return { name, error: `Failed to resolve ${name}` };
             }
           }
@@ -470,11 +529,15 @@ export class MetadataService {
 
       // Process results
       const response: BatchMetadataResponse = {
-        results: results.map((result) => {
+        results: results.map((result, i) => {
           if (result.status === "fulfilled") {
             return result.value;
           } else {
-            return { name: "", error: "Processing failed" };
+            const reason = result.reason;
+            if (reason instanceof DomainExpiredError) {
+              return { name: validNames[i], error: reason.message };
+            }
+            return { name: validNames[i], error: "Processing failed" };
           }
         }),
         total: validNames.length,
@@ -534,19 +597,15 @@ export class MetadataService {
     network: NetworkName,
     baseUrl?: string,
   ): Promise<MetadataResponse> {
-    // NOTE: ensnode's isMigrated refers to 2019 permanent registrar migration, NOT ENS v2
-    // We must verify on-chain ENS v2 migration status until it's being provided
-    const isUnmigrated = await this.blockchain.isUnmigratedName(domain.name);
-
+    // Determine ENS v2 migration status.
+    // v1 subgraph's isMigrated refers to 2019 permanent registrar migration — NOT v2.
+    // Only trust isMigrated from v2 indexer (sepolia staging). For mainnet, use on-chain check.
     let v2MigrationStatus: MigrationStatus;
-    let isMigrated: boolean;
-
-    if (isUnmigrated) {
-      v2MigrationStatus = "unmigrated";
-      isMigrated = false;
+    if (this.network === 'sepolia' && domain.isMigrated !== undefined) {
+      v2MigrationStatus = domain.isMigrated ? MIGRATION_STATUS.MIGRATED : MIGRATION_STATUS.UNMIGRATED;
     } else {
-      v2MigrationStatus = "native";
-      isMigrated = true;
+      const isUnmigrated = await this.blockchain.isUnmigratedName(network, domain.name);
+      v2MigrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
     }
 
     const origin = baseUrl || this.getDefaultBaseUrl();
@@ -738,6 +797,9 @@ export class MetadataService {
     // Character Set
     attributes.push({ trait_type: "Character Set", display_type: "string", value: getCharacterSet(domain.name) });
 
+    // ENS v2 Migration Status
+    attributes.push({ trait_type: "Migration Status", display_type: "string", value: v2MigrationStatus });
+
     return attributes;
   }
 
@@ -816,11 +878,11 @@ export class MetadataService {
       const nameData = await this.resolver.resolveName(
         name,
         namehash(name),
-        "mainnet",
+        this.network as NetworkName,
       );
 
       // Determine migration status based on v1 vs v2 registry check
-      const status: MigrationStatus = nameData.migrationStatus || "unmigrated";
+      const status: MigrationStatus = nameData.migrationStatus || MIGRATION_STATUS.UNMIGRATED;
 
       return {
         name,
@@ -859,7 +921,7 @@ export class MetadataService {
           const nameData = await this.resolver.resolveName(
             domainName,
             namehash(domainName),
-            "mainnet",
+            this.network as NetworkName,
           );
 
           hierarchy.push({
@@ -869,7 +931,7 @@ export class MetadataService {
               "0x0000000000000000000000000000000000000000",
             resolver:
               nameData.resolver.resolver ||
-              "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63",
+              CONTRACTS[this.network as keyof typeof CONTRACTS]?.resolver || '',
             level,
           });
         } catch {
@@ -877,7 +939,7 @@ export class MetadataService {
           hierarchy.push({
             name: domainName,
             owner: "0x0000000000000000000000000000000000000000",
-            resolver: "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63",
+            resolver: CONTRACTS[this.network as keyof typeof CONTRACTS]?.resolver || '',
             level,
           });
         }
@@ -912,12 +974,17 @@ export class MetadataService {
           .catch(() => ({ connected: false, recordCount: 0 })),
       ]);
 
+    // Flag ENSNode as degraded if reachable but slow (>1000ms for a trivial query)
+    const ensnodeLatency = 'latency' in ensnodeHealth ? (ensnodeHealth as any).latency?.primary : undefined;
+    const ensnodeStatus = ensnodeHealth.primary
+      ? (ensnodeLatency && ensnodeLatency > 1000 ? "degraded" : "ok")
+      : "fallback" in ensnodeHealth && ensnodeHealth.fallback
+        ? "degraded"
+        : "error";
+
     return {
-      ensnode: ensnodeHealth.primary
-        ? "ok"
-        : "fallback" in ensnodeHealth && ensnodeHealth.fallback
-          ? "degraded"
-          : "error",
+      ensnode: ensnodeStatus,
+      ensnodeLatency: ensnodeLatency ?? null,
       blockchain: {
         mainnet: blockchainHealth.mainnet.primary ? "ok" : "error",
         sepolia: blockchainHealth.sepolia.primary ? "ok" : "error",

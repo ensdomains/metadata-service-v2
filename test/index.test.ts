@@ -1,4 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Mock rasterize service to avoid WASM import issues in Vite
+vi.mock('../src/services/rasterize', () => ({
+  RasterizeService: class {
+    async rasterize() { return new Uint8Array([0x89, 0x50, 0x4e, 0x47]); }
+  },
+}));
+
 import app from '../src/index';
 
 describe('ENS Metadata V2', () => {

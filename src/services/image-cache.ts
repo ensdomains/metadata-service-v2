@@ -1,5 +1,5 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
-import type { SvgCacheEntry, ImageCacheParams, MigrationStatus } from '../types';
+import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type MigrationStatus } from '../types';
 import type { StorageManager } from '../utils/storage';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';
 import type { AvatarService } from './avatar';
@@ -48,15 +48,16 @@ export class ImageCacheService {
     private storage: StorageManager,
     private imageService: ImageGenerationService,
     private avatarService: AvatarService,
+    private bucket?: R2Bucket,
   ) {}
 
   // Get TTL config based on migration status
   getTtlConfig(migrationStatus: string): TtlConfig {
     switch (migrationStatus) {
-      case 'native':
-      case 'migrated':
+      case MIGRATION_STATUS.NATIVE:
+      case MIGRATION_STATUS.MIGRATED:
         return { softTtl: 21600, hardTtl: 86400, r2MaxAge: 86400 };      // 6h / 24h / 24h
-      case 'unmigrated':
+      case MIGRATION_STATUS.UNMIGRATED:
         return { softTtl: 300, hardTtl: 1800, r2MaxAge: 3600 };           // 5m / 30m / 1h
       default:
         return { softTtl: 3600, hardTtl: 21600, r2MaxAge: 21600 };        // 1h / 6h / 6h
@@ -70,7 +71,7 @@ export class ImageCacheService {
     executionCtx: ExecutionContext,
   ): Promise<ImageCacheResult> {
     const params: ImageCacheParams = {
-      migrationStatus: options.migrationStatus || 'unmigrated',
+      migrationStatus: options.migrationStatus || MIGRATION_STATUS.UNMIGRATED,
       width: options.size?.width || 518,
       height: options.size?.height || 518,
     };
@@ -123,15 +124,17 @@ export class ImageCacheService {
     }
 
     // --- L3: Origin (generate from scratch) ---
-    const { svg, avatarHash } = await this.generateFromOrigin(name, options);
-    console.log(`[image-cache] L3 MISS ${name} (${Date.now() - start}ms) → writing back to L1+L2`);
+    const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options);
+    console.log(`[image-cache] L3 MISS ${name} (${Date.now() - start}ms)${avatarFailed ? ' [avatar failed — skipping cache]' : ' → writing back to L1+L2'}`);
 
-    // Write back to all tiers in background
-    executionCtx.waitUntil(
-      this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig).catch(
-        (err) => console.error(`[image-cache] write-back failed for ${cacheKey}:`, err),
-      ),
-    );
+    // Only cache if avatar didn't fail — avoid persisting SVGs without background
+    if (!avatarFailed) {
+      executionCtx.waitUntil(
+        this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig).catch(
+          (err) => console.error(`[image-cache] write-back failed for ${cacheKey}:`, err),
+        ),
+      );
+    }
 
     return { svg, contentType: 'image/svg+xml', cacheStatus: 'miss', ttlConfig };
   }
@@ -174,19 +177,20 @@ export class ImageCacheService {
   private async generateFromOrigin(
     name: string,
     options: ImageGenerationOptions,
-  ): Promise<{ svg: string; avatarHash: string }> {
+  ): Promise<{ svg: string; avatarHash: string; avatarFailed: boolean }> {
     let avatarBase64: string | undefined = options.avatarBase64;
     let avatarMimeType: string | undefined = options.avatarMimeType;
     let avatarHash = '';
+    let avatarFailed = false;
 
     // Try R2 avatar cache first
     if (!avatarBase64) {
       try {
         const r2Avatar = await this.storage.getAvatar(name);
         if (r2Avatar) {
-          avatarBase64 = arrayBufferToBase64(r2Avatar);
-          avatarMimeType = 'image/png'; // R2 avatars stored as original type; default to png
-          avatarHash = await sha256Hex(r2Avatar);
+          avatarBase64 = arrayBufferToBase64(r2Avatar.data);
+          avatarMimeType = r2Avatar.contentType;
+          avatarHash = await sha256Hex(r2Avatar.data);
         }
       } catch (err) {
         console.warn(`[image-cache] R2 avatar read failed for ${name}:`, err);
@@ -213,7 +217,10 @@ export class ImageCacheService {
             console.warn(`[image-cache] R2 avatar write failed for ${name}:`, err);
           }
         }
+        // avatar is null → name genuinely has no avatar (avatarFailed stays false)
       } catch (err) {
+        // RPC/fetch error → avatar might exist but we couldn't get it
+        avatarFailed = true;
         console.warn(`[image-cache] avatar RPC failed for ${name}:`, err);
       }
     }
@@ -225,10 +232,10 @@ export class ImageCacheService {
       avatarMimeType,
     };
 
-    const image = await this.imageService.generateDomainImage(genOptions);
+    const image = await this.imageService.generateDomainImage(genOptions, this.bucket);
     const svg = typeof image.svg === 'string' ? image.svg : String(image.svg);
 
-    return { svg, avatarHash };
+    return { svg, avatarHash, avatarFailed };
   }
 
   // Background revalidation: regenerate and write back
@@ -239,7 +246,11 @@ export class ImageCacheService {
     params: ImageCacheParams,
     ttlConfig: TtlConfig,
   ): Promise<void> {
-    const { svg, avatarHash } = await this.generateFromOrigin(name, options);
+    const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options);
+    if (avatarFailed) {
+      console.warn(`[image-cache] revalidate skipped for ${name}: avatar fetch failed`);
+      return;
+    }
     await this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig);
   }
 

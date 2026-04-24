@@ -5,6 +5,7 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/setup-local-r2.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest",
@@ -18,12 +19,17 @@
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.0",
-    "@ensdomains/ens-avatar": "^1.0.3",
+    "@ensdomains/ens-avatar": "2.0.0-alpha.1",
     "@ensdomains/ensjs": "^3.7.0",
-    "adaptive-layout-composer": "^1.0.0",
+    "@resvg/resvg-wasm": "^2.6.2",
+    "adaptive-layout-composer": "^1.0.1",
+    "bidi-js": "^1.0.3",
     "graphql": "^16.11.0",
     "graphql-request": "^7.2.0",
+    "harfbuzzjs": "github:mdtanrikulu/harfbuzzjs",
     "hono": "^4.6.3",
+    "rasterize-wasm": "https://github.com/mdtanrikulu/rasterize-wasm/archive/refs/heads/lazy-font-loading.tar.gz",
+    "tiny-brotli-dec-wasm": "^1.0.1",
     "viem": "^2.21.19"
   },
   "devDependencies": {
@@ -40,8 +46,5 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "resolutions": {
-    "@ensdomains/ens-avatar": "portal:/Users/mdt./Projects/ENS/ens-avatar"
   }
 }

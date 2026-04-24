@@ -1,7 +1,7 @@
 import { createPublicClient, http, PublicClient, getContract } from 'viem';
 import { mainnet, sepolia } from 'viem/chains';
 import { NetworkName, NetworkConfig } from '../types';
-import { namehash } from '../utils/ens';
+import { namehash, labelhash } from '../utils/ens';
 
 // ENS v1 Contract addresses (legacy - for unmigrated names)
 export const CONTRACTS = {
@@ -12,40 +12,37 @@ export const CONTRACTS = {
     resolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
   },
   sepolia: {
-    registry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
-    registrar: '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85',
-    nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
-    resolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
+    registry: '0x7e89b563f936c68c31a360840eb7f9a4aacaf014',
+    registrar: '0x6409609247722761b8ba96371485de92a6d7b83b',
+    nameWrapper: '0xc7e033b8836e4bd55d069d113f018b98478cb091',
+    resolver: '0x640294a2b2d87e7f522db3e3e3e876764bce170d',
   },
 } as const;
 
-// ENS v2 Contract addresses
-// TODO: Replace placeholders with actual deployed addresses once available
-// Contracts repo: https://github.com/ensdomains/namechain
+// ENS v2 Contract addresses (deployed on mainnet + sepolia)
+// TODO: Replace mainnet placeholders with actual deployed addresses once available
 export const ENS_V2_CONTRACTS = {
   mainnet: {
-    // ENS v2 contracts on Ethereum mainnet
-    rootRegistry: 'ROOT_REGISTRY_ADDRESS', // Root registry for all TLDs
-    ethRegistry: 'ETH_REGISTRY_ADDRESS', // .eth registry
-    registryDatastore: 'REGISTRY_DATASTORE_ADDRESS', // RegistryDatastore - Universal storage for all registries
-    migrationContract: 'MIGRATION_CONTROLLER_ADDRESS', // Migration controller
+    rootRegistry: 'ROOT_REGISTRY_ADDRESS',
+    ethRegistry: 'ETH_REGISTRY_ADDRESS',
+    migrationContract: 'MIGRATION_CONTROLLER_ADDRESS',
+    resolver: 'ENSV2_RESOLVER_ADDRESS',
 
-    // Legacy v1 contracts (keep for unmigrated name compatibility)
+    // Legacy v1 contracts (for unmigrated name compatibility)
     legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
     legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
     legacyResolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
   },
   sepolia: {
-    // ENS v2 contracts on Sepolia testnet (placeholders)
-    rootRegistry: 'SEPOLIA_ROOT_REGISTRY_ADDRESS',
-    ethRegistry: 'SEPOLIA_ETH_REGISTRY_ADDRESS',
-    registryDatastore: 'SEPOLIA_REGISTRY_DATASTORE_ADDRESS',
-    migrationContract: 'SEPOLIA_MIGRATION_CONTROLLER_ADDRESS',
+    rootRegistry: '0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3',
+    ethRegistry: '0x796fff2e907449be8d5921bcc215b1b76d89d080',
+    migrationContract: '0x76ae358d9ad91651b78463ae609dadc9e7ce4402',
+    resolver: '0x18cb116a1c88531a4bb2996e4fef136a31e11a80',
 
     // Legacy v1 contracts on Sepolia
-    legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
-    legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
-    legacyResolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
+    legacyRegistry: '0x7e89b563f936c68c31a360840eb7f9a4aacaf014',
+    legacyNameWrapper: '0xc7e033b8836e4bd55d069d113f018b98478cb091',
+    legacyResolver: '0x640294a2b2d87e7f522db3e3e3e876764bce170d',
   },
 } as const;
 
@@ -102,9 +99,7 @@ export const NAME_WRAPPER_ABI = [
   },
 ] as const;
 
-// ENS v2 IRegistry interface ABI
-// Each registry implements these methods for hierarchical resolution
-// Based on: https://github.com/ensdomains/namechain/blob/main/contracts/src/common/IRegistry.sol
+// ENS v2 Registry ABI (PermissionedRegistry — shared by RootRegistry + ETHRegistry)
 export const REGISTRY_V2_ABI = [
   {
     inputs: [{ name: 'label', type: 'string' }],
@@ -120,25 +115,40 @@ export const REGISTRY_V2_ABI = [
     stateMutability: 'view',
     type: 'function',
   },
-] as const;
-
-// ENS v2 RegistryDatastore ABI (L2)
-// Universal storage contract for all registry data
-// Based on: https://github.com/ensdomains/namechain/blob/main/contracts/src/common/IRegistryDatastore.sol
-export const REGISTRY_DATASTORE_ABI = [
   {
-    inputs: [{ name: 'registry', type: 'address' }, { name: 'id', type: 'uint256' }],
-    name: 'getEntry',
+    inputs: [{ name: 'tokenId', type: 'uint256' }],
+    name: 'ownerOf',
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'anyId', type: 'uint256' }],
+    name: 'getExpiry',
+    outputs: [{ name: '', type: 'uint64' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'anyId', type: 'uint256' }],
+    name: 'getStatus',
+    outputs: [{ name: '', type: 'uint8' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'anyId', type: 'uint256' }],
+    name: 'getState',
     outputs: [
       {
-        name: '',
+        name: 'state',
         type: 'tuple',
         components: [
+          { name: 'status', type: 'uint8' },
           { name: 'expiry', type: 'uint64' },
-          { name: 'tokenVersionId', type: 'uint32' },
-          { name: 'subregistry', type: 'address' },
-          { name: 'eacVersionId', type: 'uint32' },
-          { name: 'resolver', type: 'address' },
+          { name: 'latestOwner', type: 'address' },
+          { name: 'tokenId', type: 'uint256' },
+          { name: 'resource', type: 'uint256' },
         ],
       },
     ],
@@ -146,38 +156,35 @@ export const REGISTRY_DATASTORE_ABI = [
     type: 'function',
   },
   {
-    inputs: [
-      { name: 'registry', type: 'address' },
-      { name: 'id', type: 'uint256' },
-      {
-        name: 'entry',
-        type: 'tuple',
-        components: [
-          { name: 'expiry', type: 'uint64' },
-          { name: 'tokenVersionId', type: 'uint32' },
-          { name: 'subregistry', type: 'address' },
-          { name: 'eacVersionId', type: 'uint32' },
-          { name: 'resolver', type: 'address' },
-        ],
-      },
-    ],
-    name: 'setEntry',
-    outputs: [],
-    stateMutability: 'nonpayable',
+    inputs: [{ name: 'tokenId', type: 'uint256' }],
+    name: 'uri',
+    outputs: [{ name: '', type: 'string' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
+// ENS v2 Resolver ABI (universal resolve interface)
+export const RESOLVER_V2_ABI = [
+  {
+    inputs: [{ name: 'name', type: 'bytes' }, { name: 'data', type: 'bytes' }],
+    name: 'resolve',
+    outputs: [{ name: '', type: 'bytes' }],
+    stateMutability: 'view',
     type: 'function',
   },
   {
-    inputs: [{ name: 'id', type: 'uint256' }, { name: 'subregistry', type: 'address' }],
-    name: 'setSubregistry',
-    outputs: [],
-    stateMutability: 'nonpayable',
+    inputs: [{ name: 'name', type: 'bytes' }],
+    name: 'getResolver',
+    outputs: [{ name: 'resolver', type: 'address' }, { name: 'offchain', type: 'bool' }],
+    stateMutability: 'view',
     type: 'function',
   },
   {
-    inputs: [{ name: 'id', type: 'uint256' }, { name: 'resolver', type: 'address' }],
-    name: 'setResolver',
-    outputs: [],
-    stateMutability: 'nonpayable',
+    inputs: [{ name: 'name', type: 'bytes' }],
+    name: 'requiresOffchain',
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
     type: 'function',
   },
 ] as const;
@@ -420,25 +427,28 @@ export class BlockchainService {
     };
   }
 
-  // ENS v2: Check if a name is unmigrated (still on ENS v1)
-  async isUnmigratedName(name: string): Promise<boolean> {
+  // Check ENS v2 migration status by querying ETHRegistry.getStatus()
+  // Status 0 = unregistered in v2, anything else = exists in v2 (migrated or native)
+  async isUnmigratedName(network: NetworkName, name: string): Promise<boolean> {
     try {
-      const node = namehash(name);
+      const v2Contracts = ENS_V2_CONTRACTS[network];
+      // Skip if v2 contracts aren't deployed yet (mainnet placeholders)
+      if (v2Contracts.ethRegistry.startsWith('0x') === false) return true;
 
-      const registry = getContract({
-        address: ENS_V2_CONTRACTS.mainnet.legacyRegistry as `0x${string}`,
-        abi: ENS_REGISTRY_ABI,
-        client: this.getClient('mainnet'),
+      const label = name.split('.')[0];
+      const lhash = labelhash(label);
+
+      const ethRegistry = getContract({
+        address: v2Contracts.ethRegistry as `0x${string}`,
+        abi: REGISTRY_V2_ABI,
+        client: this.getClient(network),
       });
 
-      const owner = await registry.read.owner([node as `0x${string}`]) as string;
-      const migrationContract = ENS_V2_CONTRACTS.mainnet.migrationContract;
-
-      // If owner is NOT migration contract AND not zero address, it's unmigrated
-      return owner !== migrationContract &&
-             owner !== '0x0000000000000000000000000000000000000000';
+      const status = await ethRegistry.read.getStatus([BigInt(lhash)]) as number;
+      // status 0 = not in v2 registry → unmigrated
+      return status === 0;
     } catch (error) {
-      console.error('Error checking unmigrated status:', error);
+      console.error('Error checking v2 migration status:', error);
       // Default to unmigrated to use safe legacy path
       return true;
     }
@@ -460,7 +470,7 @@ export class BlockchainService {
   // ENS v2: Get resolver with v2-aware routing logic
   async getResolverV2(network: NetworkName, name: string): Promise<string> {
     // Case 1: Unmigrated - use legacy v1 registry
-    if (await this.isUnmigratedName(name)) {
+    if (await this.isUnmigratedName(network, name)) {
       const node = namehash(name);
       return await this.getResolver(network, node);
     }

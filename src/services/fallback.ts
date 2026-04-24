@@ -1,9 +1,9 @@
 // Fallback and retry logic for when ensnode is down
 import type { EnsnodeService } from './ensnode';
-import type { BlockchainService } from './blockchain';
+import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
 import { namehash, validateEnsName } from '../utils/ens';
-import type { NetworkName } from '../types';
+import { MIGRATION_STATUS, type NetworkName } from '../types';
 
 export interface FallbackConfig {
   maxRetries: number;
@@ -179,7 +179,7 @@ export class FallbackService {
             expiryDate: nameData.expirationDate?.toISOString(),
             createdAt: nameData.registrationDate?.toISOString(),
             ttl: undefined,
-            isMigrated: nameData.migrationStatus === 'native',
+            isMigrated: nameData.migrationStatus === MIGRATION_STATUS.NATIVE,
           };
         },
       },
@@ -210,7 +210,7 @@ export class FallbackService {
           );
           return {
             name,
-            isMigrated: nameData.migrationStatus === 'native',
+            isMigrated: nameData.migrationStatus === MIGRATION_STATUS.NATIVE,
             ownerId: nameData.resolver.owner,
             resolverId: nameData.resolver.resolver,
             parentId: namehash(name.split('.').slice(1).join('.')),
@@ -265,13 +265,14 @@ export class FallbackService {
               });
             } catch (error) {
               // If we can't resolve a level, create a placeholder
+              const defaultResolver = CONTRACTS[this.config.blockchain.preferredNetwork as keyof typeof CONTRACTS]?.resolver || '';
               hierarchyItems.push({
                 name: domainName,
                 ownerId: '0x0000000000000000000000000000000000000000',
-                resolverId: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
+                resolverId: defaultResolver,
                 parentId: i === parts.length - 1 ? undefined : namehash(parts.slice(i + 1).join('.')),
                 owner: { id: '0x0000000000000000000000000000000000000000' },
-                resolver: { address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
+                resolver: { address: defaultResolver },
               });
             }
           }

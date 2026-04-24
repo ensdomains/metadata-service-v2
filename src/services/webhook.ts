@@ -175,12 +175,13 @@ export class WebhookService {
     console.log(`Processing webhook event: ${event.event} for ${domainName}`);
 
     try {
-      // Invalidate domain-specific cache entries
-      await Promise.all([
-        this.cache.delete(CacheKeys.domain(domainName)),
-        this.cache.delete(CacheKeys.migrationStatus(domainName)),
-        this.cache.delete(CacheKeys.hierarchy(domainName)),
-      ]);
+      // Invalidate domain-specific cache entries for all networks
+      const networks = ['mainnet', 'sepolia'];
+      await Promise.all(networks.flatMap(net => [
+        this.cache.delete(CacheKeys.domain(domainName, net)),
+        this.cache.delete(CacheKeys.migrationStatus(domainName, net)),
+        this.cache.delete(CacheKeys.hierarchy(domainName, net)),
+      ]));
 
       // Invalidate batch caches that might include this domain
       await this.invalidateBatchCaches(domainName);

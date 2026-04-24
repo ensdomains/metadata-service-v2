@@ -6,6 +6,16 @@ export interface AvatarImage {
   mimeType: string;
 }
 
+/** Detect image MIME type from magic bytes */
+function detectMimeType(buffer: Buffer): string | null {
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg';
+  if (buffer[0] === 0x89 && buffer[1] === 0x50) return 'image/png';
+  if (buffer[0] === 0x47 && buffer[1] === 0x49) return 'image/gif';
+  if (buffer[0] === 0x52 && buffer[1] === 0x49) return 'image/webp';
+  if (buffer[0] === 0x3c) return 'image/svg+xml';
+  return null;
+}
+
 export class AvatarService {
   private resolver: AvatarResolver;
 
@@ -58,9 +68,9 @@ export class AvatarService {
           return null;
         }
 
-        const mimeType = response.headers.get('Content-Type') || 'image/png';
         const arrayBuffer = await response.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
+        const mimeType = detectMimeType(buffer) || response.headers.get('Content-Type') || 'image/png';
 
         return { buffer, mimeType };
       }

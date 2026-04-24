@@ -12,8 +12,13 @@ declare module 'adaptive-layout-composer' {
     autoFontSize?: boolean;
     ensStyle?: boolean;
     maxFontSize?: number;
+    fontSize?: number;
+    fontFamily?: string;
+    fontBase64?: string | null;
     customElements?: string[];
+    fitMode?: 'natural' | 'exact';
   }
 
   export function createDynamicSVGImage(options?: SVGImageOptions): Promise<Uint8Array>;
+  export function initializeFont(fontBuffer: ArrayBuffer): Promise<void>;
 }
