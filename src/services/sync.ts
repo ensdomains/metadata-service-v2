@@ -2,7 +2,7 @@
 import { D1Service } from './d1';
 import { EnsnodeService, type EnsnodeDomain } from './ensnode';
 import { namehash, validateEnsName } from '../utils/ens';
-import type { MigrationStatus } from '../types';
+import { MIGRATION_STATUS, type MigrationStatus } from '../types';
 
 export interface SyncConfig {
   batchSize: number;
@@ -198,7 +198,9 @@ export class SyncService {
       const { status } = await this.ensnode.getMigrationStatus(name);
 
       if (status) {
-        await this.d1.storeMigrationStatus(name, 'unmigrated', {
+        // v1 subgraph isMigrated = 2019 registrar migration, not v2.
+        // Store as 'unmigrated' until v2 indexer is used for all networks.
+        await this.d1.storeMigrationStatus(name, MIGRATION_STATUS.UNMIGRATED, {
           l1Owner: status.owner?.id,
           expirationDate: status.expiryDate,
         });
@@ -422,14 +424,12 @@ export class SyncService {
   }
 
   // Helper: Sync related data for a domain (migration + hierarchy)
-  private async syncDomainRelatedData(name: string, domain: EnsnodeDomain): Promise<void> {
-    // Sync migration status if domain is migrated
-    if (domain.isMigrated) {
-      try {
-        await this.syncMigrationStatus(name);
-      } catch (error) {
-        console.warn(`Failed to sync migration status for ${name}:`, error);
-      }
+  private async syncDomainRelatedData(name: string, _domain: EnsnodeDomain): Promise<void> {
+    // Always sync migration status (v1 isMigrated is unreliable for v2 status)
+    try {
+      await this.syncMigrationStatus(name);
+    } catch (error) {
+      console.warn(`Failed to sync migration status for ${name}:`, error);
     }
 
     // Always sync hierarchy for domain structure

@@ -13,7 +13,7 @@ import type {
   RegistryHierarchyResponse,
   BatchMetadataResponse,
 } from "../types/api";
-import type { NetworkName, MigrationStatus } from "../types";
+import { MIGRATION_STATUS, type NetworkName, type MigrationStatus } from "../types";
 import {
   validateEnsName,
   getLabel,
@@ -85,10 +85,10 @@ export interface MetadataServiceConfig {
 
 export class MetadataService {
   private network: string;
-  private ensnode: EnsnodeService;
+  public ensnode: EnsnodeService;
   private internalCache?: CacheService; // For internal optimizations only
   private cache: CacheService; // Backwards compatibility
-  private blockchain: BlockchainService;
+  public blockchain: BlockchainService;
   private resolver: ResolverService;
   private fallback: FallbackService;
   private d1?: D1Service;
@@ -305,22 +305,21 @@ export class MetadataService {
 
       let response: MigrationStatusResponse;
 
-      if (source === "ensnode") {
-        response = {
-          name,
-          status: 'unmigrated',
-          l1Owner: (status as any).owner?.id,
-          expirationDate: (status as any).expiryDate,
-        };
-      } else {
-        // Built from blockchain data
-        response = {
-          name,
-          status: (status as any).isMigrated ? "migrated" : "unmigrated",
-          l1Owner: (status as any).owner?.id,
-          expirationDate: (status as any).expiryDate,
-        };
+      // v1 subgraph isMigrated = 2019 registrar migration, not v2. Only trust for sepolia (v2 indexer).
+      let migrationStatus: MigrationStatus = MIGRATION_STATUS.UNMIGRATED;
+      if (this.network === 'sepolia' && (status as any).isMigrated) {
+        migrationStatus = MIGRATION_STATUS.MIGRATED;
+      } else if (this.network !== 'sepolia') {
+        const isUnmigrated = await this.blockchain.isUnmigratedName(this.network as NetworkName, name);
+        migrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
       }
+
+      response = {
+        name,
+        status: migrationStatus,
+        l1Owner: (status as any).owner?.id,
+        expirationDate: (status as any).expiryDate,
+      };
 
       if (usedFallback) {
         console.warn(
@@ -364,7 +363,7 @@ export class MetadataService {
       // Last resort fallback response
       const fallbackResponse: MigrationStatusResponse = {
         name,
-        status: "unmigrated",
+        status: MIGRATION_STATUS.UNMIGRATED,
       };
 
       return fallbackResponse;
@@ -598,9 +597,16 @@ export class MetadataService {
     network: NetworkName,
     baseUrl?: string,
   ): Promise<MetadataResponse> {
-    // Check on-chain ENS v2 migration status via ETHRegistry.getStatus()
-    const isUnmigrated = await this.blockchain.isUnmigratedName(network, domain.name);
-    const v2MigrationStatus: MigrationStatus = isUnmigrated ? "unmigrated" : "migrated";
+    // Determine ENS v2 migration status.
+    // v1 subgraph's isMigrated refers to 2019 permanent registrar migration — NOT v2.
+    // Only trust isMigrated from v2 indexer (sepolia staging). For mainnet, use on-chain check.
+    let v2MigrationStatus: MigrationStatus;
+    if (this.network === 'sepolia' && domain.isMigrated !== undefined) {
+      v2MigrationStatus = domain.isMigrated ? MIGRATION_STATUS.MIGRATED : MIGRATION_STATUS.UNMIGRATED;
+    } else {
+      const isUnmigrated = await this.blockchain.isUnmigratedName(network, domain.name);
+      v2MigrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
+    }
 
     const origin = baseUrl || this.getDefaultBaseUrl();
     const imageUrl = `${origin}/${network}/registry/${encodeURIComponent(domain.name)}/image`;
@@ -872,11 +878,11 @@ export class MetadataService {
       const nameData = await this.resolver.resolveName(
         name,
         namehash(name),
-        "mainnet",
+        this.network as NetworkName,
       );
 
       // Determine migration status based on v1 vs v2 registry check
-      const status: MigrationStatus = nameData.migrationStatus || "unmigrated";
+      const status: MigrationStatus = nameData.migrationStatus || MIGRATION_STATUS.UNMIGRATED;
 
       return {
         name,
@@ -915,7 +921,7 @@ export class MetadataService {
           const nameData = await this.resolver.resolveName(
             domainName,
             namehash(domainName),
-            "mainnet",
+            this.network as NetworkName,
           );
 
           hierarchy.push({
@@ -925,7 +931,7 @@ export class MetadataService {
               "0x0000000000000000000000000000000000000000",
             resolver:
               nameData.resolver.resolver ||
-              "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63",
+              CONTRACTS[this.network as keyof typeof CONTRACTS]?.resolver || '',
             level,
           });
         } catch {
@@ -933,7 +939,7 @@ export class MetadataService {
           hierarchy.push({
             name: domainName,
             owner: "0x0000000000000000000000000000000000000000",
-            resolver: "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63",
+            resolver: CONTRACTS[this.network as keyof typeof CONTRACTS]?.resolver || '',
             level,
           });
         }

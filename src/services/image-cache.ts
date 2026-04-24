@@ -1,5 +1,5 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
-import type { SvgCacheEntry, ImageCacheParams, MigrationStatus } from '../types';
+import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type MigrationStatus } from '../types';
 import type { StorageManager } from '../utils/storage';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';
 import type { AvatarService } from './avatar';
@@ -48,15 +48,16 @@ export class ImageCacheService {
     private storage: StorageManager,
     private imageService: ImageGenerationService,
     private avatarService: AvatarService,
+    private bucket?: R2Bucket,
   ) {}
 
   // Get TTL config based on migration status
   getTtlConfig(migrationStatus: string): TtlConfig {
     switch (migrationStatus) {
-      case 'native':
-      case 'migrated':
+      case MIGRATION_STATUS.NATIVE:
+      case MIGRATION_STATUS.MIGRATED:
         return { softTtl: 21600, hardTtl: 86400, r2MaxAge: 86400 };      // 6h / 24h / 24h
-      case 'unmigrated':
+      case MIGRATION_STATUS.UNMIGRATED:
         return { softTtl: 300, hardTtl: 1800, r2MaxAge: 3600 };           // 5m / 30m / 1h
       default:
         return { softTtl: 3600, hardTtl: 21600, r2MaxAge: 21600 };        // 1h / 6h / 6h
@@ -70,7 +71,7 @@ export class ImageCacheService {
     executionCtx: ExecutionContext,
   ): Promise<ImageCacheResult> {
     const params: ImageCacheParams = {
-      migrationStatus: options.migrationStatus || 'unmigrated',
+      migrationStatus: options.migrationStatus || MIGRATION_STATUS.UNMIGRATED,
       width: options.size?.width || 518,
       height: options.size?.height || 518,
     };
@@ -231,7 +232,7 @@ export class ImageCacheService {
       avatarMimeType,
     };
 
-    const image = await this.imageService.generateDomainImage(genOptions);
+    const image = await this.imageService.generateDomainImage(genOptions, this.bucket);
     const svg = typeof image.svg === 'string' ? image.svg : String(image.svg);
 
     return { svg, avatarHash, avatarFailed };

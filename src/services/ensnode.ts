@@ -485,15 +485,9 @@ export class EnsnodeService {
   }
 
   // Get appropriate cache TTL based on migration status
-  static getCacheTTL(domain?: EnsnodeDomain): number {
-    if (!domain) {
-      return 300; // 5 minutes for non-existent domains
-    }
-
-    if (domain.isMigrated) {
-      return 3600; // 1 hour for migrated domains (stable)
-    }
-
-    return 300; // 5 minutes for unmigrated domains (may change)
+  static getCacheTTL(_domain?: EnsnodeDomain): number {
+    // isMigrated from v1 subgraph means 2019 registrar migration, not v2.
+    // Use a uniform TTL until v2 migration status is reliable across all networks.
+    return 300; // 5 minutes
   }
 }

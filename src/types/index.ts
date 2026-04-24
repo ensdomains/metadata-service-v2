@@ -1,39 +1,14 @@
 // Network types
 export type NetworkName = 'mainnet' | 'sepolia';
 
-// ENS version types
-export type ENSVersion = 'v1' | 'v2';
-
 // Migration status types
-export type MigrationStatus = 'migrated' | 'native' | 'unmigrated';
+export const MIGRATION_STATUS = {
+  MIGRATED: 'migrated',
+  NATIVE: 'native',
+  UNMIGRATED: 'unmigrated',
+} as const;
 
-// Registry type for routing
-export type RegistryType = 'registrar' | 'wrapper' | 'legacy';
-
-// Basic metadata structure
-export interface Metadata {
-  name: string;
-  description: string;
-  image: string;
-  attributes: MetadataAttribute[];
-  background_image?: string;
-  is_normalized: boolean;
-  version: ENSVersion;
-  migration_status?: MigrationStatus;
-  url?: string;
-}
-
-export interface MetadataAttribute {
-  trait_type: string;
-  display_type?: 'string' | 'number' | 'date';
-  value: string | number;
-}
-
-// Cache configuration
-export interface CacheConfig {
-  ttl: number;
-  layer: 'kv' | 'memory' | 'none';
-}
+export type MigrationStatus = typeof MIGRATION_STATUS[keyof typeof MIGRATION_STATUS];
 
 // Network configuration
 export interface NetworkConfig {
@@ -60,24 +35,4 @@ export interface ImageCacheParams {
   migrationStatus: string;
   width: number;
   height: number;
-}
-
-// Error types
-export class MetadataError extends Error {
-  constructor(message: string, public code: string, public status: number = 500) {
-    super(message);
-    this.name = 'MetadataError';
-  }
-}
-
-export class NetworkError extends MetadataError {
-  constructor(network: string) {
-    super(`Unsupported network: ${network}`, 'UNSUPPORTED_NETWORK', 400);
-  }
-}
-
-export class NotFoundError extends MetadataError {
-  constructor(resource: string) {
-    super(`Resource not found: ${resource}`, 'NOT_FOUND', 404);
-  }
 }

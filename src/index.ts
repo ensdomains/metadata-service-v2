@@ -27,6 +27,7 @@ import type {
   HealthResponse,
   ErrorResponse,
 } from "./types/api";
+import { MIGRATION_STATUS, type MigrationStatus } from "./types";
 import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
@@ -97,7 +98,7 @@ function getImageServices(env: Env, network: string): ImageServices {
   const avatarService = new AvatarService(getRpcUrl(env, network));
   const imageService = new ImageGenerationService(avatarService);
   const storageManager = new StorageManager(env.ASSET_BUCKET);
-  const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService);
+  const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService, env.ASSET_BUCKET);
   const services = { avatarService, imageService, imageCacheService };
   _imageServices.set(network, services);
   return services;
@@ -281,7 +282,7 @@ async function handleImage(c: any, network: string, name: string) {
   const height = c.req.query('h');
 
   const options: ImageGenerationOptions = { name };
-  if (status) options.migrationStatus = status as 'migrated' | 'native' | 'unmigrated';
+  if (status) options.migrationStatus = status as MigrationStatus;
   if (width && height) {
     options.size = { width: parseInt(width, 10), height: parseInt(height, 10) };
   }
@@ -295,7 +296,23 @@ async function handleImage(c: any, network: string, name: string) {
     return c.json(errorResponse, 400);
   }
 
-  if (!status) options.migrationStatus = 'unmigrated';
+  if (!status) {
+    // v1 subgraph isMigrated = 2019 registrar migration, not ENS v2.
+    // Only trust isMigrated from v2 indexer (sepolia). For mainnet, use on-chain check.
+    try {
+      if (network === 'sepolia') {
+        const { metadataService } = getServices(c.env, network);
+        const { domain } = await metadataService.ensnode.getDomain(name);
+        options.migrationStatus = domain?.isMigrated ? MIGRATION_STATUS.MIGRATED : MIGRATION_STATUS.UNMIGRATED;
+      } else {
+        const { metadataService } = getServices(c.env, network);
+        const isUnmigrated = await metadataService.blockchain.isUnmigratedName(network as any, name);
+        options.migrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
+      }
+    } catch {
+      options.migrationStatus = MIGRATION_STATUS.UNMIGRATED;
+    }
+  }
 
   const result = await imageCacheService.getImage(name, options, c.executionCtx);
   const { ttlConfig, cacheStatus } = result;
@@ -692,7 +709,7 @@ app.get(
       const outputHeight = c.req.query('h') ? parseInt(c.req.query('h')!, 10) : null;
 
       const options: ImageGenerationOptions = { name };
-      if (status) options.migrationStatus = status as 'migrated' | 'native' | 'unmigrated';
+      if (status) options.migrationStatus = status as MigrationStatus;
 
       // Non-square: pass actual dimensions so layout composer handles aspect ratio
       // Square: generate at default size, rewrite width/height (viewBox scaling handles it)
@@ -706,7 +723,20 @@ app.get(
       if (!validation.valid) {
         return c.json({ error: `Invalid image parameters: ${validation.errors.join(', ')}`, timestamp: new Date().toISOString() }, 400);
       }
-      if (!status) options.migrationStatus = 'unmigrated';
+      if (!status) {
+        try {
+          const { metadataService } = getServices(c.env, network);
+          if (network === 'sepolia') {
+            const { domain } = await metadataService.ensnode.getDomain(name);
+            options.migrationStatus = domain?.isMigrated ? MIGRATION_STATUS.MIGRATED : MIGRATION_STATUS.UNMIGRATED;
+          } else {
+            const isUnmigrated = await metadataService.blockchain.isUnmigratedName(network as any, name);
+            options.migrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
+          }
+        } catch {
+          options.migrationStatus = MIGRATION_STATUS.UNMIGRATED;
+        }
+      }
 
       const result = await imageCacheService.getImage(name, options, c.executionCtx);
 
@@ -781,8 +811,19 @@ app.post("/webhook/ensnode", async (c) => {
 
         // Proactive warming: regenerate default image so next request hits warm cache
         const { imageCacheService } = getImageServices(c.env, network);
-        await imageCacheService.getImage(name, { name, migrationStatus: 'unmigrated' }, c.executionCtx);
-        console.log(`[webhook] proactively warmed image cache for ${name}`);
+        const { metadataService } = getServices(c.env, network);
+        let migrationStatus: MigrationStatus = MIGRATION_STATUS.UNMIGRATED;
+        try {
+          if (network === 'sepolia') {
+            const { domain } = await metadataService.ensnode.getDomain(name);
+            if (domain?.isMigrated) migrationStatus = MIGRATION_STATUS.MIGRATED;
+          } else {
+            const isUnmigrated = await metadataService.blockchain.isUnmigratedName(network as any, name);
+            if (!isUnmigrated) migrationStatus = MIGRATION_STATUS.MIGRATED;
+          }
+        } catch {}
+        await imageCacheService.getImage(name, { name, migrationStatus }, c.executionCtx);
+        console.log(`[webhook] proactively warmed image cache for ${name} (${migrationStatus})`);
       } catch (err) {
         console.warn('[webhook] cache warming failed:', err);
       }

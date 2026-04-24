@@ -1,8 +1,9 @@
 // SVG-based NFT image generation service for ENS domains
-import { createDynamicSVGImage } from "adaptive-layout-composer";
-import type { MigrationStatus } from "../types";
+import { createDynamicSVGImage, initializeFont } from "adaptive-layout-composer";
+import { MIGRATION_STATUS, type MigrationStatus } from "../types";
 import { getCharacterSet } from "../utils/ens";
 import type { AvatarService } from "./avatar";
+import { getSatoshiFont } from "./font";
 
 export interface ImageGenerationOptions {
   name: string;
@@ -36,6 +37,7 @@ export class ImageGenerationService {
   // Generate SVG image for ENS domain
   async generateDomainImage(
     options: ImageGenerationOptions,
+    bucket?: R2Bucket,
   ): Promise<GeneratedImage> {
     const {
       name,
@@ -70,18 +72,30 @@ export class ImageGenerationService {
         ? `data:${avatarMimeType};base64,${avatarBase64}`
         : null;
 
+      // Load Satoshi font from R2 (memoized per isolate)
+      let satoshiFontBase64: string | undefined;
+      if (bucket) {
+        const satoshi = await getSatoshiFont(bucket);
+        await initializeFont(satoshi.buffer);
+        satoshiFontBase64 = satoshi.base64;
+      }
+
       const result = await createDynamicSVGImage({
         text: name,
         width: size.width,
         height: size.height,
         autoFontSize: true,
+        maxFontSize: Math.round(32 * size.width / 270),
+        fontFamily: 'Satoshi',
+        fontBase64: satoshiFontBase64,
         textColor: colors.text,
         backgroundColor: avatarBase64 ? 'transparent' : colors.background,
-        backgroundImageUrl, // Pass avatar as data URI
+        backgroundImageUrl,
         customElements: [
-          this.generateStatusBadge(migrationStatus, colors),
-          this.generateCharacterSetIndicator(characterSet, colors),
+          this.generateStatusBadge(migrationStatus, colors, size.width, characterSet !== "letter" && characterSet !== "digit" && characterSet !== "alphanumeric"),
+          this.generateCharacterSetIndicator(characterSet, colors, size.width),
         ].filter(Boolean),
+        fitMode: 'natural',
       });
 
       // The result might be a string, Buffer, typed array, or an object with svg property
@@ -159,12 +173,18 @@ export class ImageGenerationService {
 
   // Generate background element
   // Generate migration status badge
-  private generateStatusBadge(status: MigrationStatus, colors: Record<string, string>) {
+  private generateStatusBadge(status: MigrationStatus, colors: Record<string, string>, width: number = 518, hasCharIndicator: boolean = false) {
+    // Don't show migration badge until v2 is live (all mainnet names are 'unmigrated' for now)
+    if (status === MIGRATION_STATUS.UNMIGRATED) return '';
+
     const badgeText = status.toUpperCase();
     const badgeWidth = Math.max(60, badgeText.length * 8 + 20);
+    const rightOffset = hasCharIndicator ? 50 : 10;
+    const x = width - badgeWidth - rightOffset;
+    const y = 13; // vertically centered with 30px character indicator circle
 
     return `
-      <g transform="translate(10, 10)">
+      <g transform="translate(${x}, ${y})">
         <rect width="${badgeWidth}" height="24" rx="12" fill="${colors.badge}" opacity="0.9" />
         <text x="${badgeWidth / 2}" y="16"
               text-anchor="middle"
@@ -179,23 +199,20 @@ export class ImageGenerationService {
   }
 
   // Generate character set indicator
-  private generateCharacterSetIndicator(characterSet: string, colors: Record<string, string>) {
-    if (characterSet === "latin") return ""; // No indicator for standard latin
+  private generateCharacterSetIndicator(characterSet: string, colors: Record<string, string>, width: number = 518) {
+    // No indicator for standard letter/digit/alphanumeric names
+    if (characterSet === "letter" || characterSet === "digit" || characterSet === "alphanumeric") return "";
 
-    const indicators = {
+    const indicators: Record<string, string> = {
       emoji: "🌍",
-      arabic: "ع",
-      chinese: "中",
-      japanese: "あ",
-      korean: "한",
       mixed: "※",
     };
 
-    const indicator =
-      indicators[characterSet as keyof typeof indicators] || "◆";
+    const indicator = indicators[characterSet] || "◆";
+    const x = width - 40;
 
     return `
-      <g transform="translate(460, 10)">
+      <g transform="translate(${x}, 10)">
         <circle cx="15" cy="15" r="15" fill="${colors.accent}" opacity="0.8" />
         <text x="15" y="20"
               text-anchor="middle"

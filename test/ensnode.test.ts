@@ -326,14 +326,14 @@ describe("EnsnodeService", () => {
         isMigrated: false,
       });
 
-      expect(migratedTtl).toBeGreaterThan(unmigratedTtl);
-      expect(migratedTtl).toBe(3600); // 1 hour for migrated domains
-      expect(unmigratedTtl).toBe(300); // 5 minutes for unmigrated domains
+      // Uniform TTL until v2 migration status is reliable across all networks
+      expect(migratedTtl).toBe(300);
+      expect(unmigratedTtl).toBe(300);
     });
 
     it("should use cache service integration points", async () => {
       // Test cache key generation
-      const key = CacheKeys.domain("test.eth");
+      const key = CacheKeys.domain("test.eth", "mainnet");
       expect(key).toBe("ensnode:mainnet:domain:test.eth");
 
       // Test cache operations

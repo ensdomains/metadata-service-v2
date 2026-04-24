@@ -1,6 +1,6 @@
 import { BlockchainService } from './blockchain';
 import { namehash, labelhash, isEmptyAddress, tokenIdToHex, getTokenIdVersion } from '../utils/ens';
-import { NetworkName, MigrationStatus } from '../types';
+import { MIGRATION_STATUS, NetworkName, MigrationStatus } from '../types';
 
 export interface ResolverData {
   owner: string;
@@ -227,12 +227,12 @@ export class ResolverService {
     owner: string
   ): MigrationStatus {
     if (isEmptyAddress(owner)) {
-      return 'unmigrated';
+      return MIGRATION_STATUS.UNMIGRATED;
     }
 
     // TODO: Check v2 registry to determine if name is native v2 or migrated
     // For now, names with owners are considered unmigrated (v1) by default
-    return 'unmigrated';
+    return MIGRATION_STATUS.UNMIGRATED;
   }
 
   // Get registration history for analytics

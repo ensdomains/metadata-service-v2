@@ -5,6 +5,7 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/setup-local-r2.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest",
@@ -21,7 +22,7 @@
     "@ensdomains/ens-avatar": "2.0.0-alpha.1",
     "@ensdomains/ensjs": "^3.7.0",
     "@resvg/resvg-wasm": "^2.6.2",
-    "adaptive-layout-composer": "^1.0.0",
+    "adaptive-layout-composer": "^1.0.1",
     "bidi-js": "^1.0.3",
     "graphql": "^16.11.0",
     "graphql-request": "^7.2.0",

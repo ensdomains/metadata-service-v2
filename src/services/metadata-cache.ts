@@ -1,6 +1,7 @@
 // Endpoint-level metadata cache with stale-while-revalidate
 // Sits in front of MetadataService to avoid repeated ensnode/blockchain calls
 import type { MetadataResponse } from '../types/api';
+import { MIGRATION_STATUS } from '../types';
 
 interface MetadataCacheEntry {
   metadata: MetadataResponse;
@@ -28,10 +29,10 @@ function buildCacheKey(network: string, registryType: string, identifier: string
 
 function getTtlConfig(migrationStatus: string): TtlConfig {
   switch (migrationStatus) {
-    case 'native':
-    case 'migrated':
+    case MIGRATION_STATUS.NATIVE:
+    case MIGRATION_STATUS.MIGRATED:
       return { softTtl: 86400, hardTtl: 2592000 };   // 24h / 30 days
-    case 'unmigrated':
+    case MIGRATION_STATUS.UNMIGRATED:
       return { softTtl: 3600, hardTtl: 604800 };      // 1h / 7 days
     default:
       return { softTtl: 21600, hardTtl: 604800 };     // 6h / 7 days
@@ -40,7 +41,7 @@ function getTtlConfig(migrationStatus: string): TtlConfig {
 
 function extractMigrationStatus(metadata: MetadataResponse): string {
   const attr = metadata.attributes?.find(a => a.trait_type === 'Migration Status');
-  return attr ? String(attr.value).toLowerCase() : 'unmigrated';
+  return attr ? String(attr.value).toLowerCase() : MIGRATION_STATUS.UNMIGRATED;
 }
 
 export class MetadataCacheService {
