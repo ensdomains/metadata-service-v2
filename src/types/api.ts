@@ -1,4 +1,6 @@
 // API request and response types
+import type { MigrationStatus } from './index';
+
 export interface MetadataRequest {
   network: 'mainnet' | 'sepolia';
   registryType: 'registry' | 'namewrapper';
@@ -26,7 +28,7 @@ export interface MetadataResponse {
 
 export interface MigrationStatusResponse {
   name: string;
-  status: 'migrated' | 'native' | 'unmigrated';
+  status: MigrationStatus;
   l1Owner?: string;
   migrationDate?: string;
   expirationDate?: string;

@@ -1,6 +1,7 @@
 import { namehash } from "@ensdomains/ensjs/utils";
 import { ens_normalize as normalize } from "@adraffy/ens-normalize";
-import { keccak256, toBytes, numberToHex, pad } from "viem";
+import { keccak256, numberToHex, pad, toHex } from "viem";
+import { packetToBytes, labelhash } from "viem/ens";
 
 // Type declaration for Intl.Segmenter
 declare namespace Intl {
@@ -9,8 +10,8 @@ declare namespace Intl {
   }
 }
 
-// Re-export ensjs utilities
-export { namehash, normalize };
+// Re-export library utilities (namehash → ensjs, labelhash → viem, normalize → adraffy)
+export { namehash, normalize, labelhash };
 
 // Version enum
 export enum Version {
@@ -31,11 +32,6 @@ export const characterSet: { [key: string]: CharacterSet } = Object.freeze({
 
 // ETH namehash constant
 const ETH_NAMEHASH = '4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0';
-
-// Basic labelhash function
-export function labelhash(label: string): `0x${string}` {
-  return keccak256(toBytes(label));
-}
 
 // ETH namehash construction
 export function constructEthNameHash(tokenId: string, version: Version): string {
@@ -158,9 +154,39 @@ export function isEmptyHash(hash: string): boolean {
   return !hash || hash === EMPTY_HASH;
 }
 
+// Max accepted ENS name length. Caps cache-key size (KV keys are limited to 512
+// bytes; `meta:`/`svg:` prefixes + network/status leave room for ~255) and blocks
+// cache-flooding via arbitrarily long names.
+export const MAX_ENS_NAME_LENGTH = 255;
+
+/**
+ * Canonical form for cache keys, indexer queries, and invalidation matching.
+ * ENS labels are case-insensitive (the namehash lowercases ASCII), so two
+ * requests differing only in case MUST map to the same cache entry. NFC + lower
+ * is a safe canonicalization that never throws (unlike full ENSIP-15 normalize,
+ * which we still surface separately via `isNormalized`).
+ */
+export function canonicalizeName(name: string): string {
+  return name.normalize("NFC").toLowerCase();
+}
+
+/**
+ * DNS wire-format encoding of an ENS name for UniversalResolverV2.findResolver/
+ * resolve (length-prefixed labels + null root, e.g. "foo.eth" → 0x03666f6f0365746800).
+ * Delegates to viem's `packetToBytes`, which also handles >255-byte labels via
+ * labelhash exactly as the UniversalResolver expects.
+ */
+export function dnsEncodeName(name: string): `0x${string}` {
+  return toHex(packetToBytes(name));
+}
+
 // Validate ENS name format
 export function validateEnsName(name: string): boolean {
   if (!name || name.length === 0) {
+    return false;
+  }
+
+  if (name.length > MAX_ENS_NAME_LENGTH) {
     return false;
   }
 

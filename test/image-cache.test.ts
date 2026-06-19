@@ -15,6 +15,7 @@ vi.mock('../src/utils/ens', () => ({
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
   validateEnsName: vi.fn().mockReturnValue(true),
+  canonicalizeName: (n: string) => n.toLowerCase(),
 }));
 
 // Mock AvatarService
@@ -41,7 +42,7 @@ describe('ImageCacheService', () => {
     storage = new StorageManager(r2Bucket);
     avatarService = new AvatarService('https://mainnet.test.rpc');
     imageService = new ImageGenerationService(avatarService);
-    imageCacheService = new ImageCacheService(svgCacheKv, storage, imageService, avatarService);
+    imageCacheService = new ImageCacheService(svgCacheKv, storage, imageService, avatarService, 'sepolia');
 
     waitUntilPromises = [];
     executionCtx = {
@@ -55,7 +56,7 @@ describe('ImageCacheService', () => {
     migrationStatus: 'unmigrated' as const,
   };
 
-  const cacheKey = 'svg:nick.eth:unmigrated:518:518';
+  const cacheKey = 'svg:nick.eth:sepolia:unmigrated:518:518';
 
   describe('L1 fresh hit', () => {
     it('should return immediately from KV without touching R2 or origin', async () => {

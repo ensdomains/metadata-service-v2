@@ -1,28 +1,63 @@
-// Webhook handler for ensnode cache invalidation
+// Webhook handler for cache invalidation, compatible with the zigens ENS v2
+// indexer's webhook delivery contract (see zigens/src/webhooks/manager.zig).
+//
+// CONTRACT (sender = zigens):
+//   Headers:
+//     X-Webhook-Signature: sha256=<hex>   HMAC-SHA256 over "{timestamp}.{body}"
+//     X-Webhook-Timestamp: <unix seconds> the value signed into the preamble
+//     Content-Type: application/json
+//   The HMAC key is the configured secret HEX-DECODED to raw bytes (zigens
+//   generates a 32-byte secret and ships it hex-encoded). The receiver MUST
+//   verify by recomputing HMAC over "<timestamp>.<rawBody>" and constant-time
+//   comparing, and SHOULD reject timestamps outside a tolerance window (replay).
+//
+//   Body (flat event):
+//     { event_type, protocol, block_number, tx_hash, log_index,
+//       contract_address, name|null, namehash|null, data, timestamp }
 import type { Context } from 'hono';
 import { CacheService, CacheKeys } from './cache';
-import { validateEnsName } from '../utils/ens';
+import { validateEnsName, canonicalizeName } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
 
-// Webhook payload types
+// Webhook payload — matches zigens' WebhookManager.buildPayload output.
 export interface EnsnodeWebhookEvent {
-  event: 'domain.updated' | 'domain.transferred' | 'domain.expired' | 'domain.renewed';
-  domain: {
-    name: string;
-    tokenId?: string;
-    owner?: string;
-    resolver?: string;
-    expiry?: string;
-  };
-  timestamp: string;
-  network: 'mainnet' | 'sepolia';
+  event_type: string;          // PascalCase event name, e.g. "NameRegistered"
+  protocol: 'v1' | 'v2';       // ENS version (not chain) — see network mapping in index.ts
+  block_number: number;
+  tx_hash: string;
+  log_index: number;
+  contract_address: string;
+  name: string | null;
+  namehash: string | null;
+  data: string;                // JSON-encoded extra data (opaque to us)
+  timestamp: number;           // unix seconds
 }
 
 export interface WebhookValidationConfig {
   secret?: string;
   allowedIPs?: string[];
   requireAuth: boolean;
+  /**
+   * Escape hatch for local dev ONLY: accept webhooks even when no `secret` is
+   * configured. Defaults to false → the receiver is fail-CLOSED, so a missing
+   * secret in production rejects all webhooks (503) instead of silently accepting
+   * unauthenticated cache-eviction / warming-amplification requests.
+   */
+  allowUnauthenticated?: boolean;
+  /** Max allowed clock skew between X-Webhook-Timestamp and now, in seconds. */
+  toleranceSecs?: number;
 }
+
+// Event types whose effect is primarily about expiry/lifecycle, so they also
+// flush the expiry-bucketed internal caches.
+const EXPIRY_AFFECTING_EVENTS = new Set([
+  'NameRenewed', 'ExpiryUpdated', 'NameBurned', 'LabelUnregistered', 'NameMigrated',
+]);
+
+// Replay window for X-Webhook-Timestamp. Kept tight: zigens signs a fresh
+// timestamp per delivery attempt, so legitimate retries are unaffected, while a
+// captured request is replayable for at most this long. Override via WEBHOOK_TOLERANCE_SECS.
+const DEFAULT_TOLERANCE_SECS = 120;
 
 export class WebhookService {
   private svgCacheKv?: KVNamespace;
@@ -41,141 +76,156 @@ export class WebhookService {
     this.metadataCacheKv = metadataCacheKv;
   }
 
-  // Handle incoming webhook
+  // Handle incoming webhook. Reads the request body exactly ONCE and uses that
+  // same bytes for both signature verification and JSON parsing.
   async handleWebhook(c: Context): Promise<Response> {
     try {
-      // Validate request
-      const validationResult = await this.validateRequest(c);
+      // Read the raw body a single time — signature is computed over these exact
+      // bytes, so we must not re-read or re-serialize.
+      const rawBody = await c.req.text();
+
+      const validationResult = await this.validateRequest(c, rawBody);
       if (!validationResult.valid) {
         return c.json({ error: validationResult.error }, (validationResult.status || 400) as any);
       }
 
-      // Parse webhook payload
-      const payload = await c.req.json() as EnsnodeWebhookEvent;
+      let payload: EnsnodeWebhookEvent;
+      try {
+        payload = JSON.parse(rawBody) as EnsnodeWebhookEvent;
+      } catch {
+        return c.json({ error: 'Invalid JSON payload' }, 400);
+      }
 
-      // Validate payload structure
       const payloadValidation = this.validatePayload(payload);
       if (!payloadValidation.valid) {
         return c.json({ error: payloadValidation.error }, 400);
       }
 
-      // Process webhook event
       await this.processWebhookEvent(payload);
 
-      // Return success response
       return c.json({
         status: 'success',
         processed: true,
+        event: payload.event_type,
+        name: payload.name ?? null,
         timestamp: new Date().toISOString(),
       });
-
     } catch (error) {
       console.error('Webhook processing error:', error);
       return c.json({ error: 'Internal server error' }, 500);
     }
   }
 
-  // Validate webhook request
-  private async validateRequest(c: Context): Promise<{
+  // Validate request authenticity (IP allowlist + HMAC signature + replay window).
+  private async validateRequest(c: Context, rawBody: string): Promise<{
     valid: boolean;
     error?: string;
     status?: number;
   }> {
-    // Check if authentication is required
-    if (!this.config.requireAuth) {
-      return { valid: true };
+    // Fail-CLOSED: a webhook with no configured secret is rejected unless the
+    // explicit local-dev escape hatch is set. This prevents an unauthenticated
+    // cache-eviction / warming-amplification DoS if WEBHOOK_SECRET is unset in prod.
+    if (!this.config.secret) {
+      if (this.config.allowUnauthenticated) {
+        return { valid: true };
+      }
+      return { valid: false, error: 'Webhook authentication is not configured', status: 503 };
     }
 
-    // Validate IP allowlist if configured
     if (this.config.allowedIPs && this.config.allowedIPs.length > 0) {
-      const clientIP = c.req.header('CF-Connecting-IP') ||
-                       c.req.header('X-Forwarded-For') ||
-                       'unknown';
-
+      // Trust ONLY CF-Connecting-IP — X-Forwarded-For is client-spoofable, so an
+      // allowlist that honored it could be trivially bypassed.
+      const clientIP = c.req.header('CF-Connecting-IP') || 'unknown';
       if (!this.config.allowedIPs.includes(clientIP)) {
-        return {
-          valid: false,
-          error: 'Unauthorized IP address',
-          status: 403,
-        };
+        return { valid: false, error: 'Unauthorized IP address', status: 403 };
       }
     }
 
-    // Validate webhook signature if secret is configured
     if (this.config.secret) {
-      const signature = c.req.header('X-Ensnode-Signature');
-      if (!signature) {
-        return {
-          valid: false,
-          error: 'Missing webhook signature',
-          status: 401,
-        };
+      const signatureHeader = c.req.header('X-Webhook-Signature');
+      const timestampHeader = c.req.header('X-Webhook-Timestamp');
+
+      if (!signatureHeader) {
+        return { valid: false, error: 'Missing webhook signature', status: 401 };
+      }
+      if (!timestampHeader) {
+        return { valid: false, error: 'Missing webhook timestamp', status: 401 };
       }
 
-      const body = await c.req.text();
-      const expectedSignature = await this.calculateSignature(body, this.config.secret);
+      // Replay protection: reject timestamps outside the tolerance window.
+      const ts = Number(timestampHeader);
+      if (!Number.isFinite(ts)) {
+        return { valid: false, error: 'Invalid webhook timestamp', status: 401 };
+      }
+      const tolerance = this.config.toleranceSecs ?? DEFAULT_TOLERANCE_SECS;
+      const nowSecs = Math.floor(Date.now() / 1000);
+      if (Math.abs(nowSecs - ts) > tolerance) {
+        return { valid: false, error: 'Webhook timestamp outside tolerance window', status: 401 };
+      }
 
-      if (signature !== expectedSignature) {
-        return {
-          valid: false,
-          error: 'Invalid webhook signature',
-          status: 401,
-        };
+      // Signed string is "{timestamp}.{body}" — must match the sender exactly.
+      const expected = await this.calculateSignature(`${timestampHeader}.${rawBody}`, this.config.secret);
+      const provided = signatureHeader.startsWith('sha256=')
+        ? signatureHeader.slice('sha256='.length)
+        : signatureHeader;
+
+      if (!timingSafeEqualHex(provided, expected)) {
+        return { valid: false, error: 'Invalid webhook signature', status: 401 };
       }
     }
 
     return { valid: true };
   }
 
-  // Validate webhook payload structure
-  private validatePayload(payload: any): {
-    valid: boolean;
-    error?: string;
-  } {
+  // Validate webhook payload structure (zigens flat event shape).
+  private validatePayload(payload: any): { valid: boolean; error?: string } {
     if (!payload || typeof payload !== 'object') {
       return { valid: false, error: 'Invalid payload format' };
     }
 
-    // Check required fields
-    const requiredFields = ['event', 'domain', 'timestamp', 'network'];
-    for (const field of requiredFields) {
-      if (!(field in payload)) {
-        return { valid: false, error: `Missing required field: ${field}` };
-      }
+    if (typeof payload.event_type !== 'string' || payload.event_type.length === 0) {
+      return { valid: false, error: 'Missing or invalid event_type' };
+    }
+    if (typeof payload.timestamp !== 'number') {
+      return { valid: false, error: 'Missing or invalid timestamp' };
     }
 
-    // Validate event type
-    const validEvents = ['domain.updated', 'domain.transferred', 'domain.expired', 'domain.renewed'];
-    if (!validEvents.includes(payload.event)) {
-      return { valid: false, error: 'Invalid event type' };
+    // A name OR namehash must be present to target invalidation. (zigens may send
+    // either; some events carry only a namehash.)
+    if (!payload.name && !payload.namehash) {
+      return { valid: false, error: 'Event must include a name or namehash' };
     }
 
-    // Validate domain object
-    if (!payload.domain || !payload.domain.name) {
-      return { valid: false, error: 'Missing domain name' };
-    }
-
-    // Validate domain name format
-    if (!validateEnsName(payload.domain.name)) {
+    // When a name is present, it must be a well-formed ENS name.
+    if (payload.name && !validateEnsName(payload.name)) {
       return { valid: false, error: 'Invalid domain name format' };
-    }
-
-    // Validate network
-    if (!['mainnet', 'sepolia'].includes(payload.network)) {
-      return { valid: false, error: 'Invalid network' };
     }
 
     return { valid: true };
   }
 
-  // Process webhook event and invalidate cache
+  // Process webhook event and invalidate the relevant caches.
   private async processWebhookEvent(event: EnsnodeWebhookEvent): Promise<void> {
-    const domainName = event.domain.name;
+    // Canonicalize to match the form the read path writes its cache keys in.
+    const domainName = event.name ? canonicalizeName(event.name) : null;
 
-    console.log(`Processing webhook event: ${event.event} for ${domainName}`);
+    // Without a name we cannot target the name-keyed caches. Acknowledge success
+    // (so the sender does not retry) but there is nothing to invalidate.
+    if (!domainName) {
+      console.log(`[webhook] ${event.event_type} for namehash ${event.namehash ?? '(none)'} — no name, nothing to invalidate`);
+      return;
+    }
+
+    console.log(`[webhook] processing ${event.event_type} for ${domainName}`);
 
     try {
-      // Invalidate domain-specific cache entries for all networks
+      // Internal ensnode-response caches, for both networks (the payload carries
+      // ENS protocol v1/v2, not the chain, so we invalidate both to be safe).
+      // NOTE: of these, only `hierarchy` is currently written by a read path
+      // (MetadataService.getRegistryHierarchy). The `domain`/`migrationStatus`
+      // deletes are deliberately kept as defensive no-ops so that if those internal
+      // caches are ever wired up, invalidation already covers them. The
+      // user-facing data is flushed by invalidateMetadataCache (`meta:`) below.
       const networks = ['mainnet', 'sepolia'];
       await Promise.all(networks.flatMap(net => [
         this.cache.delete(CacheKeys.domain(domainName, net)),
@@ -183,65 +233,44 @@ export class WebhookService {
         this.cache.delete(CacheKeys.hierarchy(domainName, net)),
       ]));
 
-      // Invalidate batch caches that might include this domain
-      await this.invalidateBatchCaches(domainName);
+      // Batch caches that might include this domain.
+      await this.invalidateBatchCaches();
 
-      // Handle specific event types
-      switch (event.event) {
-        case 'domain.transferred':
-          // Invalidate owner-related caches
-          if (event.domain.owner) {
-            await this.invalidateOwnerCaches(event.domain.owner);
-          }
-          break;
-
-        case 'domain.expired':
-          // Invalidate expiry-related caches
-          await this.invalidateExpiryCaches();
-          break;
-
-        case 'domain.renewed':
-          // Domain renewed - invalidate expiry and status caches
-          await this.invalidateExpiryCaches();
-          break;
-
-        case 'domain.updated':
-          // General update - already handled above
-          break;
+      // Expiry-bucketed caches for lifecycle events.
+      if (EXPIRY_AFFECTING_EVENTS.has(event.event_type)) {
+        await this.invalidateExpiryCaches();
       }
 
-      // Invalidate endpoint-level metadata cache (meta:*:*:name keys)
+      // Endpoint-level metadata cache (meta:{network}:{registryType}:{name}).
       await this.invalidateMetadataCache(domainName);
 
-      // Invalidate image caches (KV SVG + R2 avatar/SVG)
+      // Image caches (KV SVG + R2 avatar/SVG).
       await this.invalidateImageCaches(domainName);
 
-      console.log(`Cache invalidation completed for ${domainName}`);
-
+      console.log(`[webhook] cache invalidation completed for ${domainName}`);
     } catch (error) {
-      console.error(`Failed to process webhook for ${domainName}:`, error);
+      console.error(`[webhook] failed to process for ${domainName}:`, error);
       throw error;
     }
   }
 
-  // Invalidate endpoint-level metadata cache entries for a domain
+  // Invalidate endpoint-level metadata cache entries for a domain (all networks +
+  // registry types — keys end in ":{name}").
   private async invalidateMetadataCache(domainName: string): Promise<void> {
     if (!this.metadataCacheKv) return;
     try {
-      // MetadataCacheService writes keys as meta:{network}:{registryType}:{name}
       const list = await this.metadataCacheKv.list({ prefix: 'meta:' });
       const matching = list.keys.filter(k => k.name.endsWith(`:${domainName}`));
       if (matching.length > 0) {
         await Promise.all(matching.map(k => this.metadataCacheKv!.delete(k.name)));
       }
     } catch (err) {
-      console.warn(`Failed to invalidate metadata cache for ${domainName}:`, err);
+      console.warn(`[webhook] failed to invalidate metadata cache for ${domainName}:`, err);
     }
   }
 
-  // Invalidate image caches (SVG KV entries + R2 avatar/SVG assets)
+  // Invalidate image caches (SVG KV entries + R2 avatar/SVG assets).
   private async invalidateImageCaches(domainName: string): Promise<void> {
-    // KV: list and delete all SVG cache entries for this domain
     if (this.svgCacheKv) {
       try {
         const prefix = `svg:${domainName}:`;
@@ -250,70 +279,98 @@ export class WebhookService {
           await Promise.all(list.keys.map((k) => this.svgCacheKv!.delete(k.name)));
         }
       } catch (err) {
-        console.warn(`Failed to invalidate SVG KV cache for ${domainName}:`, err);
+        console.warn(`[webhook] failed to invalidate SVG KV cache for ${domainName}:`, err);
       }
     }
 
-    // R2: delete avatar and SVG assets for this domain
     if (this.storageManager) {
       try {
         await Promise.all([
-          this.storageManager.delete(`avatars/${domainName}`),
+          // avatars are keyed `avatars/${name}:${network}` — prefix-delete both networks
+          this.storageManager.deleteByPrefix(`avatars/${domainName}:`),
           this.storageManager.deleteByPrefix(`svg/svg:${domainName}:`),
         ]);
       } catch (err) {
-        console.warn(`Failed to invalidate R2 assets for ${domainName}:`, err);
+        console.warn(`[webhook] failed to invalidate R2 assets for ${domainName}:`, err);
       }
     }
   }
 
-  // Invalidate batch caches that might contain the domain
-  private async invalidateBatchCaches(domainName: string): Promise<void> {
-    // This is a simplified approach - in production you might want to
-    // track which batch caches contain which domains
+  // Invalidate batch caches that might contain the domain.
+  private async invalidateBatchCaches(): Promise<void> {
     try {
       await this.cache.deleteByPrefix('batch:', 'ensnode');
     } catch (error) {
-      console.warn('Failed to invalidate batch caches:', error);
+      console.warn('[webhook] failed to invalidate batch caches:', error);
     }
   }
 
-  // Invalidate caches related to a specific owner
-  private async invalidateOwnerCaches(owner: string): Promise<void> {
-    // Invalidate owner-specific queries if cached
-    // This would depend on your caching strategy for owner queries
-    try {
-      await this.cache.deleteByPrefix(`owner:${owner.toLowerCase()}`, 'ensnode');
-    } catch (error) {
-      console.warn('Failed to invalidate owner caches:', error);
-    }
-  }
-
-  // Invalidate expiry-related caches
+  // Invalidate expiry-related caches.
   private async invalidateExpiryCaches(): Promise<void> {
     try {
       await this.cache.deleteByPrefix('expiring:', 'ensnode');
       await this.cache.deleteByPrefix('recent:', 'ensnode');
     } catch (error) {
-      console.warn('Failed to invalidate expiry caches:', error);
+      console.warn('[webhook] failed to invalidate expiry caches:', error);
     }
   }
 
-  // Calculate HMAC signature for webhook validation
-  private async calculateSignature(payload: string, secret: string): Promise<string> {
+  // Compute HMAC-SHA256(key = hex-decoded secret, message) and return the lower-hex
+  // digest (no "sha256=" prefix). Matches zigens' computeWebhookSignature.
+  private async calculateSignature(message: string, secret: string): Promise<string> {
     const encoder = new TextEncoder();
+    const keyBytes = secretToKeyBytes(secret);
     const key = await crypto.subtle.importKey(
       'raw',
-      encoder.encode(secret),
+      keyBytes as BufferSource,
       { name: 'HMAC', hash: 'SHA-256' },
       false,
-      ['sign']
+      ['sign'],
     );
-
-    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
-    const hashArray = Array.from(new Uint8Array(signature));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    return `sha256=${hashHex}`;
+    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message) as BufferSource);
+    return bytesToHex(new Uint8Array(signature));
   }
+}
+
+// --- crypto helpers ---
+
+// zigens hex-decodes the secret to raw bytes before HMAC. If the configured
+// secret is valid hex, decode it (canonical case). Otherwise fall back to its
+// UTF-8 bytes so a non-hex passphrase still works.
+function secretToKeyBytes(secret: string): Uint8Array {
+  if (secret.length > 0 && secret.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(secret)) {
+    return hexToBytes(secret);
+  }
+  return new TextEncoder().encode(secret);
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) {
+    s += bytes[i].toString(16).padStart(2, '0');
+  }
+  return s;
+}
+
+// Constant-time comparison of two hex strings. Returns false for length mismatch
+// (after a fixed-cost pass to avoid leaking length via early return timing).
+export function timingSafeEqualHex(a: string, b: string): boolean {
+  const al = a.length;
+  const bl = b.length;
+  let diff = al ^ bl;
+  const len = Math.max(al, bl);
+  for (let i = 0; i < len; i++) {
+    const ca = i < al ? a.charCodeAt(i) : 0;
+    const cb = i < bl ? b.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
+  }
+  return diff === 0;
 }

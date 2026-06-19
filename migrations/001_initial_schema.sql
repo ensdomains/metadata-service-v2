@@ -2,7 +2,7 @@
 -- This stores ensnode data locally for fast queries and fallback
 
 -- Domain metadata from ensnode
-CREATE TABLE domains (
+CREATE TABLE IF NOT EXISTS domains (
   id TEXT PRIMARY KEY, -- namehash
   name TEXT NOT NULL UNIQUE,
   label_name TEXT NOT NULL,
@@ -23,10 +23,10 @@ CREATE TABLE domains (
 );
 
 -- Migration status tracking
-CREATE TABLE migration_status (
+CREATE TABLE IF NOT EXISTS migration_status (
   id TEXT PRIMARY KEY, -- namehash
   name TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL, -- 'native' | 'ejected' | 'unmigrated' | 'shadow'
+  status TEXT NOT NULL, -- 'unmigrated' | 'migrated' | 'native' (see src/utils/migration.ts)
   l1_owner TEXT,
   expiration_date TEXT, -- ISO string
   migration_date TEXT, -- ISO string when migration occurred
@@ -37,7 +37,7 @@ CREATE TABLE migration_status (
 );
 
 -- Registry hierarchy data
-CREATE TABLE registry_hierarchy (
+CREATE TABLE IF NOT EXISTS registry_hierarchy (
   id TEXT PRIMARY KEY, -- namehash
   name TEXT NOT NULL,
   owner TEXT NOT NULL,
@@ -54,7 +54,7 @@ CREATE TABLE registry_hierarchy (
 );
 
 -- Sync status tracking for ensnode operations
-CREATE TABLE sync_status (
+CREATE TABLE IF NOT EXISTS sync_status (
   operation TEXT PRIMARY KEY, -- 'domains' | 'migration' | 'hierarchy'
   last_sync INTEGER NOT NULL, -- Unix timestamp
   last_successful_sync INTEGER NOT NULL,
@@ -64,23 +64,23 @@ CREATE TABLE sync_status (
 );
 
 -- Indexes for performance
-CREATE INDEX idx_domains_name ON domains(name);
-CREATE INDEX idx_domains_owner ON domains(owner_id);
-CREATE INDEX idx_domains_parent ON domains(parent_id);
-CREATE INDEX idx_domains_updated ON domains(last_updated);
-CREATE INDEX idx_domains_migrated ON domains(is_migrated);
+CREATE INDEX IF NOT EXISTS idx_domains_name ON domains(name);
+CREATE INDEX IF NOT EXISTS idx_domains_owner ON domains(owner_id);
+CREATE INDEX IF NOT EXISTS idx_domains_parent ON domains(parent_id);
+CREATE INDEX IF NOT EXISTS idx_domains_updated ON domains(last_updated);
+CREATE INDEX IF NOT EXISTS idx_domains_migrated ON domains(is_migrated);
 
-CREATE INDEX idx_migration_name ON migration_status(name);
-CREATE INDEX idx_migration_status ON migration_status(status);
-CREATE INDEX idx_migration_updated ON migration_status(last_updated);
+CREATE INDEX IF NOT EXISTS idx_migration_name ON migration_status(name);
+CREATE INDEX IF NOT EXISTS idx_migration_status ON migration_status(status);
+CREATE INDEX IF NOT EXISTS idx_migration_updated ON migration_status(last_updated);
 
-CREATE INDEX idx_hierarchy_domain ON registry_hierarchy(root_domain_id);
-CREATE INDEX idx_hierarchy_parent ON registry_hierarchy(parent_id);
-CREATE INDEX idx_hierarchy_level ON registry_hierarchy(level);
-CREATE INDEX idx_hierarchy_updated ON registry_hierarchy(last_updated);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_domain ON registry_hierarchy(root_domain_id);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_parent ON registry_hierarchy(parent_id);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_level ON registry_hierarchy(level);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_updated ON registry_hierarchy(last_updated);
 
 -- Insert initial sync status
-INSERT INTO sync_status (operation, last_sync, last_successful_sync) VALUES
+INSERT OR IGNORE INTO sync_status (operation, last_sync, last_successful_sync) VALUES
   ('domains', 0, 0),
   ('migration', 0, 0),
   ('hierarchy', 0, 0);

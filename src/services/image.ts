@@ -138,7 +138,7 @@ export class ImageGenerationService {
         badge: "#10B981", // Green
       },
       native: {
-        background: "#7C3AED", // Purple
+        background: "#7C3AED", // Purple — born on v2
         text: "#FFFFFF",
         accent: "#A78BFA",
         badge: "#8B5CF6",
@@ -174,7 +174,9 @@ export class ImageGenerationService {
   // Generate background element
   // Generate migration status badge
   private generateStatusBadge(status: MigrationStatus, colors: Record<string, string>, width: number = 518, hasCharIndicator: boolean = false) {
-    // Don't show migration badge until v2 is live (all mainnet names are 'unmigrated' for now)
+    // No badge for legacy (v1) names. While mainnet v2 is undeployed every
+    // mainnet name resolves to 'unmigrated', so this also keeps the badge off
+    // there; 'migrated'/'native' get a badge.
     if (status === MIGRATION_STATUS.UNMIGRATED) return '';
 
     const badgeText = status.toUpperCase();

@@ -1,5 +1,6 @@
 import { GraphQLClient } from "graphql-request";
 import { namehash } from "../utils/ens";
+import { UpstreamError } from "./errors";
 
 // ---- v1 subgraph queries (mainnet — id = namehash) ----
 
@@ -39,8 +40,8 @@ const V1_GET_DOMAIN = `
 `;
 
 const V1_GET_DOMAINS = `
-  query GetDomains($ids: [String!]!) {
-    domains(where: { id_in: $ids }) {
+  query GetDomains($ids: [String!]!, $first: Int!) {
+    domains(first: $first, where: { id_in: $ids }) {
       ...DomainInfo
     }
   }
@@ -139,8 +140,8 @@ const V2_GET_DOMAIN = `
 `;
 
 const V2_GET_DOMAINS = `
-  query GetDomains($names: [String!]!) {
-    domains(where: { name_in: $names }) {
+  query GetDomains($names: [String!]!, $first: Int!) {
+    domains(first: $first, where: { name_in: $names }) {
       id
       name
       labelName
@@ -317,42 +318,43 @@ export class EnsnodeService {
     return namehash(name.toLowerCase());
   }
 
-  // Execute query with automatic fallback
+  // Execute a GraphQL query. A transport/timeout/GraphQL failure is retried once
+  // on the primary (transient blips shouldn't trip the upstream circuit-breaker),
+  // then the optional secondary endpoint is tried, and finally an UpstreamError is
+  // thrown. A *successful* response with empty data is NOT an error — callers map
+  // a null result to NotFoundError, which the fallback layer treats as a clean
+  // miss rather than an upstream failure.
   private async executeQuery<T>(
     query: string,
     variables?: Record<string, any>,
   ): Promise<{ data: T; usedFallback: boolean }> {
-    try {
-      const data = await this.client.request<T>({
-        document: query,
-        variables,
-        signal: AbortSignal.timeout(this.timeout),
-      });
-      return { data, usedFallback: false };
-    } catch (error) {
-      console.warn("Primary ensnode endpoint failed:", error);
+    const request = (client: GraphQLClient) =>
+      client.request<T>({ document: query, variables, signal: AbortSignal.timeout(this.timeout) });
 
-      if (this.fallbackClient) {
-        try {
-          const data = await this.fallbackClient.request<T>({
-            document: query,
-            variables,
-            signal: AbortSignal.timeout(this.timeout),
-          });
-          return { data, usedFallback: true };
-        } catch (fallbackError) {
-          console.error(
-            "Fallback ensnode endpoint also failed:",
-            fallbackError,
-          );
-          throw new Error(
-            `All ensnode endpoints failed. Last error: ${fallbackError}`,
-          );
-        }
+    // Primary, with a single retry on transient failure.
+    let primaryError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return { data: await request(this.client), usedFallback: false };
+      } catch (error) {
+        primaryError = error;
+        if (attempt === 0) console.warn(`[ensnode] primary request failed (attempt ${attempt + 1}), retrying:`, error);
       }
-
-      throw error;
     }
+    console.warn("[ensnode] primary endpoint failed after retry:", primaryError);
+
+    if (this.fallbackClient) {
+      try {
+        return { data: await request(this.fallbackClient), usedFallback: true };
+      } catch (fallbackError) {
+        throw new UpstreamError(
+          `All ensnode endpoints failed for query. Last error: ${fallbackError}`,
+          { cause: fallbackError },
+        );
+      }
+    }
+
+    throw new UpstreamError(`ensnode request failed: ${primaryError}`, { cause: primaryError });
   }
 
   // Get single domain data
@@ -389,14 +391,14 @@ export class EnsnodeService {
       const ids = names.map(n => n.toLowerCase());
       const { data, usedFallback } = await this.executeQuery<{
         domains: EnsnodeDomain[];
-      }>(V2_GET_DOMAINS, { names: ids });
+      }>(V2_GET_DOMAINS, { names: ids, first: ids.length });
       return { domains: data.domains, usedFallback };
     }
 
     const nameHashes = names.map((name) => namehash(name.toLowerCase()));
     const { data, usedFallback } = await this.executeQuery<{
       domains: EnsnodeDomain[];
-    }>(V1_GET_DOMAINS, { ids: nameHashes });
+    }>(V1_GET_DOMAINS, { ids: nameHashes, first: nameHashes.length });
 
     return { domains: data.domains, usedFallback };
   }

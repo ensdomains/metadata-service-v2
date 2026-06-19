@@ -2,6 +2,7 @@
 // Sits in front of MetadataService to avoid repeated ensnode/blockchain calls
 import type { MetadataResponse } from '../types/api';
 import { MIGRATION_STATUS } from '../types';
+import { canonicalizeName } from '../utils/ens';
 
 interface MetadataCacheEntry {
   metadata: MetadataResponse;
@@ -24,15 +25,19 @@ export interface MetadataCacheResult {
 }
 
 function buildCacheKey(network: string, registryType: string, identifier: string): string {
-  return `meta:${network}:${registryType}:${identifier}`;
+  // Canonical (case-insensitive) name so mixed-case requests share one entry and
+  // the webhook's invalidation matches what the read path wrote.
+  return `meta:${network}:${registryType}:${canonicalizeName(identifier)}`;
 }
 
 function getTtlConfig(migrationStatus: string): TtlConfig {
   switch (migrationStatus) {
     case MIGRATION_STATUS.NATIVE:
     case MIGRATION_STATUS.MIGRATED:
+      // On v2 — stable, rarely changes.
       return { softTtl: 86400, hardTtl: 2592000 };   // 24h / 30 days
     case MIGRATION_STATUS.UNMIGRATED:
+      // Legacy — may flip to v2 during migration.
       return { softTtl: 3600, hardTtl: 604800 };      // 1h / 7 days
     default:
       return { softTtl: 21600, hardTtl: 604800 };     // 6h / 7 days
