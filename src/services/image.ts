@@ -5,6 +5,17 @@ import { getCharacterSet } from "../utils/ens";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
 
+// Escape user-controlled text before it is interpolated into SVG markup. The
+// layout composer inlines `text` into `<text>...</text>` without escaping, so a
+// name containing `<`, `&`, etc. would inject raw markup. Registered ENS names
+// are ENSIP-15-normalized (no such chars) and the image routes gate on existence,
+// but we escape here too as defense-in-depth — never trust the name string.
+function escapeXmlText(s: string): string {
+  return s.replace(/[<>&"']/g, (c) =>
+    c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : c === '"' ? '&quot;' : '&#39;',
+  );
+}
+
 export interface ImageGenerationOptions {
   name: string;
   migrationStatus?: MigrationStatus;
@@ -81,7 +92,7 @@ export class ImageGenerationService {
       }
 
       const result = await createDynamicSVGImage({
-        text: name,
+        text: escapeXmlText(name),
         width: size.width,
         height: size.height,
         autoFontSize: true,
