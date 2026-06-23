@@ -216,10 +216,13 @@ export class BlockchainService {
 
       this.clients.set(network, createPublicClient({
         chain: def.chain,
+        // Per-call timeout must stay well under the 30s global request budget —
+        // a slow RPC otherwise consumes the whole budget and the request 500s at
+        // the global timeout instead of failing fast / using a fallback.
         transport: http(this.env[def.rpcUrlEnvKey], {
-          timeout: 30_000,
-          retryCount: 3,
-          retryDelay: 1000,
+          timeout: 8_000,
+          retryCount: 2,
+          retryDelay: 500,
         }),
       }));
 
@@ -232,7 +235,7 @@ export class BlockchainService {
       this.fallbackClients.set(network, fallbackUrls.map((url) =>
         createPublicClient({
           chain: def.chain,
-          transport: http(url, { timeout: 30_000, retryCount: 2 }),
+          transport: http(url, { timeout: 8_000, retryCount: 1 }),
         })
       ));
     }
