@@ -2,7 +2,7 @@
 import type { EnsnodeService } from './ensnode';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
-import { namehash, validateEnsName } from '../utils/ens';
+import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
 import { type NetworkName } from '../types';
 import { NotFoundError, UpstreamError } from './errors';
 
@@ -209,6 +209,13 @@ export class FallbackService {
             namehash(name),
             this.config.blockchain.preferredNetwork
           );
+          // resolveName returns synthetic empty data for names with no registry
+          // owner — i.e. unregistered/never-registered names. Treat that as a clean
+          // miss so the endpoint 404s instead of fabricating metadata for a name
+          // that doesn't exist.
+          if (isEmptyAddress(nameData.resolver.owner ?? '')) {
+            throw new NotFoundError(`${name} is not registered`);
+          }
           return {
             id: namehash(name),
             name: nameData.name,

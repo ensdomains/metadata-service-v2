@@ -74,6 +74,22 @@ describe('FallbackService — v2 → v1 → blockchain chain', () => {
     expect(resolver.resolveName).toHaveBeenCalledTimes(1);
   });
 
+  it('does NOT fabricate metadata for an unregistered name (empty registry owner → not found)', async () => {
+    // both indexers miss, and the on-chain resolver returns synthetic empty data
+    // (zero owner) for a never-registered name → must surface as not-found, not 200.
+    const v2 = makeEnsnode(null);
+    const v1 = makeEnsnode(null);
+    const unregistered = {
+      resolveName: vi.fn(async (name: string) => ({
+        name,
+        resolver: { owner: '0x0000000000000000000000000000000000000000', resolver: '', registrant: undefined },
+        expirationDate: undefined, registrationDate: undefined, migrationStatus: 'unmigrated',
+      })),
+    } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, blockchain, unregistered, v1);
+    await expect(svc.getDomainMetadata('blabl4a.eth')).rejects.toBeInstanceOf(NotFoundError);
+  });
+
   it('applies the same chain to migration status', async () => {
     const { svc, v1 } = makeService({ v2: null, v1: { name: 'old.eth', isMigrated: false } });
     const res = await svc.getMigrationStatus('old.eth');

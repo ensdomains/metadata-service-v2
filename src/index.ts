@@ -5,6 +5,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { prettyJSON } from "hono/pretty-json";
 import { timeout } from "hono/timeout";
+import { HTTPException } from "hono/http-exception";
 import {
   validateNetwork,
   validateEnsNameParam,
@@ -57,6 +58,7 @@ export interface Env {
   WEBHOOK_TOLERANCE_SECS?: string;
   WEBHOOK_ALLOW_UNAUTHENTICATED?: string; // local dev only: accept webhooks without a secret
   RATE_LIMIT_DISABLED?: string;
+  MAX_AVATAR_BYTES?: string; // max fetched avatar size in bytes (default 25 MB)
   LOG_LEVEL: string;
 }
 
@@ -155,7 +157,10 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
   const cached = _imageServices.get(network);
   if (cached) return cached;
 
-  const avatarService = new AvatarService(getRpcUrl(env, network));
+  // Invalid/garbage value → undefined → AvatarService uses its built-in default.
+  const parsedMax = parseInt(env.MAX_AVATAR_BYTES ?? '', 10);
+  const maxAvatarBytes = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : undefined;
+  const avatarService = new AvatarService(getRpcUrl(env, network), NETWORKS[network].chain, maxAvatarBytes);
   const imageService = new ImageGenerationService(avatarService);
   const storageManager = new StorageManager(env.ASSET_BUCKET);
   const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService, network, env.ASSET_BUCKET);
@@ -341,7 +346,6 @@ async function handleImage(c: any, network: NetworkName, name: string) {
   const height = c.req.query('h');
 
   const options: ImageGenerationOptions = { name };
-  if (isMigrationStatus(statusParam)) options.migrationStatus = statusParam;
   if (width && height) {
     options.size = { width: parseInt(width, 10), height: parseInt(height, 10) };
   }
@@ -355,11 +359,13 @@ async function handleImage(c: any, network: NetworkName, name: string) {
     return c.json(errorResponse, 400);
   }
 
-  // No (valid) client-supplied status → derive it authoritatively.
-  if (!options.migrationStatus) {
-    const { metadataService } = getServices(c.env, network);
-    options.migrationStatus = await metadataService.classifyName(network, name);
-  }
+  // Single resolution: enforces existence (throws NotFoundError → 404 for an
+  // unregistered name) AND yields the authoritative badge status. A valid
+  // `?status=` overrides only the rendered badge, never the existence gate
+  // (otherwise a bogus status could render an NFT for a nonexistent name).
+  const { metadataService } = getServices(c.env, network);
+  const resolvedStatus = await metadataService.resolveStatusForImage(network, name);
+  options.migrationStatus = isMigrationStatus(statusParam) ? statusParam : resolvedStatus;
 
   const result = await imageCacheService.getImage(name, options, c.executionCtx);
   const { ttlConfig, cacheStatus } = result;
@@ -693,9 +699,10 @@ app.get(
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
       }
 
-      // Check expiry before generating image
+      // Don't render an NFT for an expired name. Existence (→404 if unregistered)
+      // and the badge status are resolved together inside handleImage in one pass.
       const { metadataService } = getServices(c.env, network);
-      await metadataService.checkExpiry(name);
+      await metadataService.checkExpiry(name);   // → 410 if expired
 
       return await handleImage(c, network, name);
     } catch (error) {
@@ -738,9 +745,10 @@ app.get(
         if (cached) return new Response(cached.body, cached);
       }
 
-      // Check expiry
+      // Don't render an NFT for an expired name (existence is enforced below via
+      // the single resolveStatusForImage pass, which also gives the badge status).
       const { metadataService } = getServices(c.env, network);
-      await metadataService.checkExpiry(name);
+      await metadataService.checkExpiry(name);   // → 410 if expired
 
       // Get the SVG (reuses image pipeline)
       const { imageService, imageCacheService } = getImageServices(c.env, network);
@@ -751,7 +759,6 @@ app.get(
       const outputHeight = c.req.query('h') ? parseInt(c.req.query('h')!, 10) : null;
 
       const options: ImageGenerationOptions = { name };
-      if (isMigrationStatus(statusParam)) options.migrationStatus = statusParam;
 
       // Non-square: pass actual dimensions so layout composer handles aspect ratio
       // Square: generate at default size, rewrite width/height (viewBox scaling handles it)
@@ -765,10 +772,10 @@ app.get(
       if (!validation.valid) {
         return c.json({ error: `Invalid image parameters: ${validation.errors.join(', ')}`, timestamp: new Date().toISOString() }, 400);
       }
-      if (!options.migrationStatus) {
-        const { metadataService } = getServices(c.env, network);
-        options.migrationStatus = await metadataService.classifyName(network, name);
-      }
+      // Single resolution: existence gate (→404 unregistered) + badge status;
+      // a valid ?status= overrides only the badge (see handleImage).
+      const resolvedStatus = await metadataService.resolveStatusForImage(network, name);
+      options.migrationStatus = isMigrationStatus(statusParam) ? statusParam : resolvedStatus;
 
       const result = await imageCacheService.getImage(name, options, c.executionCtx);
 
@@ -872,11 +879,18 @@ app.notFound((c) => {
   return c.json({ error: "Not Found" }, 404);
 });
 
-// Error handler
-app.onError((err, c) => {
+// Error handler. Honor HTTPException (e.g. the timeout middleware's 504 Gateway
+// Timeout) so its status isn't flattened to a generic 500; everything else is a
+// real unhandled error → 500. Exported for direct testing.
+export function errorHandler(err: unknown, c: any): Response | Promise<Response> {
+  if (err instanceof HTTPException) {
+    return err.getResponse();
+  }
   console.error("Unhandled error:", err);
-  return c.json({ error: "Internal Server Error" }, 500);
-});
+  return c.json({ error: "Internal Server Error", timestamp: new Date().toISOString() }, 500);
+}
+
+app.onError(errorHandler);
 
 
 export default app;

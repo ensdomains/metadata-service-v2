@@ -3,6 +3,7 @@ import { ImageCacheService } from '../src/services/image-cache';
 import { StorageManager } from '../src/utils/storage';
 import { ImageGenerationService } from '../src/services/image';
 import { AvatarService } from '../src/services/avatar';
+import { sepolia } from 'viem/chains';
 import { createMockKV, createMockR2 } from './mocks/hono-env';
 
 // Mock adaptive-layout-composer
@@ -40,7 +41,7 @@ describe('ImageCacheService', () => {
     svgCacheKv = createMockKV();
     r2Bucket = createMockR2();
     storage = new StorageManager(r2Bucket);
-    avatarService = new AvatarService('https://mainnet.test.rpc');
+    avatarService = new AvatarService('https://mainnet.test.rpc', sepolia);
     imageService = new ImageGenerationService(avatarService);
     imageCacheService = new ImageCacheService(svgCacheKv, storage, imageService, avatarService, 'sepolia');
 
