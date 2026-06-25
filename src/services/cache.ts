@@ -25,7 +25,7 @@ export class CacheService {
   ): Promise<void> {
     const {
       ttl = 300,
-      namespace = "ensnode",
+      namespace = "indexer",
       compressionThreshold = 10000,
     } = options;
 
@@ -57,7 +57,7 @@ export class CacheService {
   }
 
   // Get data from cache
-  async get<T>(key: string, namespace: string = "ensnode"): Promise<T | null> {
+  async get<T>(key: string, namespace: string = "indexer"): Promise<T | null> {
     const cacheKey = this.buildKey(namespace, key);
     const cached = await this.kv.get(cacheKey);
 
@@ -93,7 +93,7 @@ export class CacheService {
   }
 
   // Delete cache entry
-  async delete(key: string, namespace: string = "ensnode"): Promise<void> {
+  async delete(key: string, namespace: string = "indexer"): Promise<void> {
     const cacheKey = this.buildKey(namespace, key);
     await this.kv.delete(cacheKey);
   }
@@ -101,7 +101,7 @@ export class CacheService {
   // Delete multiple cache entries by prefix
   async deleteByPrefix(
     prefix: string,
-    namespace: string = "ensnode",
+    namespace: string = "indexer",
   ): Promise<number> {
     const fullPrefix = this.buildKey(namespace, prefix);
     const list = await this.kv.list({ prefix: fullPrefix });
@@ -113,7 +113,7 @@ export class CacheService {
   }
 
   // Basic cache statistics
-  async getStats(namespace: string = "ensnode"): Promise<{
+  async getStats(namespace: string = "indexer"): Promise<{
     totalKeys: number;
     keysSample: string[];
   }> {

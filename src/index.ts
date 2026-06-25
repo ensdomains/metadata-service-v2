@@ -13,7 +13,7 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
-import { WebhookService, type EnsnodeWebhookEvent } from "./services/webhook";
+import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
 import { AvatarService } from "./services/avatar";
@@ -813,9 +813,10 @@ app.get(
   }
 );
 
-// Webhook endpoint for cache invalidation + proactive warming.
-// Accepts the zigens ENS v2 indexer delivery contract (see services/webhook.ts).
-app.post("/webhook/ensnode", async (c) => {
+// Webhook endpoint for cache invalidation + proactive warming. Sender-agnostic:
+// any backend that knows a name changed can POST the EnsNameEvent contract here
+// (see services/webhook.ts) — the indexer is just the current caller.
+const handleWebhook = async (c: any) => {
   // Clone before the service consumes the body, so we can read it for warming
   // without interfering with signature verification (which reads c.req.text()).
   const bodyClone = c.req.raw.clone();
@@ -828,12 +829,12 @@ app.post("/webhook/ensnode", async (c) => {
     if (response.status >= 200 && response.status < 300) {
       c.executionCtx.waitUntil((async () => {
         try {
-          const payload = await bodyClone.json() as Partial<EnsnodeWebhookEvent>;
+          const payload = await bodyClone.json() as Partial<EnsNameEvent>;
           const name = payload?.name;
           if (!name) return;
 
-          // zigens sends ENS protocol (v1/v2), not chain. Map to the network this
-          // deployment serves with that protocol: mainnet=v1 indexer, sepolia=v2.
+          // The event carries ENS protocol (v1/v2), not chain. Map to the network
+          // this deployment serves with that protocol: mainnet=v1, sepolia=v2.
           const primaryNetwork = payload.protocol === 'v2' ? 'sepolia' : 'mainnet';
 
           // Purge L0 edge cache for every URL shape that could hold this name:
@@ -872,7 +873,9 @@ app.post("/webhook/ensnode", async (c) => {
     console.error("Webhook handling error:", error);
     return c.json({ error: "Webhook processing failed" }, 500);
   }
-});
+};
+
+app.post("/webhook", handleWebhook);
 
 // 404 handler
 app.notFound((c) => {

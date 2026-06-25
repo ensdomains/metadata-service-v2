@@ -44,8 +44,8 @@ vi.mock('../src/services/sync', () => ({
 
 // Mock the ensnode service to control getDomainByNamehash
 const mockGetDomainByNamehash = vi.fn();
-vi.mock('../src/services/ensnode', () => ({
-  EnsnodeService: vi.fn().mockImplementation(() => ({
+vi.mock('../src/services/indexer', () => ({
+  IndexerService: vi.fn().mockImplementation(() => ({
     getDomain: vi.fn(),
     getDomains: vi.fn(),
     getDomainByNamehash: mockGetDomainByNamehash,

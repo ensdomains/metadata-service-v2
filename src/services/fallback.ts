@@ -1,5 +1,5 @@
 // Fallback and retry logic for when ensnode is down
-import type { EnsnodeService } from './ensnode';
+import type { IndexerService } from './indexer';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
 import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
@@ -34,11 +34,11 @@ export class FallbackService {
 
   constructor(
     private config: FallbackConfig,
-    private ensnode: EnsnodeService,
+    private ensnode: IndexerService,
     private blockchain: BlockchainService,
     private resolver: ResolverService,
     // Optional secondary v1 ENSNode indexer (e.g. sepolia v1 names absent from zigens).
-    private ensnodeV1?: EnsnodeService,
+    private ensnodeV1?: IndexerService,
   ) {}
 
   // Execute operation with automatic fallback logic

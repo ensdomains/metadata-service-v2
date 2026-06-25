@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { EnsnodeService } from "../src/services/ensnode";
+import { IndexerService } from "../src/services/indexer";
 import { CacheService, CacheKeys } from "../src/services/cache";
 
 // Mock data for testing
@@ -158,8 +158,8 @@ const mockKV = {
   list: vi.fn(),
 } as unknown as KVNamespace;
 
-describe("EnsnodeService", () => {
-  const ensnode = new EnsnodeService({
+describe("IndexerService", () => {
+  const ensnode = new IndexerService({
     primaryEndpoint: "https://api.ensnode.test/graphql",
     fallbackEndpoint: "https://api-fallback.ensnode.test/graphql",
   });
@@ -292,13 +292,13 @@ describe("EnsnodeService", () => {
     });
 
     it("should generate appropriate cache keys for different operations", () => {
-      const domainKey = EnsnodeService.getCacheKey("getDomain", {
+      const domainKey = IndexerService.getCacheKey("getDomain", {
         name: "test.eth",
       });
-      const migrationKey = EnsnodeService.getCacheKey("getMigrationStatus", {
+      const migrationKey = IndexerService.getCacheKey("getMigrationStatus", {
         name: "test.eth",
       });
-      const hierarchyKey = EnsnodeService.getCacheKey("getHierarchy", {
+      const hierarchyKey = IndexerService.getCacheKey("getHierarchy", {
         name: "test.eth",
       });
 
@@ -311,14 +311,14 @@ describe("EnsnodeService", () => {
     });
 
     it("should calculate TTL based on domain migration status", () => {
-      const migratedTtl = EnsnodeService.getCacheTTL({
+      const migratedTtl = IndexerService.getCacheTTL({
         id: 'test',
         name: 'test.eth',
         labelName: 'test',
         labelhash: '0x123',
         isMigrated: true,
       });
-      const unmigratedTtl = EnsnodeService.getCacheTTL({
+      const unmigratedTtl = IndexerService.getCacheTTL({
         id: 'test',
         name: 'test.eth',
         labelName: 'test',

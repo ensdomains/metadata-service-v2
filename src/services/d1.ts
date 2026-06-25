@@ -1,6 +1,6 @@
 // D1 service for local ensnode data storage and fast queries
 import { namehash } from '../utils/ens';
-import type { EnsnodeDomain } from './ensnode';
+import type { IndexerDomain } from './indexer';
 import type { MigrationStatus } from '../types';
 
 export interface D1DomainRecord {
@@ -57,7 +57,7 @@ export class D1Service {
   constructor(private db: D1Database) {}
 
   // Domain operations
-  async storeDomain(domain: EnsnodeDomain, dataSource: 'ensnode' | 'blockchain' = 'ensnode'): Promise<void> {
+  async storeDomain(domain: IndexerDomain, dataSource: 'ensnode' | 'blockchain' = 'ensnode'): Promise<void> {
     const record: Omit<D1DomainRecord, 'sync_version'> = {
       id: namehash(domain.name),
       name: domain.name,
@@ -208,7 +208,7 @@ export class D1Service {
   }
 
   // Batch operations
-  async storeDomains(domains: EnsnodeDomain[], dataSource: 'ensnode' | 'blockchain' = 'ensnode'): Promise<number> {
+  async storeDomains(domains: IndexerDomain[], dataSource: 'ensnode' | 'blockchain' = 'ensnode'): Promise<number> {
     let stored = 0;
 
     for (const domain of domains) {

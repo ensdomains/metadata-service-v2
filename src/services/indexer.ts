@@ -215,7 +215,7 @@ const V2_GET_HIERARCHY = `
 `;
 
 // Response types
-export interface EnsnodeDomain {
+export interface IndexerDomain {
   id: string;
   name: string;
   labelName: string;
@@ -245,7 +245,7 @@ export interface EnsnodeDomain {
   tokenVersion?: number;
 }
 
-export interface EnsnodeResponse<T> {
+export interface IndexerResponse<T> {
   data: T;
   errors?: Array<{
     message: string;
@@ -254,7 +254,7 @@ export interface EnsnodeResponse<T> {
   }>;
 }
 
-export interface EnsnodeMigrationStatus {
+export interface IndexerMigrationStatus {
   name: string;
   isMigrated: boolean;
   ownerId?: string;
@@ -266,19 +266,19 @@ export interface EnsnodeMigrationStatus {
   tokenVersion?: number;
 }
 
-export interface EnsnodeHierarchyItem {
+export interface IndexerHierarchyItem {
   name: string;
   ownerId?: string;
   resolverId?: string;
   parentId?: string;
   owner?: { id: string };
   resolver?: { address: string };
-  parent?: EnsnodeHierarchyItem;
+  parent?: IndexerHierarchyItem;
 }
 
 type ApiVersion = 'v1' | 'v2';
 
-export class EnsnodeService {
+export class IndexerService {
   private client: GraphQLClient;
   private fallbackClient?: GraphQLClient;
   private timeout: number;
@@ -294,7 +294,7 @@ export class EnsnodeService {
   ) {
     this.timeout = config.timeout || 2000;
     this.apiVersion = config.apiVersion || 'v1';
-    console.log(`[ensnode] initialized with endpoint: ${config.primaryEndpoint}, version: ${this.apiVersion}, timeout: ${this.timeout}ms`);
+    console.log(`[indexer] initialized with endpoint: ${config.primaryEndpoint}, version: ${this.apiVersion}, timeout: ${this.timeout}ms`);
     this.client = new GraphQLClient(config.primaryEndpoint, {
       headers: {
         "User-Agent": "ENS-Metadata-V2/2.0.0",
@@ -338,10 +338,10 @@ export class EnsnodeService {
         return { data: await request(this.client), usedFallback: false };
       } catch (error) {
         primaryError = error;
-        if (attempt === 0) console.warn(`[ensnode] primary request failed (attempt ${attempt + 1}), retrying:`, error);
+        if (attempt === 0) console.warn(`[indexer] primary request failed (attempt ${attempt + 1}), retrying:`, error);
       }
     }
-    console.warn("[ensnode] primary endpoint failed after retry:", primaryError);
+    console.warn("[indexer] primary endpoint failed after retry:", primaryError);
 
     if (this.fallbackClient) {
       try {
@@ -360,11 +360,11 @@ export class EnsnodeService {
   // Get single domain data
   async getDomain(
     name: string,
-  ): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
+  ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
     const id = this.resolveDomainId(name);
     const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
-      domain: EnsnodeDomain | null;
+      domain: IndexerDomain | null;
     }>(query, { name: id });
 
     return { domain: data.domain, usedFallback };
@@ -373,11 +373,11 @@ export class EnsnodeService {
   // Get domain by pre-computed namehash (for v1 tokenId lookups)
   async getDomainByNamehash(
     nameHash: string,
-  ): Promise<{ domain: EnsnodeDomain | null; usedFallback: boolean }> {
+  ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
     // v1: use namehash directly; v2: not applicable, pass through
     const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
-      domain: EnsnodeDomain | null;
+      domain: IndexerDomain | null;
     }>(query, { name: nameHash });
 
     return { domain: data.domain, usedFallback };
@@ -386,18 +386,18 @@ export class EnsnodeService {
   // Get multiple domains in batch
   async getDomains(
     names: string[],
-  ): Promise<{ domains: EnsnodeDomain[]; usedFallback: boolean }> {
+  ): Promise<{ domains: IndexerDomain[]; usedFallback: boolean }> {
     if (this.apiVersion === 'v2') {
       const ids = names.map(n => n.toLowerCase());
       const { data, usedFallback } = await this.executeQuery<{
-        domains: EnsnodeDomain[];
+        domains: IndexerDomain[];
       }>(V2_GET_DOMAINS, { names: ids, first: ids.length });
       return { domains: data.domains, usedFallback };
     }
 
     const nameHashes = names.map((name) => namehash(name.toLowerCase()));
     const { data, usedFallback } = await this.executeQuery<{
-      domains: EnsnodeDomain[];
+      domains: IndexerDomain[];
     }>(V1_GET_DOMAINS, { ids: nameHashes, first: nameHashes.length });
 
     return { domains: data.domains, usedFallback };
@@ -406,11 +406,11 @@ export class EnsnodeService {
   // Get migration status
   async getMigrationStatus(
     name: string,
-  ): Promise<{ status: EnsnodeMigrationStatus | null; usedFallback: boolean }> {
+  ): Promise<{ status: IndexerMigrationStatus | null; usedFallback: boolean }> {
     const id = this.resolveDomainId(name);
     const query = this.apiVersion === 'v2' ? V2_GET_MIGRATION_STATUS : V1_GET_MIGRATION_STATUS;
     const { data, usedFallback } = await this.executeQuery<{
-      domain: EnsnodeMigrationStatus | null;
+      domain: IndexerMigrationStatus | null;
     }>(query, { id });
 
     return { status: data.domain, usedFallback };
@@ -418,13 +418,13 @@ export class EnsnodeService {
 
   // Get domain hierarchy
   async getHierarchy(name: string): Promise<{
-    hierarchy: EnsnodeHierarchyItem | null;
+    hierarchy: IndexerHierarchyItem | null;
     usedFallback: boolean;
   }> {
     const id = this.resolveDomainId(name);
     const query = this.apiVersion === 'v2' ? V2_GET_HIERARCHY : V1_GET_HIERARCHY;
     const { data, usedFallback } = await this.executeQuery<{
-      domain: EnsnodeHierarchyItem | null;
+      domain: IndexerHierarchyItem | null;
     }>(query, { id });
 
     return { hierarchy: data.domain, usedFallback };
@@ -487,7 +487,7 @@ export class EnsnodeService {
   }
 
   // Get appropriate cache TTL based on migration status
-  static getCacheTTL(_domain?: EnsnodeDomain): number {
+  static getCacheTTL(_domain?: IndexerDomain): number {
     // isMigrated from v1 subgraph means 2019 registrar migration, not v2.
     // Use a uniform TTL until v2 migration status is reliable across all networks.
     return 300; // 5 minutes
