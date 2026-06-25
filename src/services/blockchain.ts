@@ -1,50 +1,15 @@
 import { createPublicClient, http, PublicClient, getContract } from 'viem';
-import { mainnet, sepolia } from 'viem/chains';
-import { NetworkName, NetworkConfig } from '../types';
-import { namehash, labelhash } from '../utils/ens';
+import { NETWORKS, SUPPORTED_NETWORKS, type NetworkName, type V1Contracts, type V2Contracts } from '../config/networks';
+import type { NetworkConfig } from '../types';
+import { namehash, labelhash, canonicalizeName, dnsEncodeName } from '../utils/ens';
 
-// ENS v1 Contract addresses (legacy - for unmigrated names)
-export const CONTRACTS = {
-  mainnet: {
-    registry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
-    registrar: '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85',
-    nameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
-    resolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
-  },
-  sepolia: {
-    registry: '0x7e89b563f936c68c31a360840eb7f9a4aacaf014',
-    registrar: '0x6409609247722761b8ba96371485de92a6d7b83b',
-    nameWrapper: '0xc7e033b8836e4bd55d069d113f018b98478cb091',
-    resolver: '0x640294a2b2d87e7f522db3e3e3e876764bce170d',
-  },
-} as const;
+// Per-network contract address lookups, derived from the central registry
+// (src/config/networks.ts). Typed by NetworkName so `CONTRACTS[network]` needs no cast.
+export const CONTRACTS: Record<NetworkName, V1Contracts> =
+  Object.fromEntries(SUPPORTED_NETWORKS.map((n) => [n, NETWORKS[n].contracts])) as Record<NetworkName, V1Contracts>;
 
-// ENS v2 Contract addresses (deployed on mainnet + sepolia)
-// TODO: Replace mainnet placeholders with actual deployed addresses once available
-export const ENS_V2_CONTRACTS = {
-  mainnet: {
-    rootRegistry: 'ROOT_REGISTRY_ADDRESS',
-    ethRegistry: 'ETH_REGISTRY_ADDRESS',
-    migrationContract: 'MIGRATION_CONTROLLER_ADDRESS',
-    resolver: 'ENSV2_RESOLVER_ADDRESS',
-
-    // Legacy v1 contracts (for unmigrated name compatibility)
-    legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
-    legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
-    legacyResolver: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63',
-  },
-  sepolia: {
-    rootRegistry: '0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3',
-    ethRegistry: '0x796fff2e907449be8d5921bcc215b1b76d89d080',
-    migrationContract: '0x76ae358d9ad91651b78463ae609dadc9e7ce4402',
-    resolver: '0x18cb116a1c88531a4bb2996e4fef136a31e11a80',
-
-    // Legacy v1 contracts on Sepolia
-    legacyRegistry: '0x7e89b563f936c68c31a360840eb7f9a4aacaf014',
-    legacyNameWrapper: '0xc7e033b8836e4bd55d069d113f018b98478cb091',
-    legacyResolver: '0x640294a2b2d87e7f522db3e3e3e876764bce170d',
-  },
-} as const;
+export const ENS_V2_CONTRACTS: Record<NetworkName, V2Contracts> =
+  Object.fromEntries(SUPPORTED_NETWORKS.map((n) => [n, NETWORKS[n].v2])) as Record<NetworkName, V2Contracts>;
 
 // ABIs for ENS contracts
 export const ENS_REGISTRY_ABI = [
@@ -164,26 +129,41 @@ export const REGISTRY_V2_ABI = [
   },
 ] as const;
 
-// ENS v2 Resolver ABI (universal resolve interface)
-export const RESOLVER_V2_ABI = [
+// ENS v2 UniversalResolver ABI — the REAL IUniversalResolver interface
+// (ensdomains/ens-contracts universalResolver/IUniversalResolver.sol, as used by
+// contracts-v2 UniversalResolverV2). `findResolver` is a pure on-chain registry
+// traversal (no CCIP-Read); `resolve`/`reverse` are EIP-3668/CCIP-Read (viem's
+// readContract follows the OffchainLookup automatically).
+export const UNIVERSAL_RESOLVER_V2_ABI = [
+  {
+    inputs: [{ name: 'name', type: 'bytes' }],
+    name: 'findResolver',
+    outputs: [
+      { name: 'resolver', type: 'address' },
+      { name: 'node', type: 'bytes32' },
+      { name: 'resolverOffset', type: 'uint256' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
   {
     inputs: [{ name: 'name', type: 'bytes' }, { name: 'data', type: 'bytes' }],
     name: 'resolve',
-    outputs: [{ name: '', type: 'bytes' }],
+    outputs: [
+      { name: 'result', type: 'bytes' },
+      { name: 'resolver', type: 'address' },
+    ],
     stateMutability: 'view',
     type: 'function',
   },
   {
-    inputs: [{ name: 'name', type: 'bytes' }],
-    name: 'getResolver',
-    outputs: [{ name: 'resolver', type: 'address' }, { name: 'offchain', type: 'bool' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'name', type: 'bytes' }],
-    name: 'requiresOffchain',
-    outputs: [{ name: '', type: 'bool' }],
+    inputs: [{ name: 'lookupAddress', type: 'bytes' }, { name: 'coinType', type: 'uint256' }],
+    name: 'reverse',
+    outputs: [
+      { name: 'primary', type: 'string' },
+      { name: 'resolver', type: 'address' },
+      { name: 'reverseResolver', type: 'address' },
+    ],
     stateMutability: 'view',
     type: 'function',
   },
@@ -229,80 +209,36 @@ export class BlockchainService {
     this.initializeClients();
   }
 
+  // Build primary + fallback clients for every network in the central registry.
   private initializeClients(): void {
-    // Primary mainnet client
-    const mainnetClient = createPublicClient({
-      chain: mainnet,
-      transport: http(this.env.MAINNET_RPC_URL, {
-        timeout: 30_000,
-        retryCount: 3,
-        retryDelay: 1000,
-      }),
-    });
+    for (const network of SUPPORTED_NETWORKS) {
+      const def = NETWORKS[network];
 
-    // Primary sepolia client
-    const sepoliaClient = createPublicClient({
-      chain: sepolia,
-      transport: http(this.env.SEPOLIA_RPC_URL, {
-        timeout: 30_000,
-        retryCount: 3,
-        retryDelay: 1000,
-      }),
-    });
+      this.clients.set(network, createPublicClient({
+        chain: def.chain,
+        // Per-call timeout must stay well under the 30s global request budget —
+        // a slow RPC otherwise consumes the whole budget and the request 500s at
+        // the global timeout instead of failing fast / using a fallback.
+        transport: http(this.env[def.rpcUrlEnvKey], {
+          timeout: 8_000,
+          retryCount: 2,
+          retryDelay: 500,
+        }),
+      }));
 
-    this.clients.set('mainnet', mainnetClient);
-    this.clients.set('sepolia', sepoliaClient);
+      const envFallbacks = def.fallbackRpcEnvKeys
+        .map((key) => this.env[key])
+        .filter(Boolean) as string[];
+      // Fall back to the registry's public defaults only when none are configured.
+      const fallbackUrls = envFallbacks.length > 0 ? envFallbacks : [...def.defaultFallbackRpcs];
 
-    // Setup fallback clients
-    this.setupFallbackClients();
-  }
-
-  private setupFallbackClients(): void {
-    // Mainnet fallbacks from environment variables
-    const mainnetFallbackUrls = [
-      this.env.MAINNET_FALLBACK_RPC_1,
-      this.env.MAINNET_FALLBACK_RPC_2,
-      this.env.MAINNET_FALLBACK_RPC_3,
-    ].filter(Boolean) as string[];
-
-    // If no fallback URLs provided, use default public RPCs
-    if (mainnetFallbackUrls.length === 0) {
-      mainnetFallbackUrls.push(
-        'https://ethereum.publicnode.com',
-        'https://rpc.ankr.com/eth',
-        'https://cloudflare-eth.com'
-      );
+      this.fallbackClients.set(network, fallbackUrls.map((url) =>
+        createPublicClient({
+          chain: def.chain,
+          transport: http(url, { timeout: 8_000, retryCount: 1 }),
+        })
+      ));
     }
-
-    const mainnetFallbacks = mainnetFallbackUrls.map(url =>
-      createPublicClient({
-        chain: mainnet,
-        transport: http(url, {
-          timeout: 30_000,
-          retryCount: 2,
-        }),
-      })
-    );
-
-    this.fallbackClients.set('mainnet', mainnetFallbacks);
-
-    // Sepolia fallbacks from environment variables
-    const sepoliaFallbackUrls = [
-      this.env.SEPOLIA_FALLBACK_RPC_1,
-      this.env.SEPOLIA_FALLBACK_RPC_2,
-    ].filter(Boolean) as string[];
-
-    const sepoliaFallbacks = sepoliaFallbackUrls.map(url =>
-      createPublicClient({
-        chain: sepolia,
-        transport: http(url, {
-          timeout: 30_000,
-          retryCount: 2,
-        }),
-      })
-    );
-
-    this.fallbackClients.set('sepolia', sepoliaFallbacks);
   }
 
   // Get primary client for network
@@ -366,7 +302,7 @@ export class BlockchainService {
       throw new Error(`Unsupported network for contracts: ${network}`);
     }
     
-    const contractAddress = address || CONTRACTS[network as keyof typeof CONTRACTS][contractType];
+    const contractAddress = address || CONTRACTS[network][contractType];
 
     let abi;
     switch (contractType) {
@@ -427,8 +363,11 @@ export class BlockchainService {
     };
   }
 
-  // Check ENS v2 migration status by querying ETHRegistry.getStatus()
-  // Status 0 = unregistered in v2, anything else = exists in v2 (migrated or native)
+  // Check ENS v2 migration status via ETHRegistry.getStatus()
+  // (IPermissionedRegistry.Status: AVAILABLE=0, RESERVED=1, REGISTERED=2).
+  // AVAILABLE and RESERVED both count as unmigrated — RESERVED is a pre-seeded
+  // placeholder that still resolves via v1 (see src/utils/migration.ts). Only
+  // REGISTERED(2) means the name actually lives on v2.
   async isUnmigratedName(network: NetworkName, name: string): Promise<boolean> {
     try {
       const v2Contracts = ENS_V2_CONTRACTS[network];
@@ -445,8 +384,8 @@ export class BlockchainService {
       });
 
       const status = await ethRegistry.read.getStatus([BigInt(lhash)]) as number;
-      // status 0 = not in v2 registry → unmigrated
-      return status === 0;
+      // Only REGISTERED(2) is truly on v2; AVAILABLE(0)/RESERVED(1) → unmigrated.
+      return status !== 2;
     } catch (error) {
       console.error('Error checking v2 migration status:', error);
       // Default to unmigrated to use safe legacy path
@@ -454,11 +393,40 @@ export class BlockchainService {
     }
   }
 
+  // Read a name's v2 registration (status + expiry) from the ETHRegistry.
+  // Returns null when v2 isn't deployed on the network (mainnet placeholders) or
+  // on error. The v2 expiry is authoritative for v2 names: a name can be live on
+  // v2 while its old v1 registration has lapsed (e.g. fox.eth on sepolia).
+  async getV2Registration(
+    network: NetworkName,
+    name: string,
+  ): Promise<{ status: number; expiry: bigint } | null> {
+    const v2Contracts = ENS_V2_CONTRACTS[network];
+    if (v2Contracts.ethRegistry.startsWith('0x') === false) return null;
+    try {
+      const lhash = labelhash(name.split('.')[0]);
+      const ethRegistry = getContract({
+        address: v2Contracts.ethRegistry as `0x${string}`,
+        abi: REGISTRY_V2_ABI,
+        client: this.getClient(network),
+      });
+      // Single getState() call returns status + expiry together (vs separate
+      // getStatus + getExpiry round-trips) — this is on the per-request hot path.
+      const state = await ethRegistry.read.getState([BigInt(lhash)]) as {
+        status: number; expiry: bigint;
+      };
+      return { status: Number(state.status), expiry: state.expiry };
+    } catch (error) {
+      console.warn(`Failed to read v2 registration for ${name}:`, error);
+      return null;
+    }
+  }
+
   // Enhanced ENS resolution: get owner directly from registry
   async getOwner(network: NetworkName, node: string): Promise<string> {
     return this.executeWithFallback(network, async (client) => {
       const registry = getContract({
-        address: CONTRACTS[network as keyof typeof CONTRACTS].registry as `0x${string}`,
+        address: CONTRACTS[network].registry as `0x${string}`,
         abi: ENS_REGISTRY_ABI,
         client,
       });
@@ -475,8 +443,35 @@ export class BlockchainService {
       return await this.getResolver(network, node);
     }
 
-    // Case 2: Migrated to v2 - use hierarchical v2 query
+    // Case 2: On v2 — prefer the real UniversalResolverV2.findResolver() when it is
+    // deployed (single canonical on-chain traversal); otherwise fall back to the
+    // manual registry walk from the root registry.
+    const ur = ENS_V2_CONTRACTS[network].universalResolver;
+    if (ur.startsWith('0x')) {
+      try {
+        return await this.findResolverViaUniversalResolver(network, ur as `0x${string}`, name);
+      } catch (error) {
+        console.warn(`UniversalResolver findResolver failed for ${name}, falling back to traversal:`, error);
+      }
+    }
     return await this.getResolverHierarchical(network, name);
+  }
+
+  // Resolve a name's resolver address via UniversalResolverV2.findResolver (the
+  // canonical on-chain registry traversal; no CCIP-Read). Takes a DNS-encoded name.
+  private async findResolverViaUniversalResolver(
+    network: NetworkName,
+    universalResolver: `0x${string}`,
+    name: string,
+  ): Promise<string> {
+    const ur = getContract({
+      address: universalResolver,
+      abi: UNIVERSAL_RESOLVER_V2_ABI,
+      client: this.getClient(network),
+    });
+    const dnsName = dnsEncodeName(canonicalizeName(name));
+    const [resolver] = await ur.read.findResolver([dnsName]) as [string, string, bigint];
+    return resolver;
   }
 
   // ENS v2: Hierarchical resolver lookup (for v2 registries)
@@ -522,7 +517,7 @@ export class BlockchainService {
   async getResolver(network: NetworkName, node: string): Promise<string> {
     return this.executeWithFallback(network, async (client) => {
       const registry = getContract({
-        address: CONTRACTS[network as keyof typeof CONTRACTS].registry as `0x${string}`,
+        address: CONTRACTS[network].registry as `0x${string}`,
         abi: ENS_REGISTRY_ABI,
         client,
       });
@@ -582,7 +577,7 @@ export class BlockchainService {
   async isWrapped(network: NetworkName, node: string): Promise<boolean> {
     try {
       const owner = await this.getOwner(network, node);
-      return owner.toLowerCase() === CONTRACTS[network as keyof typeof CONTRACTS].nameWrapper.toLowerCase();
+      return owner.toLowerCase() === CONTRACTS[network].nameWrapper.toLowerCase();
     } catch (error) {
       return false;
     }
@@ -593,7 +588,7 @@ export class BlockchainService {
     try {
       return this.executeWithFallback(network, async (client) => {
         const registrar = getContract({
-          address: CONTRACTS[network as keyof typeof CONTRACTS].registrar as `0x${string}`,
+          address: CONTRACTS[network].registrar as `0x${string}`,
           abi: [
             {
               inputs: [{ name: 'id', type: 'uint256' }],
@@ -621,12 +616,12 @@ export class BlockchainService {
       throw new Error(`Unsupported network for configuration: ${network}`);
     }
 
-    const contracts = CONTRACTS[network as keyof typeof CONTRACTS];
+    const contracts = CONTRACTS[network];
     const client = this.getClient(network);
 
     return {
       name: network,
-      rpcUrl: network === 'mainnet' ? this.env.MAINNET_RPC_URL : this.env.SEPOLIA_RPC_URL,
+      rpcUrl: this.env[NETWORKS[network].rpcUrlEnvKey],
       contracts: {
         registry: contracts.registry,
         registrar: contracts.registrar,

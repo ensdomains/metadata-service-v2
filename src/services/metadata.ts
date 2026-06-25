@@ -14,6 +14,8 @@ import type {
   BatchMetadataResponse,
 } from "../types/api";
 import { MIGRATION_STATUS, type NetworkName, type MigrationStatus } from "../types";
+import { classifyMigrationStatus, isReservedOwner } from "../utils/migration";
+import { NotFoundError, UpstreamError } from "./errors";
 import {
   validateEnsName,
   getLabel,
@@ -77,14 +79,17 @@ export interface MetadataServiceConfig {
   ensnodeEndpoint: string;
   ensnodeFallbackEndpoint?: string;
   ensnodeApiVersion?: 'v1' | 'v2';
+  /** Optional secondary v1 ENSNode subgraph, queried after the primary v2 indexer
+   *  misses (zigens is v2-only). Always queried with v1 ('namehash' id) semantics. */
+  ensnodeV1Endpoint?: string;
   fallbackToBlockchain: boolean;
   internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
-  network?: string;
+  network?: NetworkName;
 }
 
 export class MetadataService {
-  private network: string;
+  private network: NetworkName;
   public ensnode: EnsnodeService;
   private internalCache?: CacheService; // For internal optimizations only
   private cache: CacheService; // Backwards compatibility
@@ -106,6 +111,11 @@ export class MetadataService {
       fallbackEndpoint: config.ensnodeFallbackEndpoint,
       apiVersion: config.ensnodeApiVersion,
     });
+
+    // Secondary v1 ENSNode subgraph (e.g. sepolia v1 names, which zigens lacks).
+    const ensnodeV1 = config.ensnodeV1Endpoint
+      ? new EnsnodeService({ primaryEndpoint: config.ensnodeV1Endpoint, apiVersion: 'v1' })
+      : undefined;
 
     // Initialize internal cache for ensnode responses if enabled
     if (config.internalCacheEnabled) {
@@ -131,7 +141,7 @@ export class MetadataService {
       blockchain: {
         ...DEFAULT_FALLBACK_CONFIG.blockchain,
         enabled: config.fallbackToBlockchain,
-        preferredNetwork: this.network as NetworkName,
+        preferredNetwork: this.network,
       },
     };
     this.fallback = new FallbackService(
@@ -139,6 +149,7 @@ export class MetadataService {
       this.ensnode,
       this.blockchain,
       this.resolver,
+      ensnodeV1,
     );
 
     // Initialize D1 and sync services if enabled
@@ -184,11 +195,14 @@ export class MetadataService {
 
       let metadata: MetadataResponse;
 
-      if (source === "ensnode") {
+      if (source === "ensnode" || source === "ensnodeV1") {
+        // `ensnodeV1` means the name came from the v1 ENSNode subgraph (absent from
+        // the v2 indexer), so it is NOT on v2 → force `unmigrated` classification.
         metadata = await this.buildMetadataFromEnsnode(
           domain as EnsnodeDomain,
           network,
           baseUrl,
+          source === "ensnode",
         );
 
         // Store in D1 if enabled
@@ -203,6 +217,7 @@ export class MetadataService {
         // Built from blockchain data
         metadata = await this.buildMetadataFromBlockchain(
           domain as unknown as BlockchainNameData,
+          network,
           baseUrl,
         );
       }
@@ -213,6 +228,9 @@ export class MetadataService {
 
       return metadata;
     } catch (error) {
+      // Expiry is a distinct, intentional outcome — propagate it unchanged (→ 410).
+      if (error instanceof DomainExpiredError) throw error;
+
       console.error(`Failed to resolve metadata for ${identifier}:`, error);
       // Try D1 as last resort if available
       if (this.d1) {
@@ -236,6 +254,10 @@ export class MetadataService {
         }
       }
 
+      // Preserve the taxonomy from the fallback layer: NotFound → 404, Upstream →
+      // 503. Anything else is unexpected (e.g. a build bug) → generic 500, NOT a
+      // 404 (which would mask real failures as "name doesn't exist").
+      if (error instanceof NotFoundError || error instanceof UpstreamError) throw error;
       throw new Error(`Failed to resolve metadata for ${identifier}`);
     }
   }
@@ -244,9 +266,21 @@ export class MetadataService {
   async checkExpiry(name: string): Promise<void> {
     if (!name.endsWith('.eth') || name.split('.').length !== 2) return;
     try {
+      // v2 is authoritative where deployed: a name can be live on v2 with a future
+      // expiry while its old v1 registration has lapsed (e.g. fox.eth on sepolia is
+      // REGISTERED on v2 until 2028 but expired on the v1 registrar in Feb 2026).
+      // Only fall back to the v1 registrar expiry when the name is not on v2.
+      const v2 = await this.blockchain.getV2Registration(this.network, name);
+      if (v2 && v2.status === 2) {
+        if (v2.expiry && Number(v2.expiry) * 1000 < Date.now()) {
+          throw new DomainExpiredError(name, new Date(Number(v2.expiry) * 1000));
+        }
+        return; // live on v2 — ignore any lapsed v1 registration
+      }
+
       const label = name.split('.')[0];
       const hash = labelhash(label);
-      const expiry = await this.blockchain.getExpiry(this.network as NetworkName, hash);
+      const expiry = await this.blockchain.getExpiry(this.network, hash);
       if (expiry && Number(expiry) * 1000 < Date.now()) {
         throw new DomainExpiredError(name, new Date(Number(expiry) * 1000));
       }
@@ -254,6 +288,23 @@ export class MetadataService {
       if (error instanceof DomainExpiredError) throw error;
       console.warn(`Failed to check expiry for ${name}:`, error);
     }
+  }
+
+  /**
+   * Single-pass resolve for image/rasterize rendering: returns the name's
+   * MigrationStatus (for the badge) AND enforces existence — throws NotFoundError
+   * if the name isn't registered in any source (so the caller 404s), or
+   * UpstreamError (→503) on a transient outage rather than a false 404. This
+   * replaces a separate classifyName + existence check (one indexer round-trip
+   * instead of two) and reuses the same source→status mapping as getMigrationStatus.
+   */
+  async resolveStatusForImage(network: NetworkName, name: string): Promise<MigrationStatus> {
+    if (!validateEnsName(name)) {
+      throw new Error('Invalid ENS name format');
+    }
+    // Throws NotFoundError when nothing can resolve the name.
+    const { data, source } = await this.fallback.getDomainMetadata(name);
+    return this.statusFromSource(source, network, name, data as any);
   }
 
   // Resolve v1 contract address + tokenId to ENS name
@@ -277,16 +328,89 @@ export class MetadataService {
       registryType = 'namewrapper';
       nameHash = tokenIdToHex(tokenId);
     } else {
-      throw new Error(`Unknown contract address: ${contractAddress}`);
+      throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }
 
     const { domain } = await this.ensnode.getDomainByNamehash(nameHash);
 
     if (!domain?.name) {
-      throw new Error(`No domain found for tokenId ${tokenId}`);
+      throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
     }
 
     return { name: domain.name, registryType };
+  }
+
+  /**
+   * Network-aware v1→v2 classification for a name → canonical MigrationStatus.
+   * Single source of truth shared by metadata assembly, image generation, and
+   * webhook warming (replaces the previously-duplicated inline detection).
+   *
+   * Sepolia uses the v2 indexer: a name present in the index is on v2, but a
+   * RESERVED placeholder (owner == address(0), pre-seeded from v1) is still
+   * `unmigrated`; otherwise the indexer's `isMigrated` flag distinguishes
+   * `migrated` (from v1) from `native` (born on v2 — flag clear); absence ⇒
+   * `unmigrated`. Mainnet uses the on-chain `ETHRegistry.getStatus()` check
+   * (placeholder-guarded until mainnet v2 is deployed). Falls back to
+   * `unmigrated` on any error.
+   */
+  async classifyName(network: NetworkName, name: string): Promise<MigrationStatus> {
+    try {
+      if (network === 'sepolia') {
+        const { domain } = await this.ensnode.getDomain(name);
+        if (!domain) return classifyMigrationStatus({ isUnmigrated: true });
+        return this.classifyV2IndexerDomain(domain);
+      }
+      const isUnmigrated = await this.blockchain.isUnmigratedName(network, name);
+      return classifyMigrationStatus({ isUnmigrated, isOnV2: !isUnmigrated });
+    } catch {
+      return MIGRATION_STATUS.UNMIGRATED;
+    }
+  }
+
+  /**
+   * Single source of truth for classifying a domain record that came from the
+   * **v2 indexer** (zigens). Present in the index ⇒ on v2, unless it is a RESERVED
+   * placeholder (owner == address(0)) which is still `unmigrated`; otherwise the
+   * indexer's `isMigrated` flag distinguishes `migrated` (from v1) from `native`
+   * (born on v2 — flag clear). Used by classifyName, getMigrationStatus, and
+   * buildMetadataFromEnsnode so they cannot drift.
+   *
+   * NB: this must ONLY be fed v2-indexer data. v1-indexer (`ensnodeV1`) results are
+   * `unmigrated`, and `blockchain`-sourced results use the on-chain status check
+   * (which can never prove `native`) — see getMigrationStatus / buildMetadata*.
+   */
+  private classifyV2IndexerDomain(
+    data: { isMigrated?: boolean; owner?: { id?: string }; ownerId?: string },
+  ): MigrationStatus {
+    return classifyMigrationStatus({
+      isOnV2: true,
+      isReserved: isReservedOwner(data.owner?.id ?? data.ownerId),
+      bornOnV2: data.isMigrated === false,
+    });
+  }
+
+  /**
+   * Map a fallback-resolved record to a MigrationStatus, by source. Shared by
+   * getMigrationStatus and the image path so they can't drift:
+   *  - `ensnodeV1` (v1 ENSNode subgraph) → `unmigrated`
+   *  - `ensnode` on sepolia (zigens/v2 indexer) → v2 indexer classification
+   *  - `blockchain`, or `ensnode` on mainnet (v1 ENSNode subgraph) → on-chain
+   *    registry status only (can prove on-v2 vs not, never `native`).
+   */
+  private async statusFromSource(
+    source: 'ensnode' | 'ensnodeV1' | 'blockchain',
+    network: NetworkName,
+    name: string,
+    data: { isMigrated?: boolean; owner?: { id?: string }; ownerId?: string },
+  ): Promise<MigrationStatus> {
+    if (source === 'ensnodeV1') {
+      return classifyMigrationStatus({ isUnmigrated: true });
+    }
+    if (source === 'ensnode' && network === 'sepolia') {
+      return this.classifyV2IndexerDomain(data);
+    }
+    const isUnmigrated = await this.blockchain.isUnmigratedName(network, name);
+    return classifyMigrationStatus({ isUnmigrated, isOnV2: !isUnmigrated });
   }
 
   // Get migration status (CF cache handles API response caching)
@@ -305,14 +429,7 @@ export class MetadataService {
 
       let response: MigrationStatusResponse;
 
-      // v1 subgraph isMigrated = 2019 registrar migration, not v2. Only trust for sepolia (v2 indexer).
-      let migrationStatus: MigrationStatus = MIGRATION_STATUS.UNMIGRATED;
-      if (this.network === 'sepolia' && (status as any).isMigrated) {
-        migrationStatus = MIGRATION_STATUS.MIGRATED;
-      } else if (this.network !== 'sepolia') {
-        const isUnmigrated = await this.blockchain.isUnmigratedName(this.network as NetworkName, name);
-        migrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
-      }
+      const migrationStatus = await this.statusFromSource(source, this.network, name, status as any);
 
       response = {
         name,
@@ -591,21 +708,29 @@ export class MetadataService {
     }
   }
 
-  // Build metadata response from ensnode domain data
+  // Build metadata response from ensnode domain data.
+  // `onV2` is false when the domain came from the v1 ENSNode subgraph fallback
+  // (name absent from the v2 indexer) → it is a v1 name, classified `unmigrated`.
   private async buildMetadataFromEnsnode(
     domain: EnsnodeDomain,
     network: NetworkName,
     baseUrl?: string,
+    onV2: boolean = true,
   ): Promise<MetadataResponse> {
-    // Determine ENS v2 migration status.
-    // v1 subgraph's isMigrated refers to 2019 permanent registrar migration — NOT v2.
-    // Only trust isMigrated from v2 indexer (sepolia staging). For mainnet, use on-chain check.
+    // Determine ENS v2 migration status. A v2-sourced domain is on v2 — unless it
+    // is a RESERVED placeholder (owner == address(0)), which is still `unmigrated`;
+    // otherwise its `isMigrated` flag distinguishes `migrated` from `native`. A
+    // v1-sourced domain (`onV2 === false`) is `unmigrated`. For mainnet, use the
+    // on-chain check.
     let v2MigrationStatus: MigrationStatus;
-    if (this.network === 'sepolia' && domain.isMigrated !== undefined) {
-      v2MigrationStatus = domain.isMigrated ? MIGRATION_STATUS.MIGRATED : MIGRATION_STATUS.UNMIGRATED;
+    if (!onV2) {
+      v2MigrationStatus = classifyMigrationStatus({ isUnmigrated: true });
+    } else if (this.network === 'sepolia' && domain.isMigrated !== undefined) {
+      // v2 indexer (zigens) domain — reuse the record we already fetched.
+      v2MigrationStatus = this.classifyV2IndexerDomain(domain);
     } else {
       const isUnmigrated = await this.blockchain.isUnmigratedName(network, domain.name);
-      v2MigrationStatus = isUnmigrated ? MIGRATION_STATUS.UNMIGRATED : MIGRATION_STATUS.MIGRATED;
+      v2MigrationStatus = classifyMigrationStatus({ isUnmigrated, isOnV2: !isUnmigrated });
     }
 
     const origin = baseUrl || this.getDefaultBaseUrl();
@@ -628,10 +753,13 @@ export class MetadataService {
   // Build metadata response from blockchain data
   private async buildMetadataFromBlockchain(
     nameData: BlockchainNameData,
+    network: NetworkName,
     baseUrl?: string,
   ): Promise<MetadataResponse> {
+    // Use the request's network for self-URLs — the blockchain fallback record
+    // doesn't carry one (nameData.network was undefined → `/undefined/` URLs).
     const origin = baseUrl || this.getDefaultBaseUrl();
-    const imageUrl = `${origin}/${nameData.network}/registry/${encodeURIComponent(nameData.name)}/image`;
+    const imageUrl = `${origin}/${network}/registry/${encodeURIComponent(nameData.name)}/image`;
 
     return {
       is_normalized: isNormalized(nameData.name),
@@ -641,7 +769,7 @@ export class MetadataService {
       url: `https://app.ens.domains/name/${nameData.name}`,
       last_request_date: Date.now(),
       version: 0,
-      background_image: `${origin}/${nameData.network}/avatar/${nameData.name}`,
+      background_image: `${origin}/${network}/avatar/${nameData.name}`,
       image: imageUrl,
       image_url: imageUrl,
     };
@@ -748,7 +876,8 @@ export class MetadataService {
       hierarchy.push({
         name: domainName,
         owner: "0x0000000000000000000000000000000000000000",
-        resolver: "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63",
+        resolver: CONTRACTS[this.network]?.resolver
+          ?? "0x0000000000000000000000000000000000000000",
         level: parts.length - i,
       });
     }
@@ -878,7 +1007,7 @@ export class MetadataService {
       const nameData = await this.resolver.resolveName(
         name,
         namehash(name),
-        this.network as NetworkName,
+        this.network,
       );
 
       // Determine migration status based on v1 vs v2 registry check
@@ -921,7 +1050,7 @@ export class MetadataService {
           const nameData = await this.resolver.resolveName(
             domainName,
             namehash(domainName),
-            this.network as NetworkName,
+            this.network,
           );
 
           hierarchy.push({
@@ -931,7 +1060,7 @@ export class MetadataService {
               "0x0000000000000000000000000000000000000000",
             resolver:
               nameData.resolver.resolver ||
-              CONTRACTS[this.network as keyof typeof CONTRACTS]?.resolver || '',
+              CONTRACTS[this.network]?.resolver || '',
             level,
           });
         } catch {
@@ -939,7 +1068,7 @@ export class MetadataService {
           hierarchy.push({
             name: domainName,
             owner: "0x0000000000000000000000000000000000000000",
-            resolver: CONTRACTS[this.network as keyof typeof CONTRACTS]?.resolver || '',
+            resolver: CONTRACTS[this.network]?.resolver || '',
             level,
           });
         }

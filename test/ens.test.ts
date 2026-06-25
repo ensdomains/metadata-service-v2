@@ -10,6 +10,8 @@ import {
   getDomainLevel,
   getCharacterSet,
   validateEnsName,
+  canonicalizeName,
+  dnsEncodeName,
   isEmptyAddress,
   isEmptyHash,
   isNormalized,
@@ -136,6 +138,22 @@ describe('ENS Utilities', () => {
       expect(validateEnsName('test')).toBe(false);
       expect(validateEnsName('.eth')).toBe(false);
       expect(validateEnsName('test.')).toBe(false);
+    });
+
+    it('should reject names exceeding the max length cap', () => {
+      const tooLong = 'a'.repeat(256) + '.eth';
+      expect(validateEnsName(tooLong)).toBe(false);
+      expect(validateEnsName('a'.repeat(60) + '.eth')).toBe(true);
+    });
+
+    it('canonicalizeName lowercases + NFC-normalizes for case-insensitive keys', () => {
+      expect(canonicalizeName('Vitalik.ETH')).toBe('vitalik.eth');
+      expect(canonicalizeName('FOO.eth')).toBe(canonicalizeName('foo.eth'));
+    });
+
+    it('dnsEncodeName produces DNS wire format (UniversalResolver findResolver input)', () => {
+      expect(dnsEncodeName('foo.eth')).toBe('0x03666f6f0365746800');
+      expect(dnsEncodeName('')).toBe('0x00'); // root
     });
 
     it('should identify empty addresses', () => {

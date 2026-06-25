@@ -1,5 +1,6 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
-import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type MigrationStatus } from '../types';
+import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type MigrationStatus, type NetworkName } from '../types';
+import { canonicalizeName } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';
 import type { AvatarService } from './avatar';
@@ -37,9 +38,14 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   return Array.from(hashArray).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Build a deterministic cache key from name + image params
-function buildCacheKey(name: string, params: ImageCacheParams): string {
-  return `svg:${name}:${params.migrationStatus}:${params.width}:${params.height}`;
+// Build a deterministic cache key from name + network + image params.
+// `name` stays first so the per-name invalidation prefix (`svg:${name}:`) still
+// matches across both networks. `network` prevents mainnet/sepolia collisions —
+// the same name renders differently per network (avatar, migration status).
+function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
+  // Canonical (case-insensitive) name — keep it first so the per-name invalidation
+  // prefix (`svg:${name}:`) still matches across both networks.
+  return `svg:${canonicalizeName(name)}:${network}:${params.migrationStatus}:${params.width}:${params.height}`;
 }
 
 export class ImageCacheService {
@@ -48,6 +54,7 @@ export class ImageCacheService {
     private storage: StorageManager,
     private imageService: ImageGenerationService,
     private avatarService: AvatarService,
+    private network: NetworkName,
     private bucket?: R2Bucket,
   ) {}
 
@@ -76,7 +83,7 @@ export class ImageCacheService {
       height: options.size?.height || 518,
     };
 
-    const cacheKey = buildCacheKey(name, params);
+    const cacheKey = buildCacheKey(name, this.network, params);
     const ttlConfig = this.getTtlConfig(params.migrationStatus);
 
     const start = Date.now();
@@ -141,7 +148,7 @@ export class ImageCacheService {
 
   // Invalidate all cache entries for a domain name
   async invalidate(name: string): Promise<void> {
-    const kvPrefix = `svg:${name}:`;
+    const kvPrefix = `svg:${canonicalizeName(name)}:`;
     const errors: Error[] = [];
 
     // KV: list and delete all keys with this prefix
@@ -158,8 +165,9 @@ export class ImageCacheService {
     // R2: delete avatar + SVG prefix
     try {
       await Promise.all([
-        this.storage.delete(`avatars/${name}`),
-        this.storage.deleteByPrefix(`svg/svg:${name}:`),
+        // avatars are keyed `avatars/${name}:${network}` — prefix-delete both networks
+        this.storage.deleteByPrefix(`avatars/${canonicalizeName(name)}:`),
+        this.storage.deleteByPrefix(`svg/svg:${canonicalizeName(name)}:`),
       ]);
     } catch (err) {
       errors.push(err as Error);
@@ -183,10 +191,14 @@ export class ImageCacheService {
     let avatarHash = '';
     let avatarFailed = false;
 
+    // Network-qualified avatar cache key: the same name resolves to different
+    // avatars per network, so mainnet/sepolia must not share an R2 avatar entry.
+    const avatarKey = `${canonicalizeName(name)}:${this.network}`;
+
     // Try R2 avatar cache first
     if (!avatarBase64) {
       try {
-        const r2Avatar = await this.storage.getAvatar(name);
+        const r2Avatar = await this.storage.getAvatar(avatarKey);
         if (r2Avatar) {
           avatarBase64 = arrayBufferToBase64(r2Avatar.data);
           avatarMimeType = r2Avatar.contentType;
@@ -210,9 +222,9 @@ export class ImageCacheService {
           ) as ArrayBuffer;
           avatarHash = await sha256Hex(ab);
 
-          // Cache avatar in R2 for next time
+          // Cache avatar in R2 for next time (network-qualified key)
           try {
-            await this.storage.setAvatar(name, ab, avatar.mimeType);
+            await this.storage.setAvatar(avatarKey, ab, avatar.mimeType);
           } catch (err) {
             console.warn(`[image-cache] R2 avatar write failed for ${name}:`, err);
           }

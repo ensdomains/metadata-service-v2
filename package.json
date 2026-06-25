@@ -5,7 +5,9 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
-    "predev": "node scripts/setup-local-r2.mjs",
+    "db:migrate:local": "wrangler d1 execute ens-metadata-db --local --file=migrations/001_initial_schema.sql",
+    "db:migrate:remote": "wrangler d1 execute ens-metadata-db --remote --file=migrations/001_initial_schema.sql",
+    "predev": "node scripts/setup-local-r2.mjs && yarn db:migrate:local",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest",
@@ -19,7 +21,7 @@
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.0",
-    "@ensdomains/ens-avatar": "2.0.0-alpha.1",
+    "@ensdomains/ens-avatar": "2.0.0-alpha.2",
     "@ensdomains/ensjs": "^3.7.0",
     "@resvg/resvg-wasm": "^2.6.2",
     "adaptive-layout-composer": "^1.0.1",

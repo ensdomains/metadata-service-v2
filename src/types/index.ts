@@ -1,14 +1,27 @@
-// Network types
-export type NetworkName = 'mainnet' | 'sepolia';
+// Network types — single source of truth lives in src/config/networks.ts.
+import { type NetworkName, isNetworkName, SUPPORTED_NETWORKS, NETWORKS } from '../config/networks';
+export { isNetworkName, SUPPORTED_NETWORKS, NETWORKS };
+export type { NetworkName };
 
-// Migration status types
+// Migration status types — the v1→v2 lifecycle of a name.
+// See ../utils/migration.ts for the full model and how each value is derived.
+// `ejected`/`shadow` from the v2 design doc are intentionally NOT modelled — the
+// built system has no L1/L2 ejection, only v1→v2 migration (see migration.ts).
 export const MIGRATION_STATUS = {
-  MIGRATED: 'migrated',
-  NATIVE: 'native',
+  /** Still on ENS v1 (legacy registry). Not present in v2. */
   UNMIGRATED: 'unmigrated',
+  /** Moved from v1 → v2 (indexer `migrated` flag set). */
+  MIGRATED: 'migrated',
+  /** Born on v2 — registered directly via the v2 registry, never on v1. */
+  NATIVE: 'native',
 } as const;
 
 export type MigrationStatus = typeof MIGRATION_STATUS[keyof typeof MIGRATION_STATUS];
+
+/** Runtime guard for untrusted `status` input (e.g. the image `?status=` param). */
+export function isMigrationStatus(value: unknown): value is MigrationStatus {
+  return typeof value === 'string' && (Object.values(MIGRATION_STATUS) as string[]).includes(value);
+}
 
 // Network configuration
 export interface NetworkConfig {

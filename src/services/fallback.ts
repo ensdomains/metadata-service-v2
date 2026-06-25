@@ -2,8 +2,9 @@
 import type { EnsnodeService } from './ensnode';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
-import { namehash, validateEnsName } from '../utils/ens';
-import { MIGRATION_STATUS, type NetworkName } from '../types';
+import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
+import { type NetworkName } from '../types';
+import { NotFoundError, UpstreamError } from './errors';
 
 export interface FallbackConfig {
   maxRetries: number;
@@ -21,7 +22,7 @@ export interface FallbackConfig {
 
 export interface FallbackResult<T> {
   data: T;
-  source: 'ensnode' | 'blockchain';
+  source: 'ensnode' | 'ensnodeV1' | 'blockchain';
   usedFallback: boolean;
   retries: number;
   error?: Error;
@@ -35,21 +36,25 @@ export class FallbackService {
     private config: FallbackConfig,
     private ensnode: EnsnodeService,
     private blockchain: BlockchainService,
-    private resolver: ResolverService
+    private resolver: ResolverService,
+    // Optional secondary v1 ENSNode indexer (e.g. sepolia v1 names absent from zigens).
+    private ensnodeV1?: EnsnodeService,
   ) {}
 
   // Execute operation with automatic fallback logic
   async executeWithFallback<T>(
     operation: {
       ensnode: () => Promise<T>;
+      ensnodeV1?: () => Promise<T>;
       blockchain: () => Promise<T>;
     },
     operationName: string
   ): Promise<FallbackResult<T>> {
     let lastError: Error | null = null;
     let retries = 0;
+    let sawUpstream = false; // any tier hit a real upstream failure (vs a clean miss)
 
-    // Try ensnode first if it's enabled and healthy
+    // Try the primary (v2) indexer first if it's enabled and healthy
     if (this.config.ensnode.enabled && this.isEnsnodeHealthy()) {
       try {
         const data = await operation.ensnode();
@@ -61,8 +66,35 @@ export class FallbackService {
         };
       } catch (error) {
         lastError = error as Error;
-        console.warn(`Ensnode ${operationName} failed, falling back to blockchain:`, error);
-        this.markEnsnodeUnhealthy();
+        // Only an actual upstream failure trips the circuit-breaker. A NotFoundError
+        // (name genuinely absent from the v2 index) is a clean miss — fall through
+        // to the next tier WITHOUT marking the healthy indexer as unhealthy.
+        if (error instanceof UpstreamError) {
+          sawUpstream = true;
+          console.warn(`Ensnode ${operationName} upstream failure, tripping breaker:`, error);
+          this.markEnsnodeUnhealthy();
+        } else {
+          console.log(`Ensnode ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
+        }
+        retries++;
+      }
+    }
+
+    // Secondary: v1 ENSNode subgraph (for v1-only names not present in the v2 indexer)
+    if (this.ensnodeV1 && operation.ensnodeV1) {
+      try {
+        const data = await operation.ensnodeV1();
+        return {
+          data,
+          source: 'ensnodeV1',
+          usedFallback: true,
+          retries,
+        };
+      } catch (error) {
+        lastError = error as Error;
+        if (error instanceof UpstreamError) sawUpstream = true;
+        const kind = error instanceof UpstreamError ? 'upstream failure' : 'miss';
+        console.log(`v1 ENSNode ${operationName} ${kind}, falling back to blockchain:`, (error as Error)?.message);
         retries++;
       }
     }
@@ -85,10 +117,16 @@ export class FallbackService {
       }
     }
 
-    // All options exhausted
-    throw new Error(
-      `All fallback options exhausted for ${operationName}. Last error: ${lastError?.message}`
-    );
+    // All tiers exhausted. Preserve the error taxonomy: if any tier hit a real
+    // upstream failure we cannot claim "not found" (→ UpstreamError/503); otherwise
+    // every tier cleanly missed (→ NotFoundError/404).
+    if (sawUpstream) {
+      throw new UpstreamError(
+        `All sources failed for ${operationName}: ${lastError?.message}`,
+        { cause: lastError },
+      );
+    }
+    throw new NotFoundError(`${operationName}: not found in any source`);
   }
 
   // Check if ensnode is healthy based on recent request outcomes (no proactive health check query)
@@ -154,7 +192,14 @@ export class FallbackService {
         ensnode: async () => {
           const { domain } = await this.ensnode.getDomain(name);
           if (!domain) {
-            throw new Error(`Domain ${name} not found in ensnode`);
+            throw new NotFoundError(`Domain ${name} not found in ensnode`);
+          }
+          return domain;
+        },
+        ensnodeV1: async () => {
+          const { domain } = await this.ensnodeV1!.getDomain(name);
+          if (!domain) {
+            throw new NotFoundError(`Domain ${name} not found in v1 ensnode`);
           }
           return domain;
         },
@@ -164,6 +209,13 @@ export class FallbackService {
             namehash(name),
             this.config.blockchain.preferredNetwork
           );
+          // resolveName returns synthetic empty data for names with no registry
+          // owner — i.e. unregistered/never-registered names. Treat that as a clean
+          // miss so the endpoint 404s instead of fabricating metadata for a name
+          // that doesn't exist.
+          if (isEmptyAddress(nameData.resolver.owner ?? '')) {
+            throw new NotFoundError(`${name} is not registered`);
+          }
           return {
             id: namehash(name),
             name: nameData.name,
@@ -179,7 +231,9 @@ export class FallbackService {
             expiryDate: nameData.expirationDate?.toISOString(),
             createdAt: nameData.registrationDate?.toISOString(),
             ttl: undefined,
-            isMigrated: nameData.migrationStatus === MIGRATION_STATUS.NATIVE,
+            // Deliberately omit `isMigrated`: an on-chain read cannot distinguish
+            // native-vs-migrated (that lives only in the indexer). Classification of
+            // a `blockchain`-sourced result is done via on-chain status, not this field.
           };
         },
       },
@@ -198,7 +252,14 @@ export class FallbackService {
         ensnode: async () => {
           const { status } = await this.ensnode.getMigrationStatus(name);
           if (!status) {
-            throw new Error(`Migration status for ${name} not found in ensnode`);
+            throw new NotFoundError(`Migration status for ${name} not found in ensnode`);
+          }
+          return status;
+        },
+        ensnodeV1: async () => {
+          const { status } = await this.ensnodeV1!.getMigrationStatus(name);
+          if (!status) {
+            throw new NotFoundError(`Migration status for ${name} not found in v1 ensnode`);
           }
           return status;
         },
@@ -210,7 +271,10 @@ export class FallbackService {
           );
           return {
             name,
-            isMigrated: nameData.migrationStatus === MIGRATION_STATUS.NATIVE,
+            // Neutral placeholder; a `blockchain`-sourced migration status is decided
+            // by the on-chain registry check (isUnmigratedName), NOT this field —
+            // an on-chain read cannot prove native-vs-migrated.
+            isMigrated: false,
             ownerId: nameData.resolver.owner,
             resolverId: nameData.resolver.resolver,
             parentId: namehash(name.split('.').slice(1).join('.')),
@@ -235,7 +299,14 @@ export class FallbackService {
         ensnode: async () => {
           const { hierarchy } = await this.ensnode.getHierarchy(name);
           if (!hierarchy) {
-            throw new Error(`Hierarchy for ${name} not found in ensnode`);
+            throw new NotFoundError(`Hierarchy for ${name} not found in ensnode`);
+          }
+          return hierarchy;
+        },
+        ensnodeV1: async () => {
+          const { hierarchy } = await this.ensnodeV1!.getHierarchy(name);
+          if (!hierarchy) {
+            throw new NotFoundError(`Hierarchy for ${name} not found in v1 ensnode`);
           }
           return hierarchy;
         },
@@ -265,7 +336,7 @@ export class FallbackService {
               });
             } catch (error) {
               // If we can't resolve a level, create a placeholder
-              const defaultResolver = CONTRACTS[this.config.blockchain.preferredNetwork as keyof typeof CONTRACTS]?.resolver || '';
+              const defaultResolver = CONTRACTS[this.config.blockchain.preferredNetwork]?.resolver || '';
               hierarchyItems.push({
                 name: domainName,
                 ownerId: '0x0000000000000000000000000000000000000000',

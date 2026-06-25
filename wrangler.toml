@@ -22,11 +22,11 @@ type = "Data"
 globs = ["**/*.br"]
 fallthrough = true
 
-[env.development]
-name = "ens-metadata-v2-dev"
-
-[env.production]
-name = "ens-metadata-v2-prod"
+# NOTE: `yarn deploy` runs `wrangler deploy` with NO --env, so the DEFAULT
+# (top-level) worker below IS production. Named environments are intentionally
+# omitted: wrangler does not inherit top-level bindings into `[env.*]`, so a
+# `--env production` deploy would ship a worker with no KV/R2/D1. Configure
+# production via the top-level [vars] + bindings here.
 
 # KV Namespaces for caching
 [[kv_namespaces]]
@@ -56,16 +56,14 @@ preview_database_id = "ens-metadata-database-preview-id"
 # Environment variables
 [vars]
 ENSNODE_MAINNET_URL = "https://api.mainnet.ensnode.io/subgraph"
-ENSNODE_SEPOLIA_URL = "https://staging-graphql.ens.dev/graphql"
+ENSNODE_SEPOLIA_V2_URL = "https://graphql.ens.dev"
+ENSNODE_SEPOLIA_V1_URL = "https://api.sepolia.ensnode.io/subgraph"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
 SEPOLIA_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth_sepolia"
 LOG_LEVEL = "info"
-# WEBHOOK_SECRET — set via `wrangler secret put WEBHOOK_SECRET` (not in plaintext here)
-
-# Production-specific environment variables
-[env.production.vars]
-ENSNODE_MAINNET_URL = "https://api.mainnet.ensnode.io/subgraph"
-ENSNODE_SEPOLIA_URL = "https://staging-graphql.ens.dev/graphql"
-LOG_LEVEL = "warn"
+MAX_AVATAR_BYTES = "26214400"  # 25 MB cap on fetched avatar size (DoS guard)
+# Secrets (set via `wrangler secret put`, never in plaintext here):
+#   WEBHOOK_SECRET   — required in production (webhook is fail-closed without it)
+#   MAINNET_RPC_URL, SEPOLIA_RPC_URL — primary RPC endpoints (required)

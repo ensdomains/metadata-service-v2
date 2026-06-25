@@ -144,6 +144,31 @@ describe('ImageGenerationService', () => {
     });
   });
 
+  describe('user-content safety (XSS)', () => {
+    it('escapes XML-special characters in the name before it enters the SVG', async () => {
+      const { createDynamicSVGImage } = await import('adaptive-layout-composer');
+      const mockCreateSVG = vi.mocked(createDynamicSVGImage);
+      mockCreateSVG.mockClear();
+
+      await imageService.generateDomainImage({ name: 'evil</text><script>alert(1)</script>.eth' });
+
+      const passedText = (mockCreateSVG.mock.calls[0][0] as { text: string }).text;
+      expect(passedText).not.toMatch(/[<>]/);            // no raw angle brackets reach the SVG markup
+      expect(passedText).not.toContain('<script>');
+      expect(passedText).toContain('&lt;script&gt;');    // escaped form instead
+    });
+
+    it('leaves a normalized name unchanged (escape is identity for legit names)', async () => {
+      const { createDynamicSVGImage } = await import('adaptive-layout-composer');
+      const mockCreateSVG = vi.mocked(createDynamicSVGImage);
+      mockCreateSVG.mockClear();
+
+      await imageService.generateDomainImage({ name: 'vitalik.eth' });
+
+      expect((mockCreateSVG.mock.calls[0][0] as { text: string }).text).toBe('vitalik.eth');
+    });
+  });
+
   describe('error handling', () => {
     it('should handle SVG generation errors', async () => {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');

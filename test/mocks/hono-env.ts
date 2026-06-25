@@ -89,7 +89,7 @@ export const createMockEnv = () => ({
 
   // Environment Variables
   ENSNODE_MAINNET_URL: "https://api.ensnode.test/graphql",
-  ENSNODE_SEPOLIA_URL: "https://api.sepolia.ensnode.test/graphql",
+  ENSNODE_SEPOLIA_V2_URL: "https://api.sepolia.ensnode.test/graphql",
   MAINNET_RPC_URL: "https://mainnet.test.rpc",
   SEPOLIA_RPC_URL: "https://sepolia.test.rpc",
   MAINNET_FALLBACK_RPC_1: "https://mainnet-fallback-1.test.rpc",
