@@ -1,6 +1,6 @@
 // Sync service for storing ensnode data in D1 for fast local queries
 import { D1Service } from './d1';
-import { EnsnodeService, type EnsnodeDomain } from './ensnode';
+import { IndexerService, type IndexerDomain } from './indexer';
 import { namehash, validateEnsName } from '../utils/ens';
 import { MIGRATION_STATUS, type MigrationStatus } from '../types';
 
@@ -23,7 +23,7 @@ export interface SyncResult {
 export class SyncService {
   constructor(
     private d1: D1Service,
-    private ensnode: EnsnodeService,
+    private ensnode: IndexerService,
     private config: SyncConfig
   ) {}
 
@@ -424,7 +424,7 @@ export class SyncService {
   }
 
   // Helper: Sync related data for a domain (migration + hierarchy)
-  private async syncDomainRelatedData(name: string, _domain: EnsnodeDomain): Promise<void> {
+  private async syncDomainRelatedData(name: string, _domain: IndexerDomain): Promise<void> {
     // Always sync migration status (v1 isMigrated is unreliable for v2 status)
     try {
       await this.syncMigrationStatus(name);

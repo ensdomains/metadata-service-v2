@@ -1,5 +1,5 @@
 // Metadata service that integrates ensnode, internal KV cache, and blockchain fallback
-import { EnsnodeService, type EnsnodeDomain } from "./ensnode";
+import { IndexerService, type IndexerDomain } from "./indexer";
 import { CacheService, CacheKeys, CacheTTL } from "./cache";
 import { BlockchainService } from "./blockchain";
 import { ResolverService } from "./resolver";
@@ -90,7 +90,7 @@ export interface MetadataServiceConfig {
 
 export class MetadataService {
   private network: NetworkName;
-  public ensnode: EnsnodeService;
+  public ensnode: IndexerService;
   private internalCache?: CacheService; // For internal optimizations only
   private cache: CacheService; // Backwards compatibility
   public blockchain: BlockchainService;
@@ -106,7 +106,7 @@ export class MetadataService {
     db?: D1Database,
   ) {
     this.network = config.network || 'mainnet';
-    this.ensnode = new EnsnodeService({
+    this.ensnode = new IndexerService({
       primaryEndpoint: config.ensnodeEndpoint,
       fallbackEndpoint: config.ensnodeFallbackEndpoint,
       apiVersion: config.ensnodeApiVersion,
@@ -114,7 +114,7 @@ export class MetadataService {
 
     // Secondary v1 ENSNode subgraph (e.g. sepolia v1 names, which zigens lacks).
     const ensnodeV1 = config.ensnodeV1Endpoint
-      ? new EnsnodeService({ primaryEndpoint: config.ensnodeV1Endpoint, apiVersion: 'v1' })
+      ? new IndexerService({ primaryEndpoint: config.ensnodeV1Endpoint, apiVersion: 'v1' })
       : undefined;
 
     // Initialize internal cache for ensnode responses if enabled
@@ -199,7 +199,7 @@ export class MetadataService {
         // `ensnodeV1` means the name came from the v1 ENSNode subgraph (absent from
         // the v2 indexer), so it is NOT on v2 → force `unmigrated` classification.
         metadata = await this.buildMetadataFromEnsnode(
-          domain as EnsnodeDomain,
+          domain as IndexerDomain,
           network,
           baseUrl,
           source === "ensnode",
@@ -712,7 +712,7 @@ export class MetadataService {
   // `onV2` is false when the domain came from the v1 ENSNode subgraph fallback
   // (name absent from the v2 indexer) → it is a v1 name, classified `unmigrated`.
   private async buildMetadataFromEnsnode(
-    domain: EnsnodeDomain,
+    domain: IndexerDomain,
     network: NetworkName,
     baseUrl?: string,
     onV2: boolean = true,
@@ -800,7 +800,7 @@ export class MetadataService {
 
   // Build hierarchy response from ensnode data
   private buildHierarchyResponse(
-    hierarchy: EnsnodeDomain,
+    hierarchy: IndexerDomain,
     name: string,
   ): RegistryHierarchyResponse {
     const levels: Array<{
@@ -887,7 +887,7 @@ export class MetadataService {
 
   // Build attributes array (v1-compatible format with display_type and epoch ms dates)
   private buildAttributes(
-    domain: EnsnodeDomain,
+    domain: IndexerDomain,
     v2MigrationStatus: MigrationStatus,
   ): MetadataAttribute[] {
     const label = getLabel(domain.name);

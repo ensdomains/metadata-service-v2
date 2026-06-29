@@ -1,7 +1,9 @@
-// Webhook handler for cache invalidation, compatible with the zigens ENS v2
-// indexer's webhook delivery contract (see zigens/src/webhooks/manager.zig).
+// Webhook handler for cache invalidation: a backend tells us an ENS name changed
+// and we drop/warm what we cached for it. Sender-agnostic — the contract below
+// originated with the zigens v2 indexer (zigens/src/webhooks/manager.zig) but any
+// system that produces the same signed EnsNameEvent can POST it.
 //
-// CONTRACT (sender = zigens):
+// CONTRACT:
 //   Headers:
 //     X-Webhook-Signature: sha256=<hex>   HMAC-SHA256 over "{timestamp}.{body}"
 //     X-Webhook-Timestamp: <unix seconds> the value signed into the preamble
@@ -19,8 +21,9 @@ import { CacheService, CacheKeys } from './cache';
 import { validateEnsName, canonicalizeName } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
 
-// Webhook payload — matches zigens' WebhookManager.buildPayload output.
-export interface EnsnodeWebhookEvent {
+// Webhook payload: a flat ENS name-change event. (Wire shape originated with
+// zigens' WebhookManager.buildPayload; kept stable for any sender.)
+export interface EnsNameEvent {
   event_type: string;          // PascalCase event name, e.g. "NameRegistered"
   protocol: 'v1' | 'v2';       // ENS version (not chain) — see network mapping in index.ts
   block_number: number;
@@ -89,9 +92,9 @@ export class WebhookService {
         return c.json({ error: validationResult.error }, (validationResult.status || 400) as any);
       }
 
-      let payload: EnsnodeWebhookEvent;
+      let payload: EnsNameEvent;
       try {
-        payload = JSON.parse(rawBody) as EnsnodeWebhookEvent;
+        payload = JSON.parse(rawBody) as EnsNameEvent;
       } catch {
         return c.json({ error: 'Invalid JSON payload' }, 400);
       }
@@ -205,7 +208,7 @@ export class WebhookService {
   }
 
   // Process webhook event and invalidate the relevant caches.
-  private async processWebhookEvent(event: EnsnodeWebhookEvent): Promise<void> {
+  private async processWebhookEvent(event: EnsNameEvent): Promise<void> {
     // Canonicalize to match the form the read path writes its cache keys in.
     const domainName = event.name ? canonicalizeName(event.name) : null;
 
@@ -299,7 +302,7 @@ export class WebhookService {
   // Invalidate batch caches that might contain the domain.
   private async invalidateBatchCaches(): Promise<void> {
     try {
-      await this.cache.deleteByPrefix('batch:', 'ensnode');
+      await this.cache.deleteByPrefix('batch:', 'indexer');
     } catch (error) {
       console.warn('[webhook] failed to invalidate batch caches:', error);
     }
@@ -308,8 +311,8 @@ export class WebhookService {
   // Invalidate expiry-related caches.
   private async invalidateExpiryCaches(): Promise<void> {
     try {
-      await this.cache.deleteByPrefix('expiring:', 'ensnode');
-      await this.cache.deleteByPrefix('recent:', 'ensnode');
+      await this.cache.deleteByPrefix('expiring:', 'indexer');
+      await this.cache.deleteByPrefix('recent:', 'indexer');
     } catch (error) {
       console.warn('[webhook] failed to invalidate expiry caches:', error);
     }

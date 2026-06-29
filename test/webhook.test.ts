@@ -114,7 +114,7 @@ describe('WebhookService (zigens contract)', () => {
       // internal caches: 3 keys × 2 networks
       expect(fakes.cache.delete).toHaveBeenCalledTimes(6);
       // batch caches flushed
-      expect(fakes.cache.deleteByPrefix).toHaveBeenCalledWith('batch:', 'ensnode');
+      expect(fakes.cache.deleteByPrefix).toHaveBeenCalledWith('batch:', 'indexer');
       // metadata cache: only the two keys ending in ":vitalik.eth"
       expect(fakes.metadataCacheKv.delete).toHaveBeenCalledTimes(2);
       expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:mainnet:registry:vitalik.eth');
@@ -145,7 +145,7 @@ describe('WebhookService (zigens contract)', () => {
     it('flushes expiry caches for lifecycle events', async () => {
       const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
       await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ event_type: 'NameRenewed' }))));
-      expect(fakes.cache.deleteByPrefix).toHaveBeenCalledWith('expiring:', 'ensnode');
+      expect(fakes.cache.deleteByPrefix).toHaveBeenCalledWith('expiring:', 'indexer');
     });
   });
 
