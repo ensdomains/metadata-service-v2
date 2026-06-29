@@ -160,7 +160,10 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
   // Invalid/garbage value → undefined → AvatarService uses its built-in default.
   const parsedMax = parseInt(env.MAX_AVATAR_BYTES ?? '', 10);
   const maxAvatarBytes = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : undefined;
-  const avatarService = new AvatarService(getRpcUrl(env, network), NETWORKS[network].chain, maxAvatarBytes);
+  // v2 universal resolver (when configured for this network) so native-v2 names'
+  // avatar/header records resolve; AvatarService ignores the unset placeholder.
+  const universalResolverV2 = NETWORKS[network].v2?.universalResolver;
+  const avatarService = new AvatarService(getRpcUrl(env, network), NETWORKS[network].chain, maxAvatarBytes, universalResolverV2);
   const imageService = new ImageGenerationService(avatarService);
   const storageManager = new StorageManager(env.ASSET_BUCKET);
   const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService, network, env.ASSET_BUCKET);
@@ -292,6 +295,37 @@ app.get(
       });
     } catch (error) {
       return httpError(c, error, "Failed to resolve avatar");
+    }
+  }
+);
+
+// Header/banner endpoint: /{network}/header/{name} (the `header` text record)
+app.get(
+  "/:network/header/:name",
+  validateNetwork,
+  validateEnsNameParam,
+  async (c) => {
+    // validateNetwork middleware guarantees a valid value; narrow the type.
+    const network = c.req.param("network") as NetworkName;
+    const name = c.req.param("name");
+    const { avatarService } = getImageServices(c.env, network);
+
+    try {
+      const header = await avatarService.getHeaderImage(name);
+      if (!header) {
+        return c.json({ message: `No header set for ${name}` } as any, 404);
+      }
+
+      return new Response(new Uint8Array(header.buffer), {
+        status: 200,
+        headers: {
+          'Content-Type': header.mimeType,
+          'Content-Length': header.buffer.length.toString(),
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    } catch (error) {
+      return httpError(c, error, "Failed to resolve header");
     }
   }
 );

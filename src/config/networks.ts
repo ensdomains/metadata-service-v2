@@ -124,10 +124,11 @@ export const NETWORKS = {
       migrationContract: '0xf91c34ed840889ed96f806f882fd50506a336edb', // locked_migration_controller
       // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
       resolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',
-      // UniversalResolverV2: deployed via contracts-v2 scripts; fill in once the
-      // sepolia address is published. Until then the on-chain v2 resolver lookup
-      // falls back to manual registry traversal from rootRegistry.
-      universalResolver: 'UNIVERSAL_RESOLVER_V2_ADDRESS',
+      // UpgradableUniversalResolverProxy (sepolia) — the stable entry point in
+      // front of the UniversalResolverV2 impl. Resolves both v1 and native-v2
+      // names; findResolver() returns the canonical v2 public resolver. Used by
+      // BlockchainService.getResolverV2 and AvatarService (avatar/header records).
+      universalResolver: '0x164cb269a0c69ac6f93f568ad1836f7a7d552b58',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0x0635513f179D50A207757E05759CbD106d7dFcE8',
       legacyResolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',
