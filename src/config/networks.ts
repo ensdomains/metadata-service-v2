@@ -113,24 +113,23 @@ export const NETWORKS = {
       nameWrapper: '0x0635513f179D50A207757E05759CbD106d7dFcE8',  // name_wrapper
       resolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',     // public_resolver
     },
-    // ENS v2 (Sepolia) — aligned to zigens src/contracts.zig sepoliaAddresses.
+    // ENS v2 (Sepolia) — June 2026 deployment (architecture/ens_v2_june_deplyoyment.txt).
     v2: {
-      rootRegistry: '0xc960f7217d3643b525ef36bec8adf86953cd9ab8',  // root_registry
-      ethRegistry: '0xdedb92913a25abe1f7bcdd85d8a344a43b398b67',   // eth_registry
+      rootRegistry: '0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c',  // RootRegistry
+      ethRegistry: '0x67b728a792e789a8978b30cf1b3b641f19354b43',   // ETHRegistry
       // Migration is handled by separate controllers (see src/utils/migration.ts).
-      // zigens: migration_helper 0x11cfa7e034dafb7439cc1cc8b6e547f5c82ad021 (V1 side),
-      // locked_migration_controller 0xf91c34ed840889ed96f806f882fd50506a336edb,
-      // unlocked_migration_controller 0x056138ef5660f7113a3b0adc08ac3683310e7fbc (V2 side).
-      migrationContract: '0xf91c34ed840889ed96f806f882fd50506a336edb', // locked_migration_controller
+      // June deployment: MigrationHelper 0xd54a53c1567b26f9653c8565dccc39bceb6ab327 (V1 side),
+      // LockedMigrationController 0x681802eff57b83edce99d688c023ab1284495176,
+      // UnlockedMigrationController 0xd021a69db7f9e276a59cbbccf06e7f1e5434215c (V2 side).
+      migrationContract: '0x681802eff57b83edce99d688c023ab1284495176', // LockedMigrationController
       // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
-      resolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',
-      // UniversalResolverV2 (sepolia), current deployment. findResolver() returns
-      // the same resolvers graphql.ens.dev (the v2 indexer) reports, so on-chain
-      // avatar/header resolution stays consistent with our metadata source.
-      // (Supersedes the older march-deployment addresses, which return stale/null
-      // resolvers for v2 names.) Used by BlockchainService.getResolverV2 and
-      // AvatarService (avatar/header records).
-      universalResolver: '0x2f8a180604c42457cb56c7c4f708748ff1f91df1',
+      resolver: '0xd25f66dd4ff61486c2c5c1e6201a23576698d3df', // PublicResolverV2
+      // UniversalResolverV2 (sepolia), June 2026 deployment. Used by
+      // BlockchainService.getResolverV2 (findResolver) and AvatarService
+      // (avatar/header records). Proxy alternatives from the same deployment:
+      // ManagedUniversalResolverProxy 0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1,
+      // UpgradableUniversalResolverProxy 0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe.
+      universalResolver: '0x85edf8b6b7d4211e2b07aa687506b746357b92cf',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0x0635513f179D50A207757E05759CbD106d7dFcE8',
       legacyResolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',
