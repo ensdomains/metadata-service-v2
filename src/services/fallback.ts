@@ -1,5 +1,5 @@
 // Fallback and retry logic for when ensnode is down
-import type { IndexerService } from './indexer';
+import type { IndexerService, IndexerDomain, IndexerMigrationStatus } from './indexer';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
 import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
@@ -187,7 +187,7 @@ export class FallbackService {
       throw new Error('Invalid ENS name format');
     }
 
-    return this.executeWithFallback(
+    return this.executeWithFallback<IndexerDomain>(
       {
         ensnode: async () => {
           const { domain } = await this.ensnode.getDomain(name);
@@ -247,7 +247,7 @@ export class FallbackService {
       throw new Error('Invalid ENS name format');
     }
 
-    return this.executeWithFallback(
+    return this.executeWithFallback<IndexerMigrationStatus>(
       {
         ensnode: async () => {
           const { status } = await this.ensnode.getMigrationStatus(name);
