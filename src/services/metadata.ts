@@ -154,7 +154,7 @@ export class MetadataService {
 
     // Initialize D1 and sync services if enabled
     if (config.d1Enabled && db) {
-      this.d1 = new D1Service(db);
+      this.d1 = new D1Service(db, this.network);
       this.sync = new SyncService(this.d1, this.ensnode, DEFAULT_SYNC_CONFIG);
     }
   }
@@ -180,8 +180,7 @@ export class MetadataService {
       } = await this.fallback.getDomainMetadata(identifier);
 
       // Check if domain is expired
-      const domainData = domain as any;
-      const expiryRaw = domainData.expiryDate || domainData.expiry_date;
+      const expiryRaw = domain.expiryDate;
       if (expiryRaw) {
         const expiryMs = typeof expiryRaw === 'string' && expiryRaw.includes('T')
           ? new Date(expiryRaw).getTime()
@@ -304,7 +303,7 @@ export class MetadataService {
     }
     // Throws NotFoundError when nothing can resolve the name.
     const { data, source } = await this.fallback.getDomainMetadata(name);
-    return this.statusFromSource(source, network, name, data as any);
+    return this.statusFromSource(source, network, name, data);
   }
 
   // Resolve v1 contract address + tokenId to ENS name
@@ -427,15 +426,13 @@ export class MetadataService {
         usedFallback,
       } = await this.fallback.getMigrationStatus(name);
 
-      let response: MigrationStatusResponse;
+      const migrationStatus = await this.statusFromSource(source, this.network, name, status);
 
-      const migrationStatus = await this.statusFromSource(source, this.network, name, status as any);
-
-      response = {
+      const response: MigrationStatusResponse = {
         name,
         status: migrationStatus,
-        l1Owner: (status as any).owner?.id,
-        expirationDate: (status as any).expiryDate,
+        owner: status.owner?.id,
+        expirationDate: status.expiryDate,
       };
 
       if (usedFallback) {
@@ -458,7 +455,7 @@ export class MetadataService {
             const fallbackResponse: MigrationStatusResponse = {
               name: d1Record.name,
               status: d1Record.status,
-              l1Owner: d1Record.l1_owner ?? undefined,
+              owner: d1Record.owner ?? undefined,
               expirationDate: d1Record.expiration_date ?? undefined,
             };
 
@@ -662,7 +659,7 @@ export class MetadataService {
           (r) => r.status === "fulfilled" && !("error" in r.value),
         ).length,
         failed: results.filter(
-          (r) => r.status === "rejected" || "error" in (r as any).value,
+          (r) => r.status === "rejected" || (r.status === "fulfilled" && "error" in r.value),
         ).length,
       };
 
@@ -702,7 +699,7 @@ export class MetadataService {
           (r) => r.status === "fulfilled" && !("error" in r.value),
         ).length,
         failed: fallbackResults.filter(
-          (r) => r.status === "rejected" || "error" in (r as any).value,
+          (r) => r.status === "rejected" || (r.status === "fulfilled" && "error" in r.value),
         ).length,
       };
     }
@@ -1016,8 +1013,9 @@ export class MetadataService {
       return {
         name,
         status,
-        l1Owner:
-          nameData.network === "mainnet" ? nameData.resolver.owner : undefined,
+        // Both v1 and v2 live on Ethereum now (no L1/L2 split), so report the
+        // owner regardless of network rather than only for mainnet.
+        owner: nameData.resolver.owner || undefined,
         expirationDate: nameData.expirationDate?.toISOString(),
       };
     } catch (error) {
@@ -1104,7 +1102,7 @@ export class MetadataService {
       ]);
 
     // Flag ENSNode as degraded if reachable but slow (>1000ms for a trivial query)
-    const ensnodeLatency = 'latency' in ensnodeHealth ? (ensnodeHealth as any).latency?.primary : undefined;
+    const ensnodeLatency = 'latency' in ensnodeHealth ? ensnodeHealth.latency?.primary : undefined;
     const ensnodeStatus = ensnodeHealth.primary
       ? (ensnodeLatency && ensnodeLatency > 1000 ? "degraded" : "ok")
       : "fallback" in ensnodeHealth && ensnodeHealth.fallback

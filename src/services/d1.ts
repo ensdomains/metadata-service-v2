@@ -1,9 +1,16 @@
-// D1 service for local ensnode data storage and fast queries
+// D1 service for local ensnode data storage and fast queries.
+//
+// Every instance is scoped to a single network (passed to the constructor): one
+// worker serves both mainnet and sepolia and namehash collides across networks,
+// so all reads/writes filter by `network` to keep the two from overwriting each
+// other. See migrations/001_initial_schema.sql.
 import { namehash } from '../utils/ens';
 import type { IndexerDomain } from './indexer';
 import type { MigrationStatus } from '../types';
+import type { NetworkName } from '../config/networks';
 
 export interface D1DomainRecord {
+  network: NetworkName;
   id: string; // namehash
   name: string;
   label_name: string;
@@ -22,10 +29,11 @@ export interface D1DomainRecord {
 }
 
 export interface D1MigrationRecord {
+  network: NetworkName;
   id: string; // namehash
   name: string;
   status: MigrationStatus;
-  l1_owner: string | null;
+  owner: string | null;
   expiration_date: string | null;
   migration_date: string | null;
   last_updated: number;
@@ -33,6 +41,7 @@ export interface D1MigrationRecord {
 }
 
 export interface D1HierarchyRecord {
+  network: NetworkName;
   id: string; // namehash
   name: string;
   owner: string;
@@ -45,6 +54,7 @@ export interface D1HierarchyRecord {
 }
 
 export interface D1SyncStatus {
+  network: NetworkName;
   operation: 'domains' | 'migration' | 'hierarchy';
   last_sync: number;
   last_successful_sync: number;
@@ -54,11 +64,12 @@ export interface D1SyncStatus {
 }
 
 export class D1Service {
-  constructor(private db: D1Database) {}
+  constructor(private db: D1Database, private network: NetworkName) {}
 
   // Domain operations
   async storeDomain(domain: IndexerDomain, dataSource: 'ensnode' | 'blockchain' = 'ensnode'): Promise<void> {
     const record: Omit<D1DomainRecord, 'sync_version'> = {
+      network: this.network,
       id: namehash(domain.name),
       name: domain.name,
       label_name: domain.labelName || domain.name.split('.')[0],
@@ -77,17 +88,17 @@ export class D1Service {
 
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO domains (
-        id, name, label_name, labelhash, parent_id, owner_id, resolver_id,
+        network, id, name, label_name, labelhash, parent_id, owner_id, resolver_id,
         registrant_id, expiry_date, created_at, ttl, is_migrated,
         data_source, last_updated, sync_version
       ) VALUES (
-        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-        COALESCE((SELECT sync_version FROM domains WHERE id = ?1), 0) + 1
+        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+        COALESCE((SELECT sync_version FROM domains WHERE network = ?1 AND id = ?2), 0) + 1
       )
     `);
 
     await stmt.bind(
-      record.id, record.name, record.label_name, record.labelhash,
+      record.network, record.id, record.name, record.label_name, record.labelhash,
       record.parent_id, record.owner_id, record.resolver_id, record.registrant_id,
       record.expiry_date, record.created_at, record.ttl, record.is_migrated ? 1 : 0,
       record.data_source, record.last_updated
@@ -95,8 +106,8 @@ export class D1Service {
   }
 
   async getDomain(name: string): Promise<D1DomainRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM domains WHERE name = ?1');
-    const result = await stmt.bind(name).first<D1DomainRecord>();
+    const stmt = this.db.prepare('SELECT * FROM domains WHERE network = ?1 AND name = ?2');
+    const result = await stmt.bind(this.network, name).first<D1DomainRecord>();
 
     if (result) {
       result.is_migrated = Boolean(result.is_migrated);
@@ -106,8 +117,8 @@ export class D1Service {
   }
 
   async getDomainById(id: string): Promise<D1DomainRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM domains WHERE id = ?1');
-    const result = await stmt.bind(id).first<D1DomainRecord>();
+    const stmt = this.db.prepare('SELECT * FROM domains WHERE network = ?1 AND id = ?2');
+    const result = await stmt.bind(this.network, id).first<D1DomainRecord>();
 
     if (result) {
       result.is_migrated = Boolean(result.is_migrated);
@@ -118,15 +129,16 @@ export class D1Service {
 
   // Migration status operations
   async storeMigrationStatus(name: string, status: MigrationStatus, data: {
-    l1Owner?: string;
+    owner?: string;
     expirationDate?: string;
     migrationDate?: string;
   }): Promise<void> {
     const record: Omit<D1MigrationRecord, 'sync_version'> = {
+      network: this.network,
       id: namehash(name),
       name,
       status,
-      l1_owner: data.l1Owner || null,
+      owner: data.owner || null,
       expiration_date: data.expirationDate || null,
       migration_date: data.migrationDate || null,
       last_updated: Date.now(),
@@ -134,23 +146,23 @@ export class D1Service {
 
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO migration_status (
-        id, name, status, l1_owner, expiration_date, migration_date,
+        network, id, name, status, owner, expiration_date, migration_date,
         last_updated, sync_version
       ) VALUES (
-        ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-        COALESCE((SELECT sync_version FROM migration_status WHERE id = ?1), 0) + 1
+        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+        COALESCE((SELECT sync_version FROM migration_status WHERE network = ?1 AND id = ?2), 0) + 1
       )
     `);
 
     await stmt.bind(
-      record.id, record.name, record.status, record.l1_owner,
+      record.network, record.id, record.name, record.status, record.owner,
       record.expiration_date, record.migration_date, record.last_updated
     ).run();
   }
 
   async getMigrationStatus(name: string): Promise<D1MigrationRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM migration_status WHERE name = ?1');
-    return await stmt.bind(name).first<D1MigrationRecord>();
+    const stmt = this.db.prepare('SELECT * FROM migration_status WHERE network = ?1 AND name = ?2');
+    return await stmt.bind(this.network, name).first<D1MigrationRecord>();
   }
 
   // Registry hierarchy operations
@@ -163,12 +175,13 @@ export class D1Service {
     const rootDomainId = namehash(name);
 
     // Clear existing hierarchy for this domain
-    await this.db.prepare('DELETE FROM registry_hierarchy WHERE root_domain_id = ?1')
-      .bind(rootDomainId).run();
+    await this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2')
+      .bind(this.network, rootDomainId).run();
 
     // Insert new hierarchy records
     for (const level of hierarchy) {
       const record: Omit<D1HierarchyRecord, 'sync_version'> = {
+        network: this.network,
         id: namehash(level.name),
         name: level.name,
         owner: level.owner,
@@ -181,16 +194,16 @@ export class D1Service {
 
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO registry_hierarchy (
-          id, name, owner, resolver, level, parent_id, root_domain_id,
+          network, id, name, owner, resolver, level, parent_id, root_domain_id,
           last_updated, sync_version
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE id = ?1), 0) + 1
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE network = ?1 AND id = ?2), 0) + 1
         )
       `);
 
       await stmt.bind(
-        record.id, record.name, record.owner, record.resolver, record.level,
+        record.network, record.id, record.name, record.owner, record.resolver, record.level,
         record.parent_id, record.root_domain_id, record.last_updated
       ).run();
     }
@@ -200,10 +213,10 @@ export class D1Service {
     const rootDomainId = namehash(name);
     const stmt = this.db.prepare(`
       SELECT * FROM registry_hierarchy
-      WHERE root_domain_id = ?1
+      WHERE network = ?1 AND root_domain_id = ?2
       ORDER BY level ASC
     `);
-    const result = await stmt.bind(rootDomainId).all<D1HierarchyRecord>();
+    const result = await stmt.bind(this.network, rootDomainId).all<D1HierarchyRecord>();
     return result.results || [];
   }
 
@@ -226,9 +239,9 @@ export class D1Service {
   async getDomains(names: string[]): Promise<D1DomainRecord[]> {
     if (names.length === 0) return [];
 
-    const placeholders = names.map((_, i) => `?${i + 1}`).join(', ');
-    const stmt = this.db.prepare(`SELECT * FROM domains WHERE name IN (${placeholders})`);
-    const result = await stmt.bind(...names).all<D1DomainRecord>();
+    const placeholders = names.map((_, i) => `?${i + 2}`).join(', ');
+    const stmt = this.db.prepare(`SELECT * FROM domains WHERE network = ?1 AND name IN (${placeholders})`);
+    const result = await stmt.bind(this.network, ...names).all<D1DomainRecord>();
 
     return (result.results || []).map(record => ({
       ...record,
@@ -240,28 +253,36 @@ export class D1Service {
   async updateSyncStatus(operation: 'domains' | 'migration' | 'hierarchy', success: boolean, error?: string): Promise<void> {
     const now = Date.now();
 
+    // Upsert: the (network, operation) row is created on first sync, so there's
+    // no need to seed per-network rows in the schema.
     const stmt = this.db.prepare(`
-      UPDATE sync_status SET
-        last_sync = ?2,
-        last_successful_sync = CASE WHEN ?3 THEN ?2 ELSE last_successful_sync END,
-        sync_count = sync_count + 1,
-        error_count = CASE WHEN ?3 THEN error_count ELSE error_count + 1 END,
-        last_error = ?4
-      WHERE operation = ?1
+      INSERT INTO sync_status (
+        network, operation, last_sync, last_successful_sync,
+        sync_count, error_count, last_error
+      ) VALUES (
+        ?1, ?2, ?3, CASE WHEN ?4 THEN ?3 ELSE 0 END,
+        1, CASE WHEN ?4 THEN 0 ELSE 1 END, ?5
+      )
+      ON CONFLICT(network, operation) DO UPDATE SET
+        last_sync = ?3,
+        last_successful_sync = CASE WHEN ?4 THEN ?3 ELSE sync_status.last_successful_sync END,
+        sync_count = sync_status.sync_count + 1,
+        error_count = CASE WHEN ?4 THEN sync_status.error_count ELSE sync_status.error_count + 1 END,
+        last_error = ?5
     `);
 
-    await stmt.bind(operation, now, success ? 1 : 0, error || null).run();
+    await stmt.bind(this.network, operation, now, success ? 1 : 0, error || null).run();
   }
 
   async getSyncStatus(operation?: 'domains' | 'migration' | 'hierarchy'): Promise<D1SyncStatus[]> {
     let stmt;
     if (operation) {
-      stmt = this.db.prepare('SELECT * FROM sync_status WHERE operation = ?1');
-      const result = await stmt.bind(operation).all<D1SyncStatus>();
+      stmt = this.db.prepare('SELECT * FROM sync_status WHERE network = ?1 AND operation = ?2');
+      const result = await stmt.bind(this.network, operation).all<D1SyncStatus>();
       return result.results || [];
     } else {
-      stmt = this.db.prepare('SELECT * FROM sync_status ORDER BY operation');
-      const result = await stmt.bind().all<D1SyncStatus>();
+      stmt = this.db.prepare('SELECT * FROM sync_status WHERE network = ?1 ORDER BY operation');
+      const result = await stmt.bind(this.network).all<D1SyncStatus>();
       return result.results || [];
     }
   }
@@ -273,25 +294,25 @@ export class D1Service {
     let stmt;
     switch (operation) {
       case 'domains':
-        stmt = this.db.prepare('SELECT name FROM domains WHERE last_updated < ?1');
+        stmt = this.db.prepare('SELECT name FROM domains WHERE network = ?1 AND last_updated < ?2');
         break;
       case 'migration':
-        stmt = this.db.prepare('SELECT name FROM migration_status WHERE last_updated < ?1');
+        stmt = this.db.prepare('SELECT name FROM migration_status WHERE network = ?1 AND last_updated < ?2');
         break;
       case 'hierarchy':
-        stmt = this.db.prepare('SELECT DISTINCT name FROM registry_hierarchy WHERE last_updated < ?1');
+        stmt = this.db.prepare('SELECT DISTINCT name FROM registry_hierarchy WHERE network = ?1 AND last_updated < ?2');
         break;
     }
 
-    const result = await stmt.bind(cutoff).all<{ name: string }>();
+    const result = await stmt.bind(this.network, cutoff).all<{ name: string }>();
     return (result.results || []).map(r => r.name);
   }
 
   // Health check
   async healthCheck(): Promise<{ connected: boolean; recordCount: number }> {
     try {
-      const stmt = this.db.prepare('SELECT COUNT(*) as count FROM domains');
-      const result = await stmt.first<{ count: number }>();
+      const stmt = this.db.prepare('SELECT COUNT(*) as count FROM domains WHERE network = ?1');
+      const result = await stmt.bind(this.network).first<{ count: number }>();
 
       return {
         connected: true,
@@ -311,18 +332,18 @@ export class D1Service {
     let deletedCount = 0;
 
     // Clean domains
-    const domainsStmt = this.db.prepare('DELETE FROM domains WHERE last_updated < ?1');
-    const domainsResult = await domainsStmt.bind(cutoff).run();
+    const domainsStmt = this.db.prepare('DELETE FROM domains WHERE network = ?1 AND last_updated < ?2');
+    const domainsResult = await domainsStmt.bind(this.network, cutoff).run();
     deletedCount += domainsResult.meta.changes || 0;
 
     // Clean migration status
-    const migrationStmt = this.db.prepare('DELETE FROM migration_status WHERE last_updated < ?1');
-    const migrationResult = await migrationStmt.bind(cutoff).run();
+    const migrationStmt = this.db.prepare('DELETE FROM migration_status WHERE network = ?1 AND last_updated < ?2');
+    const migrationResult = await migrationStmt.bind(this.network, cutoff).run();
     deletedCount += migrationResult.meta.changes || 0;
 
     // Clean hierarchy
-    const hierarchyStmt = this.db.prepare('DELETE FROM registry_hierarchy WHERE last_updated < ?1');
-    const hierarchyResult = await hierarchyStmt.bind(cutoff).run();
+    const hierarchyStmt = this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND last_updated < ?2');
+    const hierarchyResult = await hierarchyStmt.bind(this.network, cutoff).run();
     deletedCount += hierarchyResult.meta.changes || 0;
 
     return deletedCount;
