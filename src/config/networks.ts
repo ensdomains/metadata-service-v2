@@ -12,8 +12,8 @@ import { mainnet, sepolia } from 'viem/chains';
 
 // Env-binding key names, kept as literal unions so `env[key]` stays type-safe.
 type RpcUrlEnvKey = 'MAINNET_RPC_URL' | 'SEPOLIA_RPC_URL';
-type EnsnodeUrlEnvKey = 'ENSNODE_MAINNET_URL' | 'ENSNODE_SEPOLIA_V2_URL';
-type EnsnodeV1UrlEnvKey = 'ENSNODE_SEPOLIA_V1_URL';
+type IndexerV2UrlEnvKey = 'ENSNODE_MAINNET_URL' | 'ENSNODE_SEPOLIA_V2_URL';
+type IndexerV1UrlEnvKey = 'ENSNODE_SEPOLIA_V1_URL';
 type FallbackRpcEnvKey =
   | 'MAINNET_FALLBACK_RPC_1'
   | 'MAINNET_FALLBACK_RPC_2'
@@ -51,15 +51,15 @@ export interface V2Contracts {
 export interface NetworkDefinition {
   chain: Chain;
   /** Primary indexer query dialect: mainnet → ENSNode subgraph (v1); sepolia → zigens (v2). */
-  ensnodeApiVersion: 'v1' | 'v2';
+  indexerV2ApiVersion: 'v1' | 'v2';
   rpcUrlEnvKey: RpcUrlEnvKey;
-  ensnodeUrlEnvKey: EnsnodeUrlEnvKey;
+  indexerV2UrlEnvKey: IndexerV2UrlEnvKey;
   /**
    * Optional secondary v1 indexer (ENSNode subgraph) for networks whose primary
    * indexer is v2-only (zigens has no v1 data). Resolution order is v2 → v1 →
    * on-chain, so v1-only names on a v2 network still resolve via the indexer.
    */
-  ensnodeV1UrlEnvKey?: EnsnodeV1UrlEnvKey;
+  indexerV1UrlEnvKey?: IndexerV1UrlEnvKey;
   fallbackRpcEnvKeys: readonly FallbackRpcEnvKey[];
   /** Used only when no fallback env vars are set. */
   defaultFallbackRpcs: readonly string[];
@@ -70,10 +70,10 @@ export interface NetworkDefinition {
 export const NETWORKS = {
   mainnet: {
     chain: mainnet,
-    ensnodeApiVersion: 'v1',
+    indexerV2ApiVersion: 'v1',
     rpcUrlEnvKey: 'MAINNET_RPC_URL',
-    ensnodeUrlEnvKey: 'ENSNODE_MAINNET_URL',
-    ensnodeV1UrlEnvKey: undefined, // mainnet's primary indexer is already v1 (no v2 deployed)
+    indexerV2UrlEnvKey: 'ENSNODE_MAINNET_URL',
+    indexerV1UrlEnvKey: undefined, // mainnet's primary indexer is already v1 (no v2 deployed)
     fallbackRpcEnvKeys: ['MAINNET_FALLBACK_RPC_1', 'MAINNET_FALLBACK_RPC_2', 'MAINNET_FALLBACK_RPC_3'],
     defaultFallbackRpcs: ['https://ethereum.publicnode.com', 'https://rpc.ankr.com/eth', 'https://cloudflare-eth.com'],
     // ENS v1 — aligned to zigens src/contracts.zig mainnetAddresses.
@@ -99,10 +99,10 @@ export const NETWORKS = {
   },
   sepolia: {
     chain: sepolia,
-    ensnodeApiVersion: 'v2',
+    indexerV2ApiVersion: 'v2',
     rpcUrlEnvKey: 'SEPOLIA_RPC_URL',
-    ensnodeUrlEnvKey: 'ENSNODE_SEPOLIA_V2_URL',          // v2: zigens (graphql.ens.dev)
-    ensnodeV1UrlEnvKey: 'ENSNODE_SEPOLIA_V1_URL',     // v1: ENSNode sepolia subgraph
+    indexerV2UrlEnvKey: 'ENSNODE_SEPOLIA_V2_URL',          // v2: zigens (graphql.ens.dev)
+    indexerV1UrlEnvKey: 'ENSNODE_SEPOLIA_V1_URL',     // v1: ENSNode sepolia subgraph
     fallbackRpcEnvKeys: ['SEPOLIA_FALLBACK_RPC_1', 'SEPOLIA_FALLBACK_RPC_2'],
     defaultFallbackRpcs: [],
     // ENS v1 — aligned to zigens src/contracts.zig sepoliaAddresses (the same

@@ -1,4 +1,4 @@
-// Fallback and retry logic for when ensnode is down
+// Fallback and retry logic for when indexerV2 is down
 import type { IndexerService, IndexerDomain, IndexerMigrationStatus } from './indexer';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
@@ -10,7 +10,7 @@ export interface FallbackConfig {
   maxRetries: number;
   retryDelayMs: number;
   exponentialBackoff: boolean;
-  ensnode: {
+  indexerV2: {
     enabled: boolean;
     healthCheckIntervalMs: number;
   };
@@ -22,30 +22,30 @@ export interface FallbackConfig {
 
 export interface FallbackResult<T> {
   data: T;
-  source: 'ensnode' | 'ensnodeV1' | 'blockchain';
+  source: 'indexerV2' | 'indexerV1' | 'blockchain';
   usedFallback: boolean;
   retries: number;
   error?: Error;
 }
 
 export class FallbackService {
-  private ensnodeHealthy: boolean = true;
+  private indexerV2Healthy: boolean = true;
   private lastHealthCheck: number = 0;
 
   constructor(
     private config: FallbackConfig,
-    private ensnode: IndexerService,
+    private indexerV2: IndexerService,
     private blockchain: BlockchainService,
     private resolver: ResolverService,
     // Optional secondary v1 ENSNode indexer (e.g. sepolia v1 names absent from zigens).
-    private ensnodeV1?: IndexerService,
+    private indexerV1?: IndexerService,
   ) {}
 
   // Execute operation with automatic fallback logic
   async executeWithFallback<T>(
     operation: {
-      ensnode: () => Promise<T>;
-      ensnodeV1?: () => Promise<T>;
+      indexerV2: () => Promise<T>;
+      indexerV1?: () => Promise<T>;
       blockchain: () => Promise<T>;
     },
     operationName: string
@@ -55,12 +55,12 @@ export class FallbackService {
     let sawUpstream = false; // any tier hit a real upstream failure (vs a clean miss)
 
     // Try the primary (v2) indexer first if it's enabled and healthy
-    if (this.config.ensnode.enabled && this.isEnsnodeHealthy()) {
+    if (this.config.indexerV2.enabled && this.isIndexerV2Healthy()) {
       try {
-        const data = await operation.ensnode();
+        const data = await operation.indexerV2();
         return {
           data,
-          source: 'ensnode',
+          source: 'indexerV2',
           usedFallback: false,
           retries,
         };
@@ -71,22 +71,22 @@ export class FallbackService {
         // to the next tier WITHOUT marking the healthy indexer as unhealthy.
         if (error instanceof UpstreamError) {
           sawUpstream = true;
-          console.warn(`Ensnode ${operationName} upstream failure, tripping breaker:`, error);
-          this.markEnsnodeUnhealthy();
+          console.warn(`IndexerV2 ${operationName} upstream failure, tripping breaker:`, error);
+          this.markIndexerV2Unhealthy();
         } else {
-          console.log(`Ensnode ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
+          console.log(`IndexerV2 ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
         }
         retries++;
       }
     }
 
     // Secondary: v1 ENSNode subgraph (for v1-only names not present in the v2 indexer)
-    if (this.ensnodeV1 && operation.ensnodeV1) {
+    if (this.indexerV1 && operation.indexerV1) {
       try {
-        const data = await operation.ensnodeV1();
+        const data = await operation.indexerV1();
         return {
           data,
-          source: 'ensnodeV1',
+          source: 'indexerV1',
           usedFallback: true,
           retries,
         };
@@ -99,7 +99,7 @@ export class FallbackService {
       }
     }
 
-    // Fallback to blockchain if ensnode failed or is disabled
+    // Fallback to blockchain if indexerV2 failed or is disabled
     // No retries here — BlockchainService.executeWithFallback already cycles through RPC endpoints
     if (this.config.blockchain.enabled) {
       try {
@@ -129,27 +129,27 @@ export class FallbackService {
     throw new NotFoundError(`${operationName}: not found in any source`);
   }
 
-  // Check if ensnode is healthy based on recent request outcomes (no proactive health check query)
-  private isEnsnodeHealthy(): boolean {
+  // Check if indexerV2 is healthy based on recent request outcomes (no proactive health check query)
+  private isIndexerV2Healthy(): boolean {
     // If marked unhealthy, respect the cooldown period before retrying
-    if (!this.ensnodeHealthy) {
+    if (!this.indexerV2Healthy) {
       const now = Date.now();
-      if (now - this.lastHealthCheck < this.config.ensnode.healthCheckIntervalMs) {
+      if (now - this.lastHealthCheck < this.config.indexerV2.healthCheckIntervalMs) {
         return false;
       }
       // Cooldown expired — optimistically try again
-      console.log('Ensnode cooldown expired, will retry on next request');
-      this.ensnodeHealthy = true;
+      console.log('IndexerV2 cooldown expired, will retry on next request');
+      this.indexerV2Healthy = true;
     }
 
-    return this.ensnodeHealthy;
+    return this.indexerV2Healthy;
   }
 
-  // Mark ensnode as unhealthy
-  private markEnsnodeUnhealthy(): void {
-    this.ensnodeHealthy = false;
+  // Mark indexerV2 as unhealthy
+  private markIndexerV2Unhealthy(): void {
+    this.indexerV2Healthy = false;
     this.lastHealthCheck = Date.now();
-    console.warn('Marked ensnode as unhealthy, will retry in', this.config.ensnode.healthCheckIntervalMs, 'ms');
+    console.warn('Marked indexerV2 as unhealthy, will retry in', this.config.indexerV2.healthCheckIntervalMs, 'ms');
   }
 
   // Execute operation with retries
@@ -189,17 +189,17 @@ export class FallbackService {
 
     return this.executeWithFallback<IndexerDomain>(
       {
-        ensnode: async () => {
-          const { domain } = await this.ensnode.getDomain(name);
+        indexerV2: async () => {
+          const { domain } = await this.indexerV2.getDomain(name);
           if (!domain) {
-            throw new NotFoundError(`Domain ${name} not found in ensnode`);
+            throw new NotFoundError(`Domain ${name} not found in indexerV2`);
           }
           return domain;
         },
-        ensnodeV1: async () => {
-          const { domain } = await this.ensnodeV1!.getDomain(name);
+        indexerV1: async () => {
+          const { domain } = await this.indexerV1!.getDomain(name);
           if (!domain) {
-            throw new NotFoundError(`Domain ${name} not found in v1 ensnode`);
+            throw new NotFoundError(`Domain ${name} not found in indexerV1`);
           }
           return domain;
         },
@@ -249,17 +249,17 @@ export class FallbackService {
 
     return this.executeWithFallback<IndexerMigrationStatus>(
       {
-        ensnode: async () => {
-          const { status } = await this.ensnode.getMigrationStatus(name);
+        indexerV2: async () => {
+          const { status } = await this.indexerV2.getMigrationStatus(name);
           if (!status) {
-            throw new NotFoundError(`Migration status for ${name} not found in ensnode`);
+            throw new NotFoundError(`Migration status for ${name} not found in indexerV2`);
           }
           return status;
         },
-        ensnodeV1: async () => {
-          const { status } = await this.ensnodeV1!.getMigrationStatus(name);
+        indexerV1: async () => {
+          const { status } = await this.indexerV1!.getMigrationStatus(name);
           if (!status) {
-            throw new NotFoundError(`Migration status for ${name} not found in v1 ensnode`);
+            throw new NotFoundError(`Migration status for ${name} not found in indexerV1`);
           }
           return status;
         },
@@ -296,17 +296,17 @@ export class FallbackService {
 
     return this.executeWithFallback(
       {
-        ensnode: async () => {
-          const { hierarchy } = await this.ensnode.getHierarchy(name);
+        indexerV2: async () => {
+          const { hierarchy } = await this.indexerV2.getHierarchy(name);
           if (!hierarchy) {
-            throw new NotFoundError(`Hierarchy for ${name} not found in ensnode`);
+            throw new NotFoundError(`Hierarchy for ${name} not found in indexerV2`);
           }
           return hierarchy;
         },
-        ensnodeV1: async () => {
-          const { hierarchy } = await this.ensnodeV1!.getHierarchy(name);
+        indexerV1: async () => {
+          const { hierarchy } = await this.indexerV1!.getHierarchy(name);
           if (!hierarchy) {
-            throw new NotFoundError(`Hierarchy for ${name} not found in v1 ensnode`);
+            throw new NotFoundError(`Hierarchy for ${name} not found in indexerV1`);
           }
           return hierarchy;
         },
@@ -377,8 +377,8 @@ export class FallbackService {
   // Get service status
   getStatus() {
     return {
-      ensnode: {
-        healthy: this.ensnodeHealthy,
+      indexerV2: {
+        healthy: this.indexerV2Healthy,
         lastCheck: this.lastHealthCheck,
       },
       blockchain: {
@@ -390,7 +390,7 @@ export class FallbackService {
 
   // Reset health status (for manual recovery)
   resetHealthStatus(): void {
-    this.ensnodeHealthy = true;
+    this.indexerV2Healthy = true;
     this.lastHealthCheck = 0;
     console.log('Fallback service health status reset');
   }
@@ -405,7 +405,7 @@ export const DEFAULT_FALLBACK_CONFIG: FallbackConfig = {
   maxRetries: 3,
   retryDelayMs: 1000,
   exponentialBackoff: true,
-  ensnode: {
+  indexerV2: {
     enabled: true,
     healthCheckIntervalMs: 60000, // 1 minute
   },

@@ -23,7 +23,7 @@ export interface SyncResult {
 export class SyncService {
   constructor(
     private d1: D1Service,
-    private ensnode: IndexerService,
+    private indexerV2: IndexerService,
     private config: SyncConfig
   ) {}
 
@@ -57,7 +57,7 @@ export class SyncService {
       processed = 1;
 
       // Fetch from ensnode
-      const { domain, usedFallback } = await this.ensnode.getDomain(name);
+      const { domain, usedFallback } = await this.indexerV2.getDomain(name);
 
       if (domain) {
         await this.d1.storeDomain(domain, 'ensnode');
@@ -129,7 +129,7 @@ export class SyncService {
       }
 
       // Fetch from ensnode in batch
-      const { domains } = await this.ensnode.getDomains(namesToSync);
+      const { domains } = await this.indexerV2.getDomains(namesToSync);
 
       if (domains && domains.length > 0) {
         stored = await this.d1.storeDomains(domains, 'ensnode');
@@ -195,7 +195,7 @@ export class SyncService {
       processed = 1;
 
       // Fetch from ensnode
-      const { status } = await this.ensnode.getMigrationStatus(name);
+      const { status } = await this.indexerV2.getMigrationStatus(name);
 
       if (status) {
         // v1 subgraph isMigrated = 2019 registrar migration, not v2.
@@ -246,7 +246,7 @@ export class SyncService {
       processed = 1;
 
       // Fetch from ensnode
-      const { hierarchy } = await this.ensnode.getHierarchy(name);
+      const { hierarchy } = await this.indexerV2.getHierarchy(name);
 
       if (hierarchy) {
         // Convert ensnode hierarchy to D1 format
