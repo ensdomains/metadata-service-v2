@@ -6,7 +6,7 @@ export type { NetworkName };
 // Migration status types — the v1→v2 lifecycle of a name.
 // See ../utils/migration.ts for the full model and how each value is derived.
 // `ejected`/`shadow` from the v2 design doc are intentionally NOT modelled — the
-// built system has no L1/L2 ejection, only v1→v2 migration (see migration.ts).
+// built system only has v1→v2 migration, all on Ethereum (see migration.ts).
 export const MIGRATION_STATUS = {
   /** Still on ENS v1 (legacy registry). Not present in v2. */
   UNMIGRATED: 'unmigrated',

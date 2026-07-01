@@ -201,7 +201,7 @@ export class SyncService {
         // v1 subgraph isMigrated = 2019 registrar migration, not v2.
         // Store as 'unmigrated' until v2 indexer is used for all networks.
         await this.d1.storeMigrationStatus(name, MIGRATION_STATUS.UNMIGRATED, {
-          l1Owner: status.owner?.id,
+          owner: status.owner?.id,
           expirationDate: status.expiryDate,
         });
         stored = 1;

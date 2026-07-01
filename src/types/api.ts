@@ -29,7 +29,8 @@ export interface MetadataResponse {
 export interface MigrationStatusResponse {
   name: string;
   status: MigrationStatus;
-  l1Owner?: string;
+  /** Current owner of the name (v1 or v2 registry, whichever holds it). */
+  owner?: string;
   migrationDate?: string;
   expirationDate?: string;
 }
