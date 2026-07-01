@@ -149,8 +149,8 @@ function getRpcUrl(env: Env, network: NetworkName): string {
   return env[NETWORKS[network].rpcUrlEnvKey];
 }
 
-function getEnsnodeUrl(env: Env, network: NetworkName): string {
-  return env[NETWORKS[network].ensnodeUrlEnvKey];
+function getIndexerV2Url(env: Env, network: NetworkName): string {
+  return env[NETWORKS[network].indexerV2UrlEnvKey];
 }
 
 function getImageServices(env: Env, network: NetworkName): ImageServices {
@@ -180,11 +180,11 @@ function getServices(env: Env, network: NetworkName): FullServices {
 
   const metadataService = new MetadataService(
     {
-      ensnodeEndpoint: getEnsnodeUrl(env, network),
-      ensnodeApiVersion: NETWORKS[network].ensnodeApiVersion,
+      indexerV2Endpoint: getIndexerV2Url(env, network),
+      indexerV2ApiVersion: NETWORKS[network].indexerV2ApiVersion,
       // Optional v1 ENSNode subgraph fallback (sepolia: v1 names absent from zigens).
-      ensnodeV1Endpoint: NETWORKS[network].ensnodeV1UrlEnvKey
-        ? env[NETWORKS[network].ensnodeV1UrlEnvKey!]
+      indexerV1Endpoint: NETWORKS[network].indexerV1UrlEnvKey
+        ? env[NETWORKS[network].indexerV1UrlEnvKey!]
         : undefined,
       network,
       fallbackToBlockchain: true,
@@ -645,7 +645,7 @@ app.get("/health", async (c) => {
     ]);
 
     // Indexer dependency = worst of the two indexers (a zigens outage must surface).
-    const indexerStatus = worstStatus(mainnetHealth.ensnode, sepoliaHealth.ensnode);
+    const indexerStatus = worstStatus(mainnetHealth.indexerV2, sepoliaHealth.indexerV2);
     const mainnetRpc = mainnetHealth.blockchain.mainnet;
     const sepoliaRpc = mainnetHealth.blockchain.sepolia;
 
@@ -660,7 +660,7 @@ app.get("/health", async (c) => {
         sepolia: sepoliaRpc as 'ok' | 'degraded' | 'error' | 'unknown',
       },
       latency: {
-        indexer: mainnetHealth.ensnodeLatency,
+        indexer: mainnetHealth.indexerV2Latency,
       },
     };
 

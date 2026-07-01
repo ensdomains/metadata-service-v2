@@ -1,4 +1,4 @@
-// Metadata service that integrates ensnode, internal KV cache, and blockchain fallback
+// Metadata service that integrates indexerV2, internal KV cache, and blockchain fallback
 import { IndexerService, type IndexerDomain } from "./indexer";
 import { CacheService, CacheKeys, CacheTTL } from "./cache";
 import { BlockchainService } from "./blockchain";
@@ -76,12 +76,12 @@ export interface D1RecordData {
 }
 
 export interface MetadataServiceConfig {
-  ensnodeEndpoint: string;
-  ensnodeFallbackEndpoint?: string;
-  ensnodeApiVersion?: 'v1' | 'v2';
+  indexerV2Endpoint: string;
+  indexerV2FallbackEndpoint?: string;
+  indexerV2ApiVersion?: 'v1' | 'v2';
   /** Optional secondary v1 ENSNode subgraph, queried after the primary v2 indexer
    *  misses (zigens is v2-only). Always queried with v1 ('namehash' id) semantics. */
-  ensnodeV1Endpoint?: string;
+  indexerV1Endpoint?: string;
   fallbackToBlockchain: boolean;
   internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
@@ -90,7 +90,9 @@ export interface MetadataServiceConfig {
 
 export class MetadataService {
   private network: NetworkName;
-  public ensnode: IndexerService;
+  public indexerV2: IndexerService;
+  // Secondary v1 subgraph (e.g. sepolia, whose primary indexer zigens is v2-only).
+  private indexerV1?: IndexerService;
   private internalCache?: CacheService; // For internal optimizations only
   private cache: CacheService; // Backwards compatibility
   public blockchain: BlockchainService;
@@ -106,18 +108,19 @@ export class MetadataService {
     db?: D1Database,
   ) {
     this.network = config.network || 'mainnet';
-    this.ensnode = new IndexerService({
-      primaryEndpoint: config.ensnodeEndpoint,
-      fallbackEndpoint: config.ensnodeFallbackEndpoint,
-      apiVersion: config.ensnodeApiVersion,
+    this.indexerV2 = new IndexerService({
+      primaryEndpoint: config.indexerV2Endpoint,
+      fallbackEndpoint: config.indexerV2FallbackEndpoint,
+      apiVersion: config.indexerV2ApiVersion,
     });
 
     // Secondary v1 ENSNode subgraph (e.g. sepolia v1 names, which zigens lacks).
-    const ensnodeV1 = config.ensnodeV1Endpoint
-      ? new IndexerService({ primaryEndpoint: config.ensnodeV1Endpoint, apiVersion: 'v1' })
+    const indexerV1 = config.indexerV1Endpoint
+      ? new IndexerService({ primaryEndpoint: config.indexerV1Endpoint, apiVersion: 'v1' })
       : undefined;
+    this.indexerV1 = indexerV1;
 
-    // Initialize internal cache for ensnode responses if enabled
+    // Initialize internal cache for indexerV2 responses if enabled
     if (config.internalCacheEnabled) {
       this.internalCache = new CacheService(kv);
       this.cache = this.internalCache; // Backwards compatibility
@@ -146,16 +149,16 @@ export class MetadataService {
     };
     this.fallback = new FallbackService(
       fallbackConfig,
-      this.ensnode,
+      this.indexerV2,
       this.blockchain,
       this.resolver,
-      ensnodeV1,
+      indexerV1,
     );
 
     // Initialize D1 and sync services if enabled
     if (config.d1Enabled && db) {
       this.d1 = new D1Service(db, this.network);
-      this.sync = new SyncService(this.d1, this.ensnode, DEFAULT_SYNC_CONFIG);
+      this.sync = new SyncService(this.d1, this.indexerV2, DEFAULT_SYNC_CONFIG);
     }
   }
 
@@ -194,14 +197,14 @@ export class MetadataService {
 
       let metadata: MetadataResponse;
 
-      if (source === "ensnode" || source === "ensnodeV1") {
-        // `ensnodeV1` means the name came from the v1 ENSNode subgraph (absent from
+      if (source === "indexerV2" || source === "indexerV1") {
+        // `indexerV1` means the name came from the v1 ENSNode subgraph (absent from
         // the v2 indexer), so it is NOT on v2 → force `unmigrated` classification.
-        metadata = await this.buildMetadataFromEnsnode(
+        metadata = await this.buildMetadataFromIndexer(
           domain as IndexerDomain,
           network,
           baseUrl,
-          source === "ensnode",
+          source === "indexerV2",
         );
 
         // Store in D1 if enabled
@@ -330,7 +333,15 @@ export class MetadataService {
       throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }
 
-    const { domain } = await this.ensnode.getDomainByNamehash(nameHash);
+    let { domain } = await this.indexerV2.getDomainByNamehash(nameHash);
+
+    // The primary indexer is v2-only on sepolia, so a v1 unmigrated name (e.g. a
+    // BaseRegistrar registration) is absent from it. Reverse namehash→name can't
+    // be done on-chain (a label can't be recovered from its hash), so fall back
+    // to the secondary v1 subgraph — matching the name-form resolution path.
+    if (!domain?.name && this.indexerV1) {
+      ({ domain } = await this.indexerV1.getDomainByNamehash(nameHash));
+    }
 
     if (!domain?.name) {
       throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
@@ -355,7 +366,7 @@ export class MetadataService {
   async classifyName(network: NetworkName, name: string): Promise<MigrationStatus> {
     try {
       if (network === 'sepolia') {
-        const { domain } = await this.ensnode.getDomain(name);
+        const { domain } = await this.indexerV2.getDomain(name);
         if (!domain) return classifyMigrationStatus({ isUnmigrated: true });
         return this.classifyV2IndexerDomain(domain);
       }
@@ -372,9 +383,9 @@ export class MetadataService {
    * placeholder (owner == address(0)) which is still `unmigrated`; otherwise the
    * indexer's `isMigrated` flag distinguishes `migrated` (from v1) from `native`
    * (born on v2 — flag clear). Used by classifyName, getMigrationStatus, and
-   * buildMetadataFromEnsnode so they cannot drift.
+   * buildMetadataFromIndexer so they cannot drift.
    *
-   * NB: this must ONLY be fed v2-indexer data. v1-indexer (`ensnodeV1`) results are
+   * NB: this must ONLY be fed v2-indexer data. v1-indexer (`indexerV1`) results are
    * `unmigrated`, and `blockchain`-sourced results use the on-chain status check
    * (which can never prove `native`) — see getMigrationStatus / buildMetadata*.
    */
@@ -391,21 +402,21 @@ export class MetadataService {
   /**
    * Map a fallback-resolved record to a MigrationStatus, by source. Shared by
    * getMigrationStatus and the image path so they can't drift:
-   *  - `ensnodeV1` (v1 ENSNode subgraph) → `unmigrated`
-   *  - `ensnode` on sepolia (zigens/v2 indexer) → v2 indexer classification
-   *  - `blockchain`, or `ensnode` on mainnet (v1 ENSNode subgraph) → on-chain
+   *  - `indexerV1` (v1 ENSNode subgraph) → `unmigrated`
+   *  - `indexerV2` on sepolia (zigens/v2 indexer) → v2 indexer classification
+   *  - `blockchain`, or `indexerV2` on mainnet (v1 ENSNode subgraph) → on-chain
    *    registry status only (can prove on-v2 vs not, never `native`).
    */
   private async statusFromSource(
-    source: 'ensnode' | 'ensnodeV1' | 'blockchain',
+    source: 'indexerV2' | 'indexerV1' | 'blockchain',
     network: NetworkName,
     name: string,
     data: { isMigrated?: boolean; owner?: { id?: string }; ownerId?: string },
   ): Promise<MigrationStatus> {
-    if (source === 'ensnodeV1') {
+    if (source === 'indexerV1') {
       return classifyMigrationStatus({ isUnmigrated: true });
     }
-    if (source === 'ensnode' && network === 'sepolia') {
+    if (source === 'indexerV2' && network === 'sepolia') {
       return this.classifyV2IndexerDomain(data);
     }
     const isUnmigrated = await this.blockchain.isUnmigratedName(network, name);
@@ -508,9 +519,9 @@ export class MetadataService {
 
       let response: RegistryHierarchyResponse;
 
-      if (source === "ensnode") {
+      if (source === "indexerV2") {
         response = this.buildHierarchyResponse(hierarchy as any, name);
-        // Cache with ensnode TTL for ensnode data
+        // Cache with indexerV2 TTL for indexerV2 data
         await this.cache.set(cacheKey, response, { ttl: CacheTTL.ensnode });
       } else {
         // Built from blockchain data
@@ -592,8 +603,8 @@ export class MetadataService {
     }
 
     try {
-      // Try batch query from ensnode
-      const { domains } = await this.ensnode.getDomains(validNames);
+      // Try batch query from indexerV2
+      const { domains } = await this.indexerV2.getDomains(validNames);
 
       // Build results
       const results = await Promise.allSettled(
@@ -604,7 +615,7 @@ export class MetadataService {
           const domain = domains.find((d) => d.name === name);
 
           if (domain) {
-            // Also check ensnode expiryDate
+            // Also check indexerV2 expiryDate
             const expiryRaw = domain.expiryDate;
             if (expiryRaw) {
               const expiryMs = typeof expiryRaw === 'string' && expiryRaw.includes('T')
@@ -615,7 +626,7 @@ export class MetadataService {
               }
             }
 
-            const metadata = await this.buildMetadataFromEnsnode(
+            const metadata = await this.buildMetadataFromIndexer(
               domain,
               network || "mainnet",
               baseUrl,
@@ -705,10 +716,10 @@ export class MetadataService {
     }
   }
 
-  // Build metadata response from ensnode domain data.
+  // Build metadata response from indexerV2 domain data.
   // `onV2` is false when the domain came from the v1 ENSNode subgraph fallback
   // (name absent from the v2 indexer) → it is a v1 name, classified `unmigrated`.
-  private async buildMetadataFromEnsnode(
+  private async buildMetadataFromIndexer(
     domain: IndexerDomain,
     network: NetworkName,
     baseUrl?: string,
@@ -795,7 +806,7 @@ export class MetadataService {
     };
   }
 
-  // Build hierarchy response from ensnode data
+  // Build hierarchy response from indexerV2 data
   private buildHierarchyResponse(
     hierarchy: IndexerDomain,
     name: string,
@@ -898,7 +909,7 @@ export class MetadataService {
       }
     }
 
-    // Registration Date (same as created for ensnode data)
+    // Registration Date (same as created for indexerV2 data)
     if (domain.createdAt) {
       const registrationMs = this.toEpochMs(domain.createdAt);
       if (registrationMs) {
@@ -996,7 +1007,7 @@ export class MetadataService {
     return name.split(".").length;
   }
 
-  // Get migration status from blockchain when ensnode is down
+  // Get migration status from blockchain when indexerV2 is down
   private async getMigrationStatusFromBlockchain(
     name: string,
   ): Promise<MigrationStatusResponse> {
@@ -1026,7 +1037,7 @@ export class MetadataService {
     }
   }
 
-  // Get registry hierarchy from blockchain when ensnode is down
+  // Get registry hierarchy from blockchain when indexerV2 is down
   private async getHierarchyFromBlockchain(
     name: string,
   ): Promise<RegistryHierarchyResponse> {
@@ -1086,9 +1097,9 @@ export class MetadataService {
 
   // Health check for all services
   async healthCheck() {
-    const [ensnodeHealth, blockchainHealth, fallbackStatus, d1Health] =
+    const [indexerV2Health, blockchainHealth, fallbackStatus, d1Health] =
       await Promise.all([
-        this.ensnode.healthCheck().catch(() => ({ primary: false })),
+        this.indexerV2.healthCheck().catch(() => ({ primary: false })),
         this.blockchain
           .healthCheck()
           .catch(() => ({
@@ -1102,25 +1113,25 @@ export class MetadataService {
       ]);
 
     // Flag ENSNode as degraded if reachable but slow (>1000ms for a trivial query)
-    const ensnodeLatency = 'latency' in ensnodeHealth ? ensnodeHealth.latency?.primary : undefined;
-    const ensnodeStatus = ensnodeHealth.primary
-      ? (ensnodeLatency && ensnodeLatency > 1000 ? "degraded" : "ok")
-      : "fallback" in ensnodeHealth && ensnodeHealth.fallback
+    const indexerV2Latency = 'latency' in indexerV2Health ? indexerV2Health.latency?.primary : undefined;
+    const indexerV2Status = indexerV2Health.primary
+      ? (indexerV2Latency && indexerV2Latency > 1000 ? "degraded" : "ok")
+      : "fallback" in indexerV2Health && indexerV2Health.fallback
         ? "degraded"
         : "error";
 
     return {
-      ensnode: ensnodeStatus,
-      ensnodeLatency: ensnodeLatency ?? null,
+      indexerV2: indexerV2Status,
+      indexerV2Latency: indexerV2Latency ?? null,
       blockchain: {
         mainnet: blockchainHealth.mainnet.primary ? "ok" : "error",
         sepolia: blockchainHealth.sepolia.primary ? "ok" : "error",
       },
       fallback: {
-        ensnodeHealthy: fallbackStatus.ensnode.healthy,
+        indexerV2Healthy: fallbackStatus.indexerV2.healthy,
         blockchainEnabled: fallbackStatus.blockchain.enabled,
-        lastEnsnodeCheck: new Date(
-          fallbackStatus.ensnode.lastCheck,
+        lastIndexerV2Check: new Date(
+          fallbackStatus.indexerV2.lastCheck,
         ).toISOString(),
         maxRetries: fallbackStatus.config.maxRetries,
         retryDelay: fallbackStatus.config.retryDelayMs,

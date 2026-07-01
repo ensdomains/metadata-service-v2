@@ -98,7 +98,7 @@ describe('MetadataService.resolveTokenId', () => {
 
     metadataService = new MetadataService(
       {
-        ensnodeEndpoint: 'https://test-ensnode.example.com/subgraph',
+        indexerV2Endpoint: 'https://test-ensnode.example.com/subgraph',
         fallbackToBlockchain: false,
         internalCacheEnabled: false,
         d1Enabled: false,

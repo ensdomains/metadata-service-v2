@@ -39,7 +39,7 @@ describe('FallbackService — v2 → v1 → blockchain chain', () => {
   it('uses the v2 indexer when it has the name', async () => {
     const { svc, v1, resolver } = makeService({ v2: { name: 'fox.eth', isMigrated: false }, v1: { name: 'fox.eth' } });
     const res = await svc.getDomainMetadata('fox.eth');
-    expect(res.source).toBe('ensnode');
+    expect(res.source).toBe('indexerV2');
     expect(res.usedFallback).toBe(false);
     expect((res.data as any).name).toBe('fox.eth');
     // v1 + blockchain are never consulted
@@ -51,7 +51,7 @@ describe('FallbackService — v2 → v1 → blockchain chain', () => {
     // v2 returns null (name absent) → its callback throws → try v1
     const { svc, v1, resolver } = makeService({ v2: null, v1: { name: 'old.eth', isMigrated: false } });
     const res = await svc.getDomainMetadata('old.eth');
-    expect(res.source).toBe('ensnodeV1');
+    expect(res.source).toBe('indexerV1');
     expect(res.usedFallback).toBe(true);
     expect((res.data as any).name).toBe('old.eth');
     expect(v1.getDomain).toHaveBeenCalledTimes(1);
@@ -93,7 +93,7 @@ describe('FallbackService — v2 → v1 → blockchain chain', () => {
   it('applies the same chain to migration status', async () => {
     const { svc, v1 } = makeService({ v2: null, v1: { name: 'old.eth', isMigrated: false } });
     const res = await svc.getMigrationStatus('old.eth');
-    expect(res.source).toBe('ensnodeV1');
+    expect(res.source).toBe('indexerV1');
     expect(v1.getMigrationStatus).toHaveBeenCalledTimes(1);
   });
 });
@@ -121,9 +121,9 @@ describe('FallbackService — circuit-breaker only trips on upstream failures (C
     const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, resolver(), v1Hit());
 
     const r1 = await svc.getDomainMetadata('fox.eth');
-    expect(r1.source).toBe('ensnodeV1');           // missed v2, fell to v1
+    expect(r1.source).toBe('indexerV1');           // missed v2, fell to v1
     const r2 = await svc.getDomainMetadata('fox.eth');
-    expect(r2.source).toBe('ensnode');             // v2 NOT skipped → served it
+    expect(r2.source).toBe('indexerV2');             // v2 NOT skipped → served it
     expect(v2.getDomain).toHaveBeenCalledTimes(2); // breaker stayed closed
   });
 
@@ -153,9 +153,9 @@ describe('FallbackService — circuit-breaker only trips on upstream failures (C
     const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, resolver(), v1Hit());
 
     const r1 = await svc.getDomainMetadata('fox.eth');
-    expect(r1.source).toBe('ensnodeV1');           // upstream failure → fell to v1
+    expect(r1.source).toBe('indexerV1');           // upstream failure → fell to v1
     const r2 = await svc.getDomainMetadata('fox.eth');
-    expect(r2.source).toBe('ensnodeV1');           // breaker open → v2 skipped
+    expect(r2.source).toBe('indexerV1');           // breaker open → v2 skipped
     expect(v2.getDomain).toHaveBeenCalledTimes(1); // second request never touched v2
   });
 });
