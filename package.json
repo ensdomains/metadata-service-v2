@@ -4,6 +4,7 @@
   "description": "ENS Metadata Service V2 - Cloudflare Workers implementation for ENS v1 and v2 on Ethereum",
   "main": "src/index.ts",
   "type": "module",
+  "packageManager": "yarn@4.9.1",
   "scripts": {
     "db:migrate:local": "wrangler d1 execute ens-metadata-db --local --file=migrations/001_initial_schema.sql",
     "db:migrate:remote": "wrangler d1 execute ens-metadata-db --remote --file=migrations/001_initial_schema.sql",

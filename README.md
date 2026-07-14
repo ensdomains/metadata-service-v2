@@ -1,5 +1,8 @@
 # ENS Metadata Service V2
 
+[![CI](https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/ci.yml/badge.svg)](https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/codeql.yml/badge.svg)](https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/codeql.yml)
+
 Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and v2 on Ethereum (mainnet + sepolia testnet).
 
 ## Features
