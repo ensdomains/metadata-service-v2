@@ -50,6 +50,12 @@ export default [
     },
     rules: {
       ...tseslint.configs.recommended.rules,
+      // TypeScript itself checks for undefined identifiers (see `tsc --noEmit`),
+      // and `no-undef` produces false positives on both platform globals (Workers
+      // Cache API `caches`/`Cache`, `AbortSignal`, `crypto`) and type-only names
+      // (`BufferSource`). Disabling it for TS is the typescript-eslint-recommended
+      // setup — TS is the source of truth for name resolution.
+      'no-undef': 'off',
       '@typescript-eslint/no-unused-vars': 'error',
       '@typescript-eslint/explicit-function-return-type': 'off',
       '@typescript-eslint/no-explicit-any': 'warn',
