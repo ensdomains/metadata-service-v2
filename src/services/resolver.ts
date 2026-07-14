@@ -1,5 +1,5 @@
 import { BlockchainService } from './blockchain';
-import { namehash, labelhash, isEmptyAddress, tokenIdToHex, getTokenIdVersion } from '../utils/ens';
+import { namehash, labelhash, isEmptyAddress, getTokenIdVersion } from '../utils/ens';
 import { MIGRATION_STATUS, NetworkName, MigrationStatus } from '../types';
 
 export interface ResolverData {
@@ -209,7 +209,7 @@ export class ResolverService {
   async nameExists(name: string, network: NetworkName): Promise<boolean> {
     try {
       const node = namehash(name);
-      const { result } = await this.blockchain.executeWithFallback(network, async (client) => {
+      const { result } = await this.blockchain.executeWithFallback(network, async () => {
         const registry = this.blockchain.getContract(network, 'registry');
         return await registry.read.recordExists([node]);
       });
@@ -236,7 +236,7 @@ export class ResolverService {
   }
 
   // Get registration history for analytics
-  async getRegistrationHistory(name: string): Promise<{
+  async getRegistrationHistory(_name: string): Promise<{
     originalRegistration?: Date;
     lastTransfer?: Date;
     migrationDate?: Date;

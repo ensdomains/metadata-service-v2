@@ -56,7 +56,15 @@ export default [
       // (`BufferSource`). Disabling it for TS is the typescript-eslint-recommended
       // setup — TS is the source of truth for name resolution.
       'no-undef': 'off',
-      '@typescript-eslint/no-unused-vars': 'error',
+      // Standard conventions: `_`-prefixed args/vars are intentionally unused, and
+      // an unused `catch` binding is not an error.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
+      ],
+      // Allow ambient `declare namespace` (e.g. augmenting the global `Intl` for
+      // Intl.Segmenter types) while still banning runtime namespaces.
+      '@typescript-eslint/no-namespace': ['error', { allowDeclarations: true }],
       '@typescript-eslint/explicit-function-return-type': 'off',
       '@typescript-eslint/no-explicit-any': 'warn',
       'prefer-const': 'error',

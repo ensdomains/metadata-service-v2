@@ -1,8 +1,8 @@
 // Sync service for storing ensnode data in D1 for fast local queries
 import { D1Service } from './d1';
 import { IndexerService, type IndexerDomain } from './indexer';
-import { namehash, validateEnsName } from '../utils/ens';
-import { MIGRATION_STATUS, type MigrationStatus } from '../types';
+import { validateEnsName } from '../utils/ens';
+import { MIGRATION_STATUS } from '../types';
 
 export interface SyncConfig {
   batchSize: number;
@@ -231,7 +231,7 @@ export class SyncService {
   }
 
   // Sync registry hierarchy for a domain
-  async syncHierarchy(name: string, force: boolean = false): Promise<SyncResult> {
+  async syncHierarchy(name: string, _force: boolean = false): Promise<SyncResult> {
     const startTime = Date.now();
     let processed = 0;
     let stored = 0;
