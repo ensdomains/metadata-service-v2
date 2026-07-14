@@ -617,7 +617,6 @@ export class BlockchainService {
     }
 
     const contracts = CONTRACTS[network];
-    const client = this.getClient(network);
 
     return {
       name: network,
