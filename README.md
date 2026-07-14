@@ -61,7 +61,12 @@ If no fallback RPCs are provided, the service will use default public RPC endpoi
 
 ## API Endpoints
 
-- `/{network}/{registryType}/{identifier}` - Get metadata
+- `/{network}/{registryType}/{identifier}` - Get NFT metadata (`registryType` = `registry` | `namewrapper`, or a v1 contract address; `identifier` = ENS name, or a v1 token id)
+- `/{network}/{registryType}/{identifier}/image` - NFT card image (SVG)
+- `/{network}/{registryType}/{identifier}/rasterize` - NFT card image rasterized to PNG
+- `/{network}/avatar/{name}` - Avatar image bytes (the `avatar` text record)
+- `/{network}/avatar/{name}/meta` - Avatar record metadata (NFT `host_meta`, `is_owner`, `image_url`, …); v1 parity
+- `/{network}/header/{name}` - Header/banner image bytes (the `header` text record)
 - `/migration-status/{name}` - Check migration status
 - `/registry-hierarchy/{name}` - Get registry hierarchy
 - `/batch-metadata` - Batch metadata requests

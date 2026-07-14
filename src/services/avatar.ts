@@ -8,6 +8,33 @@ export interface AvatarImage {
   mimeType: string;
 }
 
+/**
+ * Avatar-record metadata — the `/{network}/avatar/{name}/meta` response. This is
+ * the parsed NFT/URI metadata behind an ENS `avatar` record (NOT the ENS-NFT
+ * metadata), mirroring the v1 service's AvatarMetadata shape. `host_meta` and
+ * `is_owner` are present only for NFT avatars (eip155 records); they're populated
+ * by @ensdomains/ens-avatar's erc721/erc1155 specs. Extra token/URI-metadata
+ * fields are passed through verbatim via the index signature.
+ */
+export interface AvatarMetadata {
+  uri: string;
+  image?: string;
+  image_url?: string;
+  image_data?: string;
+  name?: string;
+  description?: string;
+  attributes?: unknown[];
+  host_meta?: {
+    chain_id?: number;
+    namespace?: string;
+    contract_address?: string;
+    token_id?: string;
+    reference_url?: string;
+  };
+  is_owner?: boolean;
+  [key: string]: unknown;
+}
+
 // Hard cap on ENS media resolution (RPC + any NFT-metadata/CCIP fetch). Keeps a
 // slow RPC from stalling an image request until the 30s global timeout.
 const MEDIA_RESOLVE_TIMEOUT_MS = 8_000;
@@ -27,6 +54,18 @@ function detectMimeType(buffer: Buffer): string | null {
   if (buffer[0] === 0x52 && buffer[1] === 0x49) return 'image/webp';
   if (buffer[0] === 0x3c) return 'image/svg+xml';
   return null;
+}
+
+/**
+ * Rewrite decentralized-storage URIs (ipfs://, ar://) to public HTTPS gateways so
+ * the metadata's `image` is directly fetchable by consumers — the v1 service did
+ * the same for IPFS. http(s)/data URIs pass through untouched.
+ */
+function toGatewayUrl(uri: string): string {
+  if (uri.startsWith('ipfs://ipfs/')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://ipfs/'.length)}`;
+  if (uri.startsWith('ipfs://')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://'.length)}`;
+  if (uri.startsWith('ar://')) return `https://arweave.net/${uri.slice('ar://'.length)}`;
+  return uri;
 }
 
 export class AvatarService {
@@ -85,6 +124,59 @@ export class AvatarService {
   }
 
   /**
+   * Resolve an ENS name's `avatar` record to its metadata object — the v1-parity
+   * `/{network}/avatar/{name}/meta` response. For NFT avatars this includes
+   * `host_meta` (chain/contract/token) and `is_owner`; for URI avatars it's the
+   * fetched token/URI metadata. Mirrors the image path's resolution discipline:
+   * the (possibly v2) primary resolver first, a legacy-resolver fallback for
+   * v1/migrated names, a hard timeout, and graceful degradation to null.
+   *
+   * @param name           the ENS name.
+   * @param avatarImageUrl absolute URL of THIS deployment's avatar *image* endpoint
+   *                       for `name`. Used as the `image` value when the record
+   *                       only carries inline `image_data` (v1 behavior) — the
+   *                       image endpoint materializes and sanitizes those bytes.
+   * @returns the metadata, or null when there's no resolvable avatar with a usable
+   *          image (the route maps null → 404 "No results found.").
+   */
+  async getAvatarMeta(name: string, avatarImageUrl?: string): Promise<AvatarMetadata | null> {
+    // A non-normalizable name can't have a resolvable record (same gate as media).
+    let normalized: string;
+    try {
+      normalized = normalize(name);
+    } catch {
+      return null;
+    }
+
+    let metadata = await this.resolveMetadataRecord(this.resolver, normalized, name);
+    if (!metadata && this.legacyResolver) {
+      metadata = await this.resolveMetadataRecord(this.legacyResolver, normalized, name);
+    }
+    if (!metadata) {
+      return null;
+    }
+
+    // Resolve a usable, absolute `image` (v1 parity): explicit image → image_url →
+    // (for inline on-chain images) this service's avatar image endpoint. A record
+    // with no image at all is treated as "no results", matching v1's 404.
+    const rawImage =
+      (typeof metadata.image === 'string' && metadata.image) ||
+      (typeof metadata.image_url === 'string' && metadata.image_url) ||
+      (typeof metadata.image_data === 'string' ? avatarImageUrl : undefined) ||
+      undefined;
+    if (!rawImage) {
+      return null;
+    }
+
+    metadata.image = toGatewayUrl(rawImage);
+    // Echo the requested name if the library didn't set `uri`.
+    if (typeof metadata.uri !== 'string') {
+      metadata.uri = name;
+    }
+    return metadata;
+  }
+
+  /**
    * Resolve an ENS media record (avatar or header) to image bytes. Resolves the
    * record URI via ens-avatar, then materializes it (data URI or HTTP fetch),
    * degrading to null on any failure so the caller can render without it.
@@ -135,14 +227,45 @@ export class AvatarService {
       const resolve = kind === 'avatar'
         ? resolver.getAvatar(normalized, {})
         : resolver.getHeader(normalized, {});
-      return await Promise.race([
-        resolve,
-        new Promise<null>((_, reject) =>
-          setTimeout(() => reject(new Error(`${kind} resolution timed out for ${name}`)), MEDIA_RESOLVE_TIMEOUT_MS),
-        ),
-      ]);
+      return await this.withMediaTimeout(resolve, `${kind} resolution timed out for ${name}`);
     } catch (error) {
       console.warn(`${kind} resolution failed for ${name}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Race a media-resolution promise against the hard timeout (MEDIA_RESOLVE_TIMEOUT_MS)
+   * so a slow RPC/gateway degrades to "none" instead of stalling until the global
+   * request timeout. Rejects with `timeoutMessage` on expiry.
+   */
+  private withMediaTimeout<T>(work: Promise<T>, timeoutMessage: string): Promise<T> {
+    return Promise.race([
+      work,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(timeoutMessage)), MEDIA_RESOLVE_TIMEOUT_MS),
+      ),
+    ]);
+  }
+
+  /**
+   * Resolve avatar-record metadata via one resolver, bounded by the media timeout.
+   * Returns null (never throws) on timeout/error so the caller can fall through to
+   * the legacy resolver or degrade to "no results".
+   */
+  private async resolveMetadataRecord(
+    resolver: AvatarResolver,
+    normalized: string,
+    name: string,
+  ): Promise<AvatarMetadata | null> {
+    try {
+      const meta = await this.withMediaTimeout(
+        resolver.getMetadata(normalized),
+        `avatar metadata resolution timed out for ${name}`,
+      );
+      return meta as AvatarMetadata | null;
+    } catch (error) {
+      console.warn(`avatar metadata resolution failed for ${name}:`, error);
       return null;
     }
   }

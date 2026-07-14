@@ -299,6 +299,47 @@ app.get(
   }
 );
 
+// Avatar metadata endpoint (v1 parity): /{network}/avatar/{name}/meta
+// Returns the avatar record's metadata JSON (NFT host_meta, is_owner, image_url,
+// etc.) — the metadata sibling of the avatar image route above. `avatar` is a
+// static segment, so this doesn't collide with the generic
+// `/:network/:param2/:param3/(image|rasterize)` NFT routes.
+app.get(
+  "/:network/avatar/:name/meta",
+  validateNetwork,
+  validateEnsNameParam,
+  async (c) => {
+    // L0 edge cache — same read-through as the other metadata (JSON) endpoints.
+    const edgeHit = await edgeCacheMatch(c);
+    if (edgeHit) return edgeHit;
+
+    // validateNetwork middleware guarantees a valid value; narrow the type.
+    const network = c.req.param("network") as NetworkName;
+    const name = c.req.param("name");
+    const { avatarService } = getImageServices(c.env, network);
+
+    try {
+      const url = new URL(c.req.url);
+      const baseUrl = `${url.protocol}//${url.host}`;
+      // For inline (image_data) avatars, v1 pointed `image` at the avatar image
+      // endpoint; keep that shape using this deployment's own host.
+      const avatarImageUrl = `${baseUrl}/${network}/avatar/${encodeURIComponent(name)}`;
+
+      const meta = await avatarService.getAvatarMeta(name, avatarImageUrl);
+      if (!meta) {
+        return c.json({ message: "No results found." }, 404);
+      }
+
+      c.header('Cache-Control', 'public, max-age=3600');
+      const res = c.json(meta);
+      edgeCachePut(c, res);
+      return res;
+    } catch (error) {
+      return httpError(c, error, "Failed to resolve avatar metadata");
+    }
+  }
+);
+
 // Header/banner endpoint: /{network}/header/{name} (the `header` text record)
 app.get(
   "/:network/header/:name",

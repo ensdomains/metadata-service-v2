@@ -228,6 +228,14 @@
           type: 'avatar',
         },
         {
+          id: 'avatar-meta',
+          section: 'Avatar',
+          title: `Avatar Metadata — ${name}`,
+          method: 'GET',
+          url: `${base}/${net}/avatar/${name}/meta`,
+          type: 'json',
+        },
+        {
           id: 'migration',
           section: 'Domain Info',
           title: `Migration Status — ${name}`,
