@@ -1,5 +1,5 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
-import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type MigrationStatus, type NetworkName } from '../types';
+import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type NetworkName } from '../types';
 import { canonicalizeName } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';

@@ -1,26 +1,26 @@
 // SVG to PNG rasterization service using rasterize-wasm (lazy font loading from R2)
-// @ts-ignore — rasterize-wasm is a JS-only package without type declarations
+// @ts-expect-error — rasterize-wasm is a JS-only package without type declarations
 import { createRasterizer, setHarfBuzzWasm, setBrotliWasm, decompress, FONT_MANIFEST } from 'rasterize-wasm';
-// @ts-ignore — wrangler bundles .wasm imports as WebAssembly.Module
+// @ts-expect-error — wrangler bundles .wasm imports as WebAssembly.Module
 import resvgWasm from 'rasterize-wasm/wasm/resvg.wasm';
-// @ts-ignore
+// @ts-expect-error — untyped .wasm module import
 import hbWasm from 'harfbuzzjs/hb.wasm';
-// @ts-ignore — wrangler bundles .wasm imports as pre-compiled WebAssembly.Module
+// @ts-expect-error — wrangler bundles .wasm imports as pre-compiled WebAssembly.Module
 import brotliWasm from 'tiny-brotli-dec-wasm/build/tiny-brotli-dec-wasm.wasm';
 
 // Pre-compiled trampoline modules for wrapping JS functions as WASM-callable.
 // Workers blocks runtime WASM compilation, so these are compiled at deploy time.
-// @ts-ignore
+// @ts-expect-error — untyped .wasm trampoline module import
 import trampVi from 'harfbuzzjs/trampolines/trampoline-vi.wasm';
-// @ts-ignore
+// @ts-expect-error — untyped .wasm trampoline module import
 import trampViiiffi from 'harfbuzzjs/trampolines/trampoline-viiiffi.wasm';
-// @ts-ignore
+// @ts-expect-error — untyped .wasm trampoline module import
 import trampViiiffffffi from 'harfbuzzjs/trampolines/trampoline-viiiffffffi.wasm';
-// @ts-ignore
+// @ts-expect-error — untyped .wasm trampoline module import
 import trampViiiffffi from 'harfbuzzjs/trampolines/trampoline-viiiffffi.wasm';
-// @ts-ignore
+// @ts-expect-error — untyped .wasm trampoline module import
 import trampViiii from 'harfbuzzjs/trampolines/trampoline-viiii.wasm';
-// @ts-ignore
+// @ts-expect-error — untyped .wasm trampoline module import
 import trampIiiii from 'harfbuzzjs/trampolines/trampoline-iiiii.wasm';
 
 // Make trampolines available to patched harfbuzzjs runtime

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: yarn lint
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: yarn typecheck
+
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          node-version: ${{ matrix.node-version }}
+      # NOTE: coverage is intentionally NOT run here — the pinned
+      # @vitest/coverage-v8 (v3) does not match vitest (v2) and crashes under
+      # `--coverage`. To re-enable: align @vitest/coverage-v8 to ^2.1.x in
+      # package.json, run `yarn install`, then add `--coverage` back plus an
+      # actions/upload-artifact step for `coverage/`.
+      - name: Run tests
+        run: yarn vitest run
+
+  build:
+    name: Build (bundle dry-run)
+    runs-on: ubuntu-latest
+    env:
+      # No Cloudflare auth needed: `deploy --dry-run` only bundles, never uploads.
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Type-check and bundle the Worker (no deploy)
+        run: yarn build
