@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { WebhookService, timingSafeEqualHex } from '../src/services/webhook';
 
 // --- helpers ---
@@ -115,13 +115,17 @@ describe('WebhookService (zigens contract)', () => {
       expect(fakes.cache.delete).toHaveBeenCalledTimes(6);
       // batch caches flushed
       expect(fakes.cache.deleteByPrefix).toHaveBeenCalledWith('batch:', 'indexer');
-      // metadata cache: only the two keys ending in ":vitalik.eth"
-      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledTimes(2);
+      // metadata cache: deterministic direct-key deletes — every network ×
+      // registryType combination for THIS name (no namespace listing, which
+      // silently breaks past KV's 1000-key list page).
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledTimes(4);
       expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:mainnet:registry:vitalik.eth');
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:mainnet:namewrapper:vitalik.eth');
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:sepolia:registry:vitalik.eth');
       expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:sepolia:namewrapper:vitalik.eth');
       expect(fakes.metadataCacheKv.delete).not.toHaveBeenCalledWith('meta:mainnet:registry:other.eth');
       // image caches
-      expect(fakes.svgCacheKv.list).toHaveBeenCalledWith({ prefix: 'svg:vitalik.eth:' });
+      expect(fakes.svgCacheKv.list).toHaveBeenCalledWith({ prefix: 'svg:vitalik.eth:', cursor: undefined });
       expect(fakes.storageManager.deleteByPrefix).toHaveBeenCalledWith('avatars/vitalik.eth:');
       expect(fakes.storageManager.deleteByPrefix).toHaveBeenCalledWith('svg/svg:vitalik.eth:');
     });
