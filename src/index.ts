@@ -13,6 +13,7 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
+import { canonicalizeName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
@@ -27,7 +28,7 @@ import type {
   HealthResponse,
   ErrorResponse,
 } from "./types/api";
-import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS } from "./types";
+import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
 import { NotFoundError, UpstreamError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
@@ -632,6 +633,10 @@ app.post("/batch-metadata", async (c) => {
     const results = await Promise.allSettled(
       body.names.map(async (name: string) => {
         try {
+          // Same expiry gate as the single-name route (before the cache): an
+          // expired name's KV entry must not be served until hardTtl. checkExpiry
+          // is v2-aware and fails open on outages.
+          await metadataService.checkExpiry(name);
           const { metadata } = await metadataCacheService.get(
             network,
             registryType,
@@ -876,10 +881,10 @@ app.get(
         },
       });
 
-      // Store rasterized PNG in CF edge cache
-      if (cfCache) {
-        c.executionCtx.waitUntil(cfCache.put(c.req.url, pngResponse.clone()));
-      }
+      // Store in CF edge cache with the shared capped TTL — caches.default is
+      // per-colo and unpurgeable by the webhook, so the full softTtl (hours)
+      // must never reach it (see EDGE_CACHE_MAX_AGE_SECS).
+      edgeCachePut(c, pngResponse);
 
       return pngResponse;
     } catch (error) {
@@ -905,22 +910,32 @@ const handleWebhook = async (c: any) => {
       c.executionCtx.waitUntil((async () => {
         try {
           const payload = await bodyClone.json() as Partial<EnsNameEvent>;
-          const name = payload?.name;
+          // Canonicalize like WebhookService does for its purges: the D1 name
+          // column and warmed cache keys must never carry a raw-case variant.
+          const name = payload?.name ? canonicalizeName(payload.name) : undefined;
           if (!name) return;
 
-          // The event carries ENS protocol (v1/v2), not chain. Map to the network
-          // this deployment serves with that protocol: mainnet=v1, sepolia=v2.
-          const primaryNetwork = payload.protocol === 'v2' ? 'sepolia' : 'mainnet';
+          // The event carries ENS protocol (v1/v2), not chain — and the chain
+          // cannot be derived from the payload (v1 contracts share addresses
+          // across chains, and a v2-dialect indexer like zigens emits v1 events
+          // for legacy activity on ITS chain too). So: v2 events target the
+          // networks whose indexer speaks v2 (config-derived — mainnet joins
+          // automatically when it flips), while v1 events could concern ANY
+          // network; the per-network existence gate below cheaply skips chains
+          // where the name doesn't resolve, so wrong-chain warming is a no-op.
+          const targetNetworks = payload.protocol === 'v2'
+            ? SUPPORTED_NETWORKS.filter((n) => NETWORKS[n].indexerV2ApiVersion === 'v2')
+            : SUPPORTED_NETWORKS;
 
           // Purge L0 edge cache for every URL shape that could hold this name:
-          // both networks × {registry, namewrapper} × {image, rasterize}. (L0 only
+          // all networks × {registry, namewrapper} × {image, rasterize}. (L0 only
           // caches images/rasterize; metadata/migration-status carry their own
           // short TTLs and are also flushed at L1/L2 by the service.)
           const cfCache = getCfCache();
           if (cfCache) {
             const origin = new URL(c.req.url).origin;
             const purges: Promise<boolean>[] = [];
-            for (const net of ['mainnet', 'sepolia']) {
+            for (const net of SUPPORTED_NETWORKS) {
               for (const rt of ['registry', 'namewrapper']) {
                 for (const kind of ['image', 'rasterize']) {
                   purges.push(cfCache.delete(new Request(`${origin}/${net}/${rt}/${name}/${kind}`)));
@@ -930,13 +945,27 @@ const handleWebhook = async (c: any) => {
             await Promise.all(purges);
           }
 
-          // Proactive warming: regenerate the default image for the primary
-          // network so the next request hits a warm cache.
-          const { imageCacheService } = getImageServices(c.env, primaryNetwork);
-          const { metadataService } = getServices(c.env, primaryNetwork);
-          const migrationStatus: MigrationStatus = await metadataService.classifyName(primaryNetwork, name);
-          await imageCacheService.getImage(name, { name, migrationStatus }, c.executionCtx);
-          console.log(`[webhook] warmed image cache for ${name} on ${primaryNetwork} (${migrationStatus})`);
+          // Per matching network: re-classify fresh, persist the new status to
+          // D1 (so the last-resort tier reflects the event instead of a stale
+          // value), and warm the default image. resolveStatusForImage enforces
+          // existence (NotFoundError on the wrong chain / burned names) and
+          // propagates outages (UpstreamError) — either skips the persist, so a
+          // transient failure can never clobber a correct D1 row with an
+          // error-fallback "unmigrated".
+          for (const net of targetNetworks) {
+            try {
+              const { imageCacheService } = getImageServices(c.env, net);
+              const { metadataService } = getServices(c.env, net);
+              // strict: a degraded badge default is fine to RENDER, but never
+              // to PERSIST — outages must throw here, not classify.
+              const migrationStatus: MigrationStatus = await metadataService.resolveStatusForImage(net, name, { strict: true });
+              await metadataService.recordMigrationStatus(name, migrationStatus);
+              await imageCacheService.getImage(name, { name, migrationStatus }, c.executionCtx);
+              console.log(`[webhook] warmed image cache for ${name} on ${net} (${migrationStatus})`);
+            } catch (err) {
+              console.warn(`[webhook] skipped warm/persist for ${name} on ${net} (no D1 write):`, err);
+            }
+          }
         } catch (err) {
           console.warn('[webhook] cache warming failed:', err);
         }
