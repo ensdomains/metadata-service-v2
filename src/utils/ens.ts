@@ -70,6 +70,21 @@ export function isEthDomain(name: string): boolean {
   return parts.length === 2 && parts[1] === "eth";
 }
 
+/**
+ * The .eth second-level label that keys a name's entry in the v2 ETHRegistry,
+ * or null when the name has no such entry (non-.eth names, or the bare "eth" TLD).
+ * The ETHRegistry keys .eth 2LD labels ONLY, so for `sub.foo.eth` the relevant
+ * label is `foo` (the subname's v2/migration state follows its 2LD: a migrated
+ * 2LD's subtree lives in its v2 subregistries). Using the FIRST label here was a
+ * real bug: `sub.foo.eth` would be classified by the status of the unrelated 2LD
+ * `sub.eth`.
+ */
+export function eth2ldLabel(name: string): string | null {
+  const parts = name.split(".");
+  if (parts.length < 2 || parts[parts.length - 1] !== "eth") return null;
+  return parts[parts.length - 2];
+}
+
 // Check if name is subdomain
 export function isSubdomain(name: string): boolean {
   const parts = name.split(".");
