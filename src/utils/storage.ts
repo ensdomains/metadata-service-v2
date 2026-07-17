@@ -55,12 +55,20 @@ export class StorageManager {
     });
   }
 
-  // Delete all R2 objects matching a prefix
+  // Delete all R2 objects matching a prefix. Paginates the R2 list cursor so
+  // namespaces larger than one page (1000 objects) are fully purged.
   async deleteByPrefix(prefix: string): Promise<number> {
-    const keys = await this.list(prefix, 1000);
-    if (keys.length === 0) return 0;
-    await Promise.all(keys.map((key) => this.r2Bucket.delete(key)));
-    return keys.length;
+    let deleted = 0;
+    let cursor: string | undefined;
+    do {
+      const listed = await this.r2Bucket.list({ prefix, limit: 1000, cursor });
+      if (listed.objects.length > 0) {
+        await Promise.all(listed.objects.map((obj) => this.r2Bucket.delete(obj.key)));
+        deleted += listed.objects.length;
+      }
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+    return deleted;
   }
 
   // Static assets operations
