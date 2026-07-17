@@ -3,6 +3,7 @@ import { D1Service } from './d1';
 import { IndexerService, type IndexerDomain } from './indexer';
 import { validateEnsName } from '../utils/ens';
 import { MIGRATION_STATUS } from '../types';
+import { classifyV2IndexerRecord } from '../utils/migration';
 
 export interface SyncConfig {
   batchSize: number;
@@ -198,15 +199,21 @@ export class SyncService {
       const { status } = await this.indexerV2.getMigrationStatus(name);
 
       if (status) {
-        // v1 subgraph isMigrated = 2019 registrar migration, not v2.
-        // Store as 'unmigrated' until v2 indexer is used for all networks.
-        await this.d1.storeMigrationStatus(name, MIGRATION_STATUS.UNMIGRATED, {
+        // v2 (zigens) dialect: classify for real — the record carries the v2
+        // migration signals (isMigrated/owner/protocol). v1 subgraph dialect:
+        // its isMigrated means the 2019 registrar migration, NOT v2, and
+        // presence in the v1 subgraph proves nothing about v2 → store
+        // 'unmigrated' (the safe legacy default).
+        const migrationStatus = this.indexerV2.apiVersion === 'v2'
+          ? classifyV2IndexerRecord(status)
+          : MIGRATION_STATUS.UNMIGRATED;
+        await this.d1.storeMigrationStatus(name, migrationStatus, {
           owner: status.owner?.id,
           expirationDate: status.expiryDate,
         });
         stored = 1;
 
-        console.log(`Synced migration status for ${name} to D1`);
+        console.log(`Synced migration status for ${name} to D1 (${migrationStatus})`);
       } else {
         console.warn(`Migration status for ${name} not found in ensnode`);
       }
