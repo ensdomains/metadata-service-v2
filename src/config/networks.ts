@@ -113,23 +113,25 @@ export const NETWORKS = {
       nameWrapper: '0x0635513f179D50A207757E05759CbD106d7dFcE8',  // name_wrapper
       resolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',     // public_resolver
     },
-    // ENS v2 (Sepolia) — June 2026 deployment (architecture/ens_v2_june_deplyoyment.txt).
+    // ENS v2 (Sepolia).
     v2: {
-      rootRegistry: '0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c',  // RootRegistry
-      ethRegistry: '0x67b728a792e789a8978b30cf1b3b641f19354b43',   // ETHRegistry
+      rootRegistry: '0xc960f7217d3643b525ef36bec8adf86953cd9ab8',  // live RootRegistry (last-known; discovered via UR at runtime)
+      ethRegistry: '0xdedb92913a25abe1f7bcdd85d8a344a43b398b67',   // live ETHRegistry (last-known; discovered via UR at runtime)
       // Migration is handled by separate controllers (see src/utils/migration.ts).
-      // June deployment: MigrationHelper 0xd54a53c1567b26f9653c8565dccc39bceb6ab327 (V1 side),
+      // June-doc addresses (likely stale post-redeploy; no runtime consumer):
+      // MigrationHelper 0xd54a53c1567b26f9653c8565dccc39bceb6ab327 (V1 side),
       // LockedMigrationController 0x681802eff57b83edce99d688c023ab1284495176,
       // UnlockedMigrationController 0xd021a69db7f9e276a59cbbccf06e7f1e5434215c (V2 side).
-      migrationContract: '0x681802eff57b83edce99d688c023ab1284495176', // LockedMigrationController
+      migrationContract: '0x681802eff57b83edce99d688c023ab1284495176', // LockedMigrationController (June doc)
       // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
-      resolver: '0xd25f66dd4ff61486c2c5c1e6201a23576698d3df', // PublicResolverV2
-      // UniversalResolverV2 (sepolia), June 2026 deployment. Used by
-      // BlockchainService.getResolverV2 (findResolver) and AvatarService
-      // (avatar/header records). Proxy alternatives from the same deployment:
-      // ManagedUniversalResolverProxy 0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1,
-      // UpgradableUniversalResolverProxy 0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe.
-      universalResolver: '0x85edf8b6b7d4211e2b07aa687506b746357b92cf',
+      resolver: '0xd25f66dd4ff61486c2c5c1e6201a23576698d3df', // PublicResolverV2 (June doc)
+      // UpgradableUniversalResolverProxy — the STABLE vanity address. The June
+      // doc's UniversalResolverV2 implementation (0x85edf8b6…) walks the DEAD
+      // June registries and returns resolver=0 for live names (verified
+      // 2026-07-14); the proxy tracks the current implementation + registries.
+      // Used by BlockchainService (findResolver/findOwner + registry discovery)
+      // and AvatarService (avatar/header records).
+      universalResolver: '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0x0635513f179D50A207757E05759CbD106d7dFcE8',
       legacyResolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',
