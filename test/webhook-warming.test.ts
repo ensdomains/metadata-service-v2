@@ -16,9 +16,23 @@ import type { MetadataServiceConfig, BlockchainEnvironment } from '../src/servic
 // SQL engine matters here: the behavior under test (INSERT OR REPLACE +
 // COALESCE subselects in D1Service) lives in SQL, not JS, so a vi.fn() fake
 // could not pin it.
+//
+// node:sqlite only exists on newer Node lines (absent on Node 20) — feature-
+// detect and SKIP the real-SQL suites where it's missing so older runtimes
+// stay green; any modern leg (Node 22+, local dev) still pins the SQL.
 const nodeRequire = createRequire(import.meta.url);
-const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
-type SqliteDb = InstanceType<typeof DatabaseSync>;
+let DatabaseSyncImpl: typeof import('node:sqlite').DatabaseSync | null = null;
+try {
+  ({ DatabaseSync: DatabaseSyncImpl } = nodeRequire('node:sqlite') as typeof import('node:sqlite'));
+} catch {
+  console.warn('[webhook-warming.test] node:sqlite unavailable on this Node — skipping real-SQL D1 suites');
+}
+const hasSqlite = DatabaseSyncImpl !== null;
+type SqliteDb = InstanceType<NonNullable<typeof DatabaseSyncImpl>>;
+function openSqlite(): SqliteDb {
+  if (!DatabaseSyncImpl) throw new Error('node:sqlite unavailable (suite should have been skipped)');
+  return new DatabaseSyncImpl(':memory:');
+}
 
 // Shared state for the hoisted vi.mock factories below. mode 'real' delegates
 // to the genuine MetadataService (full fallback chain); mode 'record' replaces
@@ -198,13 +212,13 @@ afterEach(() => {
 
 // ---- tests -----------------------------------------------------------------
 
-describe('webhook warming vs transient indexer outage', () => {
+describe.skipIf(!hasSqlite)('webhook warming vs transient indexer outage', () => {
   it(
     'must not overwrite a correct D1 native row while classification upstreams are down',
     async () => {
       // regression: webhook warming persisted the error-fallback 'unmigrated' to
       // D1 during an outage, clobbering a correct 'native' last-resort row.
-      const db = new DatabaseSync(':memory:');
+      const db = openSqlite();
       db.exec(MIGRATION_STATUS_SCHEMA);
       // Previously-correct row: fox.eth is native-v2 on sepolia.
       const seededAt = Date.now() - 10 * 60 * 1000; // within sync's 1h staleThreshold
@@ -272,11 +286,11 @@ describe('webhook protocol→network fan-out (targetNetworks)', () => {
   });
 });
 
-describe('D1 storeMigrationStatus — partial (webhook-shaped) writes', () => {
+describe.skipIf(!hasSqlite)('D1 storeMigrationStatus — partial (webhook-shaped) writes', () => {
   const OWNER = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 
   function seededD1() {
-    const sqlite = new DatabaseSync(':memory:');
+    const sqlite = openSqlite();
     sqlite.exec(MIGRATION_STATUS_SCHEMA);
     return { sqlite, d1: new D1Service(makeSqliteD1(sqlite), 'sepolia') };
   }
