@@ -130,9 +130,24 @@ describe('FallbackService — circuit-breaker only trips on upstream failures (C
   it('throws NotFoundError when every tier cleanly misses (→ 404)', async () => {
     const v2 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
     const v1 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
-    const rejectingResolver = { resolveName: vi.fn(async () => { throw new Error('no resolver'); }) } as any;
-    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, rejectingResolver, v1);
+    // A CLEAN chain-tier miss = resolveName succeeds but the name has no owner in
+    // any registry (v1 or v2) → the tier maps that to NotFoundError. (A resolver
+    // that THROWS is an RPC failure — that's the UpstreamError case below.)
+    const emptyResolver = { resolveName: vi.fn(async (name: string) => ({
+      name,
+      resolver: { owner: '0x0000000000000000000000000000000000000000', resolver: '0x0000000000000000000000000000000000000000' },
+      migrationStatus: 'unmigrated',
+    })) } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, emptyResolver, v1);
     await expect(svc.getDomainMetadata('ghost.eth')).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it('throws UpstreamError when indexers miss and the chain tier CANNOT be read (→ 503, not a cacheable 404)', async () => {
+    const v2 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const v1 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const rejectingResolver = { resolveName: vi.fn(async () => { throw new Error('all RPCs failed'); }) } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, rejectingResolver, v1);
+    await expect(svc.getDomainMetadata('ghost.eth')).rejects.toBeInstanceOf(UpstreamError);
   });
 
   it('throws UpstreamError when a tier failed upstream and nothing resolved (→ 503)', async () => {
@@ -141,6 +156,53 @@ describe('FallbackService — circuit-breaker only trips on upstream failures (C
     const rejectingResolver = { resolveName: vi.fn(async () => { throw new Error('rpc down'); }) } as any;
     const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, rejectingResolver, v1);
     await expect(svc.getDomainMetadata('x.eth')).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  it('serves a native v2 name from the CHAIN tier when both indexers miss (v2-aware existence)', async () => {
+    // A name born on v2 has NO v1 registry owner. The v2-aware resolver returns
+    // its v2 owner, so the chain tier must serve it instead of 404ing.
+    const v2 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const v1 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const v2Resolver = { resolveName: vi.fn(async (name: string) => ({
+      name,
+      resolver: { owner: '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809', resolver: '0x2245606dd6b3ae61205fcf8c843e200cc2f1123d' },
+      migrationStatus: 'migrated', // on-chain view: on v2 (never 'native')
+      expirationDate: new Date('2028-09-28T00:00:00Z'),
+    })) } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, v2Resolver, v1);
+
+    const res = await svc.getDomainMetadata('fox.eth');
+    expect(res.source).toBe('blockchain');
+    expect((res.data as any).owner.id).toBe('0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809');
+    expect((res.data as any).chainMigrationStatus).toBe('migrated');
+    expect(res.v2Consulted).toBe(true); // v2 tier ran (clean miss)
+  });
+
+  it('marks v2Consulted=false while the breaker is open (v1 data is then unproven about v2)', async () => {
+    const v2 = { getDomain: vi.fn(async () => { throw new UpstreamError('zigens down'); }), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const v1 = { getDomain: vi.fn(async () => ({ domain: { name: 'moved.eth' } })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, makeResolver(), v1);
+
+    // 1st call: v2 errors upstream (breaker opens) → served by v1, v2 not answered
+    const r1 = await svc.getDomainMetadata('moved.eth');
+    expect(r1.source).toBe('indexerV1');
+    expect(r1.v2Consulted).toBe(false);
+
+    // 2nd call: breaker open → v2 tier skipped entirely → still not consulted
+    const r2 = await svc.getDomainMetadata('moved.eth');
+    expect(r2.source).toBe('indexerV1');
+    expect(r2.v2Consulted).toBe(false);
+    expect(v2.getDomain).toHaveBeenCalledTimes(1); // skipped on the 2nd call
+  });
+
+  it('marks v2Consulted=true when the v2 tier cleanly missed before v1 served', async () => {
+    const v2 = { getDomain: vi.fn(async () => ({ domain: null })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const v1 = { getDomain: vi.fn(async () => ({ domain: { name: 'old.eth' } })), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, {} as any, makeResolver(), v1);
+
+    const res = await svc.getDomainMetadata('old.eth');
+    expect(res.source).toBe('indexerV1');
+    expect(res.v2Consulted).toBe(true); // proven absent from the v2 index
   });
 
   it('an UpstreamError trips the breaker — v2 is skipped during cooldown', async () => {

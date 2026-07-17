@@ -26,6 +26,15 @@ export interface FallbackResult<T> {
   usedFallback: boolean;
   retries: number;
   error?: Error;
+  /**
+   * True when the primary (v2) indexer tier actually ran to a definitive answer
+   * for this request (returned data, or a clean not-found miss). False when the
+   * tier was skipped (disabled / circuit-breaker open) or hit an upstream
+   * failure. Callers use this to decide whether "absent from the v2 index" has
+   * been PROVEN: an indexerV1-sourced result with v2Consulted=false must not be
+   * blindly classified `unmigrated` — the name may well be on v2.
+   */
+  v2Consulted: boolean;
 }
 
 export class FallbackService {
@@ -53,8 +62,12 @@ export class FallbackService {
     let lastError: Error | null = null;
     let retries = 0;
     let sawUpstream = false; // any tier hit a real upstream failure (vs a clean miss)
+    let v2Consulted = false; // v2 tier ran to a definitive answer (result or clean miss)
 
-    // Try the primary (v2) indexer first if it's enabled and healthy
+    // Try the primary (v2) indexer first if it's enabled and healthy. When the
+    // circuit-breaker is open the tier is skipped entirely — v2Consulted then
+    // stays false so downstream classification/404 decisions know the v2 index
+    // was NOT actually checked.
     if (this.config.indexerV2.enabled && this.isIndexerV2Healthy()) {
       try {
         const data = await operation.indexerV2();
@@ -63,6 +76,7 @@ export class FallbackService {
           source: 'indexerV2',
           usedFallback: false,
           retries,
+          v2Consulted: true,
         };
       } catch (error) {
         lastError = error as Error;
@@ -74,6 +88,7 @@ export class FallbackService {
           console.warn(`IndexerV2 ${operationName} upstream failure, tripping breaker:`, error);
           this.markIndexerV2Unhealthy();
         } else {
+          v2Consulted = true; // definitive: the v2 index does not have it
           console.log(`IndexerV2 ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
         }
         retries++;
@@ -89,6 +104,7 @@ export class FallbackService {
           source: 'indexerV1',
           usedFallback: true,
           retries,
+          v2Consulted,
         };
       } catch (error) {
         lastError = error as Error;
@@ -109,9 +125,14 @@ export class FallbackService {
           source: 'blockchain',
           usedFallback: true,
           retries,
+          v2Consulted,
         };
       } catch (error) {
         lastError = error as Error;
+        // A non-NotFound failure here means the CHAIN couldn't be read (RPCs
+        // exhausted) — that is an upstream failure, not evidence of absence.
+        // Without this, a total outage would fall through to a cacheable 404.
+        if (!(error instanceof NotFoundError)) sawUpstream = true;
         console.error(`Blockchain ${operationName} fallback failed:`, error);
         retries++;
       }
@@ -204,15 +225,19 @@ export class FallbackService {
           return domain;
         },
         blockchain: async () => {
+          // resolveName is v2-aware: for a name REGISTERED in the live v2
+          // registry it returns the v2 owner/resolver/expiry (a native-v2 name
+          // has NO v1 registry owner, so the existence gate below would
+          // otherwise 404 it).
           const nameData = await this.resolver.resolveName(
             name,
             namehash(name),
             this.config.blockchain.preferredNetwork
           );
           // resolveName returns synthetic empty data for names with no registry
-          // owner — i.e. unregistered/never-registered names. Treat that as a clean
-          // miss so the endpoint 404s instead of fabricating metadata for a name
-          // that doesn't exist.
+          // owner (v1 OR v2) — i.e. unregistered/never-registered names. Treat
+          // that as a clean miss so the endpoint 404s instead of fabricating
+          // metadata for a name that doesn't exist.
           if (isEmptyAddress(nameData.resolver.owner ?? '')) {
             throw new NotFoundError(`${name} is not registered`);
           }
@@ -232,8 +257,11 @@ export class FallbackService {
             createdAt: nameData.registrationDate?.toISOString(),
             ttl: undefined,
             // Deliberately omit `isMigrated`: an on-chain read cannot distinguish
-            // native-vs-migrated (that lives only in the indexer). Classification of
-            // a `blockchain`-sourced result is done via on-chain status, not this field.
+            // native-vs-migrated (that lives only in the indexer). Instead the
+            // on-chain classification travels on chainMigrationStatus (below):
+            // `unmigrated` (v1 registry) or `migrated` (REGISTERED on v2 — never
+            // `native`, the chain can't prove provenance).
+            chainMigrationStatus: nameData.migrationStatus,
           };
         },
       },
@@ -271,9 +299,9 @@ export class FallbackService {
           );
           return {
             name,
-            // Neutral placeholder; a `blockchain`-sourced migration status is decided
-            // by the on-chain registry check (isUnmigratedName), NOT this field —
-            // an on-chain read cannot prove native-vs-migrated.
+            // Neutral placeholder; a `blockchain`-sourced migration status travels
+            // on chainMigrationStatus (from the v2-aware resolveName), NOT this
+            // field — an on-chain read cannot prove native-vs-migrated.
             isMigrated: false,
             ownerId: nameData.resolver.owner,
             resolverId: nameData.resolver.resolver,
@@ -281,6 +309,7 @@ export class FallbackService {
             owner: { id: nameData.resolver.owner },
             resolver: { address: nameData.resolver.resolver },
             expiryDate: nameData.expirationDate?.toISOString(),
+            chainMigrationStatus: nameData.migrationStatus,
           };
         },
       },
@@ -335,7 +364,14 @@ export class FallbackService {
                 resolver: { address: nameData.resolver.resolver },
               });
             } catch (error) {
-              // If we can't resolve a level, create a placeholder
+              // Chain unreadable → surface the outage; fabricating zero-owner
+              // levels here would turn a total outage into a cacheable 200 of
+              // made-up data (defeating the error taxonomy above).
+              if (error instanceof UpstreamError) throw error;
+              // The requested name itself failing is a real verdict (e.g. clean
+              // miss → 404 via the taxonomy) — only ANCESTOR levels may degrade
+              // to a placeholder so partial hierarchies still render.
+              if (i === 0) throw error;
               const defaultResolver = CONTRACTS[this.config.blockchain.preferredNetwork]?.resolver || '';
               hierarchyItems.push({
                 name: domainName,
