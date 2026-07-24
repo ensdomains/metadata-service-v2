@@ -98,18 +98,24 @@ export class CacheService {
     await this.kv.delete(cacheKey);
   }
 
-  // Delete multiple cache entries by prefix
+  // Delete multiple cache entries by prefix. Paginates the KV list cursor — a
+  // single list() page caps at 1000 keys, so a non-paginated delete silently
+  // strands everything beyond the first page.
   async deleteByPrefix(
     prefix: string,
     namespace: string = "indexer",
   ): Promise<number> {
     const fullPrefix = this.buildKey(namespace, prefix);
-    const list = await this.kv.list({ prefix: fullPrefix });
+    let deleted = 0;
+    let cursor: string | undefined;
+    do {
+      const list = await this.kv.list({ prefix: fullPrefix, cursor });
+      await Promise.all(list.keys.map((key) => this.kv.delete(key.name)));
+      deleted += list.keys.length;
+      cursor = list.list_complete ? undefined : list.cursor;
+    } while (cursor);
 
-    const deletions = list.keys.map((key) => this.kv.delete(key.name));
-    await Promise.all(deletions);
-
-    return deletions.length;
+    return deleted;
   }
 
   // Basic cache statistics

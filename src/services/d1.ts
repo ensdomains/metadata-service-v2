@@ -144,12 +144,19 @@ export class D1Service {
       last_updated: Date.now(),
     };
 
+    // Partial updates (e.g. the webhook passes only the status) must not wipe
+    // fields a fuller sync already stored: REPLACE rewrites the whole row, so
+    // absent inputs fall back to the existing row's values via COALESCE.
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO migration_status (
         network, id, name, status, owner, expiration_date, migration_date,
         last_updated, sync_version
       ) VALUES (
-        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+        ?1, ?2, ?3, ?4,
+        COALESCE(?5, (SELECT owner FROM migration_status WHERE network = ?1 AND id = ?2)),
+        COALESCE(?6, (SELECT expiration_date FROM migration_status WHERE network = ?1 AND id = ?2)),
+        COALESCE(?7, (SELECT migration_date FROM migration_status WHERE network = ?1 AND id = ?2)),
+        ?8,
         COALESCE((SELECT sync_version FROM migration_status WHERE network = ?1 AND id = ?2), 0) + 1
       )
     `);

@@ -1,7 +1,8 @@
 import { createPublicClient, http, PublicClient, getContract } from 'viem';
 import { NETWORKS, SUPPORTED_NETWORKS, type NetworkName, type V1Contracts, type V2Contracts } from '../config/networks';
 import type { NetworkConfig } from '../types';
-import { namehash, labelhash, canonicalizeName, dnsEncodeName } from '../utils/ens';
+import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
+import { UpstreamError } from './errors';
 
 // Per-network contract address lookups, derived from the central registry
 // (src/config/networks.ts). Typed by NetworkName so `CONTRACTS[network]` needs no cast.
@@ -127,6 +128,31 @@ export const REGISTRY_V2_ABI = [
     stateMutability: 'view',
     type: 'function',
   },
+  // String-keyed lookups (verified against the live sepolia ETHRegistry ABI via
+  // Sourcify). These take the LABEL string directly, sidestepping the
+  // tokenId-versioning scheme (tokenId = labelhash with the low 32 bits replaced
+  // by the token version), and are the preferred read path.
+  {
+    inputs: [{ name: 'label', type: 'string' }],
+    name: 'findExpiry',
+    outputs: [{ name: '', type: 'uint64' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'label', type: 'string' }],
+    name: 'findOwner',
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'label', type: 'string' }],
+    name: 'findTokenId',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
 ] as const;
 
 // ENS v2 UniversalResolver ABI — the REAL IUniversalResolver interface
@@ -164,6 +190,24 @@ export const UNIVERSAL_RESOLVER_V2_ABI = [
       { name: 'resolver', type: 'address' },
       { name: 'reverseResolver', type: 'address' },
     ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  // The live root registry this UR walks — the discovery anchor for the current
+  // v2 deployment (the registries move between redeployments; the UR proxy
+  // address does not).
+  {
+    inputs: [],
+    name: 'ROOT_REGISTRY',
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  // Name-level owner lookup (DNS-encoded name, any depth) — pure on-chain walk.
+  {
+    inputs: [{ name: 'name', type: 'bytes' }],
+    name: 'findOwner',
+    outputs: [{ name: '', type: 'address' }],
     stateMutability: 'view',
     type: 'function',
   },
@@ -283,9 +327,12 @@ export class BlockchainService {
       }
     }
 
-    // All clients failed
-    throw new Error(
-      `All RPC clients failed for ${network}. Last error: ${lastError?.message}`
+    // All clients failed — this IS the upstream-unreadable verdict, so type it:
+    // every consumer (resolver walks, fallback tiers, expiry checks) keys its
+    // outage-vs-miss decisions on `instanceof UpstreamError`.
+    throw new UpstreamError(
+      `All RPC clients failed for ${network}. Last error: ${lastError?.message}`,
+      { cause: lastError ?? undefined }
     );
   }
 
@@ -363,63 +410,190 @@ export class BlockchainService {
     };
   }
 
+  // ── ENS v2 live-registry discovery ────────────────────────────────────────
+  //
+  // The v2 registries move between (unannounced) redeployments; the ONLY stable
+  // address is the UpgradableUniversalResolverProxy vanity anchor. Discover the
+  // live root/eth registries through it (UR.ROOT_REGISTRY() →
+  // root.getSubregistry('eth')), cache per isolate with a TTL, and fall back to
+  // the last-known configured addresses when discovery fails.
+  private v2RegistryCache: Map<NetworkName, { root: `0x${string}`; eth: `0x${string}`; fetchedAt: number }> = new Map();
+  private static readonly V2_REGISTRY_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+  /** Whether ENS v2 is configured (deployed) on this network. Mainnet keeps
+   *  placeholder strings until v2 ships there, which disables every v2 path. */
+  isV2Configured(network: NetworkName): boolean {
+    return ENS_V2_CONTRACTS[network].universalResolver.startsWith('0x')
+      || ENS_V2_CONTRACTS[network].ethRegistry.startsWith('0x');
+  }
+
+  /** Live root + eth registry addresses (discovered via the UR anchor, cached),
+   *  or the configured last-known addresses when discovery is unavailable.
+   *  Returns null when v2 isn't configured on the network at all. */
+  async getV2Registries(network: NetworkName): Promise<{ root: `0x${string}`; eth: `0x${string}` } | null> {
+    const v2 = ENS_V2_CONTRACTS[network];
+    if (!this.isV2Configured(network)) return null;
+
+    const cached = this.v2RegistryCache.get(network);
+    if (cached && Date.now() - cached.fetchedAt < BlockchainService.V2_REGISTRY_TTL_MS) {
+      return { root: cached.root, eth: cached.eth };
+    }
+
+    if (v2.universalResolver.startsWith('0x')) {
+      try {
+        const { result } = await this.executeWithFallback(network, async (client) => {
+          const ur = getContract({
+            address: v2.universalResolver as `0x${string}`,
+            abi: UNIVERSAL_RESOLVER_V2_ABI,
+            client,
+          });
+          const root = await ur.read.ROOT_REGISTRY() as `0x${string}`;
+          const rootRegistry = getContract({ address: root, abi: REGISTRY_V2_ABI, client });
+          const eth = await rootRegistry.read.getSubregistry(['eth']) as `0x${string}`;
+          return { root, eth };
+        });
+        if (!isEmptyAddress(result.eth)) {
+          this.v2RegistryCache.set(network, { ...result, fetchedAt: Date.now() });
+          const known = v2.ethRegistry.toLowerCase();
+          if (result.eth.toLowerCase() !== known) {
+            console.warn(`[v2] live eth registry ${result.eth} differs from configured ${v2.ethRegistry} on ${network} — using live (update config/networks.ts)`);
+          }
+          return result;
+        }
+      } catch (error) {
+        console.warn(`[v2] registry discovery via UR failed on ${network}:`, error);
+      }
+    }
+
+    // Discovery unavailable: prefer the most recent successful discovery even
+    // past its TTL — the configured addresses rot silently across redeploys,
+    // while an expired cache entry was verifiably live more recently. (A dead
+    // post-redeploy registry still answers reads with AVAILABLE, so falling back
+    // to stale config would misclassify live v2 names instead of erroring.)
+    if (cached) {
+      return { root: cached.root, eth: cached.eth };
+    }
+
+    // Last-known configured addresses (also the path when only registries are
+    // configured without a UR).
+    if (v2.rootRegistry.startsWith('0x') && v2.ethRegistry.startsWith('0x')) {
+      return { root: v2.rootRegistry as `0x${string}`, eth: v2.ethRegistry as `0x${string}` };
+    }
+    return null;
+  }
+
   // Check ENS v2 migration status via ETHRegistry.getStatus()
   // (IPermissionedRegistry.Status: AVAILABLE=0, RESERVED=1, REGISTERED=2).
   // AVAILABLE and RESERVED both count as unmigrated — RESERVED is a pre-seeded
   // placeholder that still resolves via v1 (see src/utils/migration.ts). Only
   // REGISTERED(2) means the name actually lives on v2.
+  //
+  // The ETHRegistry keys .eth 2LD labels: for `sub.foo.eth` the relevant entry is
+  // `foo` (a subname's migration state follows its 2LD — see eth2ldLabel). Names
+  // outside .eth have no ETHRegistry entry → unmigrated.
+  //
+  // Error contract: THROWS UpstreamError when the chain cannot be read (all RPCs
+  // failed) — callers must decide their own safe degradation instead of this
+  // function silently coercing an outage to `unmigrated`.
   async isUnmigratedName(network: NetworkName, name: string): Promise<boolean> {
+    const registries = await this.getV2Registries(network);
+    // v2 not deployed on this network (mainnet placeholders) → everything is v1.
+    if (!registries) return true;
+
+    // labelhash is case-sensitive but ENS names are not: hash the canonical label,
+    // like the UR paths below — a raw mixed-case label would read the wrong slot
+    // and misclassify a live v2 name as unmigrated.
+    const label = eth2ldLabel(canonicalizeName(name));
+    if (!label) return true; // non-.eth (or bare "eth") — no ETHRegistry entry
+
     try {
-      const v2Contracts = ENS_V2_CONTRACTS[network];
-      // Skip if v2 contracts aren't deployed yet (mainnet placeholders)
-      if (v2Contracts.ethRegistry.startsWith('0x') === false) return true;
-
-      const label = name.split('.')[0];
-      const lhash = labelhash(label);
-
-      const ethRegistry = getContract({
-        address: v2Contracts.ethRegistry as `0x${string}`,
-        abi: REGISTRY_V2_ABI,
-        client: this.getClient(network),
+      const { result: status } = await this.executeWithFallback(network, async (client) => {
+        const ethRegistry = getContract({ address: registries.eth, abi: REGISTRY_V2_ABI, client });
+        return await ethRegistry.read.getStatus([BigInt(labelhash(label))]) as number;
       });
-
-      const status = await ethRegistry.read.getStatus([BigInt(lhash)]) as number;
       // Only REGISTERED(2) is truly on v2; AVAILABLE(0)/RESERVED(1) → unmigrated.
-      return status !== 2;
+      return Number(status) !== 2;
     } catch (error) {
-      console.error('Error checking v2 migration status:', error);
-      // Default to unmigrated to use safe legacy path
-      return true;
+      throw new UpstreamError(`v2 migration check failed for ${name} on ${network}`, { cause: error });
     }
   }
 
-  // Read a name's v2 registration (status + expiry) from the ETHRegistry.
-  // Returns null when v2 isn't deployed on the network (mainnet placeholders) or
-  // on error. The v2 expiry is authoritative for v2 names: a name can be live on
-  // v2 while its old v1 registration has lapsed (e.g. fox.eth on sepolia).
+  // Read a name's v2 registration (status + expiry + owner) from the live
+  // ETHRegistry. The v2 expiry is authoritative for v2 names: a name can be live
+  // on v2 while its old v1 registration has lapsed (e.g. fox.eth on sepolia).
+  //
+  // Returns null when v2 doesn't apply (not deployed on the network, or the name
+  // has no ETHRegistry entry — non-.eth / bare "eth"). THROWS UpstreamError when
+  // the chain cannot be read, so an RPC outage is never mistaken for
+  // "not on v2" (which could otherwise 410 a live name off its lapsed v1 expiry).
   async getV2Registration(
     network: NetworkName,
     name: string,
-  ): Promise<{ status: number; expiry: bigint } | null> {
-    const v2Contracts = ENS_V2_CONTRACTS[network];
-    if (v2Contracts.ethRegistry.startsWith('0x') === false) return null;
+  ): Promise<{ status: number; expiry: bigint; owner: string } | null> {
+    const registries = await this.getV2Registries(network);
+    if (!registries) return null;
+
+    // Canonical label — same case-sensitivity constraint as isUnmigratedName.
+    const label = eth2ldLabel(canonicalizeName(name));
+    if (!label) return null;
+
     try {
-      const lhash = labelhash(name.split('.')[0]);
-      const ethRegistry = getContract({
-        address: v2Contracts.ethRegistry as `0x${string}`,
-        abi: REGISTRY_V2_ABI,
-        client: this.getClient(network),
+      // Single getState() call returns status + expiry + owner together (vs
+      // separate round-trips) — this is on the per-request hot path. `anyId`
+      // accepts the raw labelhash (the registry canonicalizes internally;
+      // verified against the live sepolia deployment).
+      const { result: state } = await this.executeWithFallback(network, async (client) => {
+        const ethRegistry = getContract({ address: registries.eth, abi: REGISTRY_V2_ABI, client });
+        return await ethRegistry.read.getState([BigInt(labelhash(label))]) as {
+          status: number; expiry: bigint; latestOwner: string;
+        };
       });
-      // Single getState() call returns status + expiry together (vs separate
-      // getStatus + getExpiry round-trips) — this is on the per-request hot path.
-      const state = await ethRegistry.read.getState([BigInt(lhash)]) as {
-        status: number; expiry: bigint;
-      };
-      return { status: Number(state.status), expiry: state.expiry };
+      return { status: Number(state.status), expiry: state.expiry, owner: state.latestOwner };
     } catch (error) {
-      console.warn(`Failed to read v2 registration for ${name}:`, error);
-      return null;
+      throw new UpstreamError(`v2 registration read failed for ${name} on ${network}`, { cause: error });
     }
+  }
+
+  /**
+   * On-chain v2 record for the fallback tier (used when the indexers are down):
+   * owner (any depth, via UR.findOwner over the DNS-encoded name), resolver (via
+   * getResolverV2), and — for .eth 2LDs — status/expiry from the ETHRegistry.
+   * Returns null when the name is not REGISTERED on v2 (then the v1 registry is
+   * authoritative). Throws UpstreamError when the chain cannot be read.
+   */
+  async getV2NameRecord(
+    network: NetworkName,
+    name: string,
+  ): Promise<{ owner: string; resolver: string; expiry: bigint | null; status: number } | null> {
+    const registration = await this.getV2Registration(network, name);
+    // Not on v2 (or v2 not applicable): AVAILABLE(0)/RESERVED(1) are still
+    // v1-authoritative — see src/utils/migration.ts.
+    if (!registration || registration.status !== 2) return null;
+
+    const is2ld = name.split('.').length === 2;
+    let owner = registration.owner;
+    if (!is2ld) {
+      // Subname: the 2LD's registry entry doesn't own it — resolve the actual
+      // owner through the UR's name-level walk.
+      const ur = ENS_V2_CONTRACTS[network].universalResolver;
+      if (ur.startsWith('0x')) {
+        const { result } = await this.executeWithFallback(network, async (client) => {
+          const urContract = getContract({ address: ur as `0x${string}`, abi: UNIVERSAL_RESOLVER_V2_ABI, client });
+          return await urContract.read.findOwner([dnsEncodeName(canonicalizeName(name))]) as string;
+        });
+        owner = result;
+      }
+    }
+
+    const resolver = await this.getResolverV2(network, name);
+    return {
+      owner,
+      resolver,
+      // Per-label expiry below the 2LD lives in the sub-registries; only the 2LD
+      // expiry is surfaced here (subname expiry → null, callers must not 410 on it).
+      expiry: is2ld ? registration.expiry : null,
+      status: registration.status,
+    };
   }
 
   // Enhanced ENS resolution: get owner directly from registry
@@ -443,9 +617,9 @@ export class BlockchainService {
       return await this.getResolver(network, node);
     }
 
-    // Case 2: On v2 — prefer the real UniversalResolverV2.findResolver() when it is
-    // deployed (single canonical on-chain traversal); otherwise fall back to the
-    // manual registry walk from the root registry.
+    // Case 2: On v2 — prefer the UniversalResolver proxy's findResolver() (single
+    // canonical on-chain traversal, wildcard-aware); otherwise fall back to the
+    // manual registry walk from the live root registry.
     const ur = ENS_V2_CONTRACTS[network].universalResolver;
     if (ur.startsWith('0x')) {
       try {
@@ -464,49 +638,60 @@ export class BlockchainService {
     universalResolver: `0x${string}`,
     name: string,
   ): Promise<string> {
-    const ur = getContract({
-      address: universalResolver,
-      abi: UNIVERSAL_RESOLVER_V2_ABI,
-      client: this.getClient(network),
-    });
     const dnsName = dnsEncodeName(canonicalizeName(name));
-    const [resolver] = await ur.read.findResolver([dnsName]) as [string, string, bigint];
-    return resolver;
+    const { result } = await this.executeWithFallback(network, async (client) => {
+      const ur = getContract({
+        address: universalResolver,
+        abi: UNIVERSAL_RESOLVER_V2_ABI,
+        client,
+      });
+      const [resolver] = await ur.read.findResolver([dnsName]) as [string, string, bigint];
+      return resolver;
+    });
+    return result;
   }
 
-  // ENS v2: Hierarchical resolver lookup (for v2 registries)
+  // ENS v2: Hierarchical resolver lookup (for v2 registries). Walks label-by-label
+  // from the live root registry (discovered via the UR anchor when available).
   async getResolverHierarchical(network: NetworkName, name: string): Promise<string> {
+    const registries = await this.getV2Registries(network);
+    // v2 not configured on this network (e.g. mainnet placeholders) — nothing to walk.
+    if (!registries) return '0x0000000000000000000000000000000000000000';
+
     const labels = name.split('.').reverse(); // ['eth', 'bar', 'foo']
 
-    let currentRegistry = ENS_V2_CONTRACTS[network].rootRegistry as `0x${string}`;
+    let currentRegistry = registries.root;
     let resolverAddress = '0x0000000000000000000000000000000000000000';
 
     for (const label of labels) {
-      const registry = getContract({
-        address: currentRegistry,
-        abi: REGISTRY_V2_ABI,
-        client: this.getClient(network),
-      });
-
       try {
-        // Get subregistry for this label
-        const subregistry = await registry.read.getSubregistry([label]) as string;
+        const { result } = await this.executeWithFallback(network, async (client) => {
+          const registry = getContract({ address: currentRegistry, abi: REGISTRY_V2_ABI, client });
+          const [subregistry, resolver] = await Promise.all([
+            registry.read.getSubregistry([label]) as Promise<string>,
+            registry.read.getResolver([label]) as Promise<string>,
+          ]);
+          return { subregistry, resolver };
+        });
 
-        // Get resolver for this label (might be wildcard)
-        const resolver = await registry.read.getResolver([label]) as string;
-        if (resolver !== '0x0000000000000000000000000000000000000000') {
-          resolverAddress = resolver; // Most specific wins
+        if (result.resolver !== '0x0000000000000000000000000000000000000000') {
+          resolverAddress = result.resolver; // Most specific wins
         }
 
         // If no subregistry, we're done (wildcard case)
-        if (subregistry === '0x0000000000000000000000000000000000000000') {
+        if (result.subregistry === '0x0000000000000000000000000000000000000000') {
           break;
         }
 
-        currentRegistry = subregistry as `0x${string}`;
+        currentRegistry = result.subregistry as `0x${string}`;
       } catch (error) {
-        console.error(`Error querying registry for label ${label}:`, error);
-        break;
+        // executeWithFallback exhausted every RPC for this read. Returning a
+        // zero/partial resolver here would violate the module's error contract
+        // (outage must never be coerced to empty state) — let callers degrade.
+        throw new UpstreamError(
+          `v2 registry walk failed at label "${label}" for ${name} on ${network}`,
+          { cause: error },
+        );
       }
     }
 
@@ -583,30 +768,29 @@ export class BlockchainService {
     }
   }
 
-  // Enhanced ENS resolution: get expiry date for .eth names
-  async getExpiry(network: NetworkName, labelhash: string): Promise<bigint | null> {
-    try {
-      return this.executeWithFallback(network, async (client) => {
-        const registrar = getContract({
-          address: CONTRACTS[network].registrar as `0x${string}`,
-          abi: [
-            {
-              inputs: [{ name: 'id', type: 'uint256' }],
-              name: 'nameExpires',
-              outputs: [{ name: '', type: 'uint256' }],
-              stateMutability: 'view',
-              type: 'function',
-            },
-          ],
-          client,
-        });
+  // Enhanced ENS resolution: get expiry date for .eth names (0n = no such
+  // registration). THROWS UpstreamError when the chain cannot be read — both
+  // callers deliberately degrade at their own level (resolveFromNetwork drops
+  // just the expiry field; checkExpiry fails open), so an outage is a visible
+  // per-caller decision rather than being coerced to "no expiry" here.
+  async getExpiry(network: NetworkName, labelhash: string): Promise<bigint> {
+    return this.executeWithFallback(network, async (client) => {
+      const registrar = getContract({
+        address: CONTRACTS[network].registrar as `0x${string}`,
+        abi: [
+          {
+            inputs: [{ name: 'id', type: 'uint256' }],
+            name: 'nameExpires',
+            outputs: [{ name: '', type: 'uint256' }],
+            stateMutability: 'view',
+            type: 'function',
+          },
+        ],
+        client,
+      });
 
-        return await registrar.read.nameExpires([BigInt(labelhash)]) as bigint;
-      }).then(({ result }) => result);
-    } catch (error) {
-      console.warn(`Failed to get expiry for ${labelhash}:`, error);
-      return null;
-    }
+      return await registrar.read.nameExpires([BigInt(labelhash)]) as bigint;
+    }).then(({ result }) => result);
   }
 
   // Get network configuration

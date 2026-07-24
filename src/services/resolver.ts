@@ -1,6 +1,7 @@
 import { BlockchainService } from './blockchain';
-import { namehash, labelhash, isEmptyAddress, getTokenIdVersion } from '../utils/ens';
+import { namehash, labelhash, isEmptyAddress } from '../utils/ens';
 import { MIGRATION_STATUS, NetworkName, MigrationStatus } from '../types';
+import { NotFoundError, UpstreamError } from './errors';
 
 export interface ResolverData {
   owner: string;
@@ -30,30 +31,44 @@ export class ResolverService {
 
   // Resolve name data from the requested network
   async resolveName(name: string, tokenId: string, preferredNetwork: NetworkName = 'mainnet'): Promise<NameData> {
-    const version = getTokenIdVersion(tokenId, name);
     const node = namehash(name);
 
     try {
-      const data = await this.resolveFromNetwork(name, tokenId, node, preferredNetwork, version);
+      const data = await this.resolveFromNetwork(name, tokenId, node, preferredNetwork);
       return data;
     } catch (error) {
+      // Preserve the resolution-layer taxonomy: NotFound (clean miss) and
+      // Upstream (chain unreadable) must survive to the fallback tiers —
+      // wrapping them in a plain Error collapses 404/503 semantics and lets a
+      // partial outage masquerade as an ordinary per-level failure.
+      if (error instanceof NotFoundError || error instanceof UpstreamError) throw error;
       console.error(`Failed to resolve ${name} from ${preferredNetwork}:`, error);
       throw new Error(`Unable to resolve ${name} from ${preferredNetwork}`);
     }
   }
 
-  // Resolve from specific network
+  // Resolve from specific network. v2-aware: a name REGISTERED in the live v2
+  // registry is read from v2 (owner/resolver/expiry); everything else uses the
+  // legacy v1 registry.
   private async resolveFromNetwork(
     name: string,
     tokenId: string,
     node: `0x${string}`,
     network: NetworkName,
-    version: 'v1' | 'v2'
   ): Promise<NameData> {
     try {
-      // Get basic registry data using enhanced methods
-      // TODO: For ENS v2 support, use blockchain.getResolverV2(network, name) instead of getResolver(network, node)
-      // This will properly route between unmigrated v1 and migrated v2 names
+      // v2 first where deployed: a migrated/native name's owner+resolver+expiry
+      // live in the v2 registries — the v1 registry would return stale (or empty)
+      // data for it. getV2NameRecord returns null when the name is not REGISTERED
+      // on v2 (RESERVED placeholders included: those are still v1-authoritative).
+      if (this.blockchain.isV2Configured(network)) {
+        const v2Record = await this.blockchain.getV2NameRecord(network, name);
+        if (v2Record) {
+          return this.buildV2NameData(name, tokenId, network, v2Record);
+        }
+      }
+
+      // Get basic registry data using enhanced methods (ENS v1 path)
       const [owner, resolver] = await Promise.all([
         this.blockchain.getOwner(network, node),
         this.blockchain.getResolver(network, node)
@@ -134,8 +149,9 @@ export class ResolverService {
         }
       }
 
-      // Determine migration status based on v1 vs v2 registry check
-      const migrationStatus = this.determineMigrationStatus(network, owner);
+      // This branch only runs when the name is NOT REGISTERED on v2 (see the
+      // v2-first check above), so it is v1/unmigrated by construction.
+      const migrationStatus = MIGRATION_STATUS.UNMIGRATED;
 
       // Calculate registration and expiration dates
       let registrationDate: Date | undefined;
@@ -160,7 +176,7 @@ export class ResolverService {
       return {
         name,
         tokenId,
-        version,
+        version: 'v1',
         network,
         migrationStatus,
         resolver: resolverData,
@@ -168,9 +184,42 @@ export class ResolverService {
         expirationDate,
       };
     } catch (error) {
+      // Same taxonomy passthrough as resolveName above.
+      if (error instanceof NotFoundError || error instanceof UpstreamError) throw error;
       console.error(`Failed to resolve ${name} from ${network}:`, error);
       throw new Error(`Unable to resolve ${name} from ${network}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  }
+
+  /**
+   * NameData for a name REGISTERED in the live v2 registry. Records (addr/text/
+   * contenthash) are deliberately not fetched here: the metadata product doesn't
+   * consume them from this path, and v2 resolvers can be wildcard/CCIP-Read —
+   * avatar/header record reads go through the ens-avatar UR path instead.
+   * `migrationStatus` is `migrated` because the on-chain view can prove
+   * on-v2 vs not, but never `native` (that provenance lives only in the indexer).
+   */
+  private buildV2NameData(
+    name: string,
+    tokenId: string,
+    network: NetworkName,
+    record: { owner: string; resolver: string; expiry: bigint | null; status: number },
+  ): NameData {
+    return {
+      name,
+      tokenId,
+      version: 'v2',
+      network,
+      migrationStatus: MIGRATION_STATUS.MIGRATED,
+      resolver: {
+        owner: record.owner,
+        resolver: record.resolver,
+        isWrapped: false,
+        addresses: {},
+        texts: {},
+      },
+      expirationDate: record.expiry ? new Date(Number(record.expiry) * 1000) : undefined,
+    };
   }
 
   // Resolve multiple names in parallel
@@ -205,7 +254,7 @@ export class ResolverService {
     return results;
   }
 
-  // Check if name exists on network
+  // Check if name exists on network (v1 registry record OR live v2 registration)
   async nameExists(name: string, network: NetworkName): Promise<boolean> {
     try {
       const node = namehash(name);
@@ -213,36 +262,17 @@ export class ResolverService {
         const registry = this.blockchain.getContract(network, 'registry');
         return await registry.read.recordExists([node]);
       });
-      
-      return result as boolean;
+      if (result as boolean) return true;
+
+      // Names born on v2 have no v1 registry record — check the v2 registry too.
+      if (this.blockchain.isV2Configured(network)) {
+        const v2 = await this.blockchain.getV2Registration(network, name);
+        return v2?.status === 2;
+      }
+      return false;
     } catch (error) {
       console.error(`Error checking if ${name} exists on ${network}:`, error);
       return false;
     }
-  }
-
-  // Determine migration status based on v1 vs v2 registry check on the target network
-  private determineMigrationStatus(
-    network: NetworkName,
-    owner: string
-  ): MigrationStatus {
-    if (isEmptyAddress(owner)) {
-      return MIGRATION_STATUS.UNMIGRATED;
-    }
-
-    // TODO: Check v2 registry to determine if name is native v2 or migrated
-    // For now, names with owners are considered unmigrated (v1) by default
-    return MIGRATION_STATUS.UNMIGRATED;
-  }
-
-  // Get registration history for analytics
-  async getRegistrationHistory(_name: string): Promise<{
-    originalRegistration?: Date;
-    lastTransfer?: Date;
-    migrationDate?: Date;
-  }> {
-    // This would involve scanning historical events
-    // For now, return empty object as placeholder
-    return {};
   }
 }

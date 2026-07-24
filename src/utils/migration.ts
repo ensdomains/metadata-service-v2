@@ -90,3 +90,34 @@ export function classifyMigrationStatus(signals: MigrationSignals): MigrationSta
 export function isOnV2(status: MigrationStatus): boolean {
   return status === MIGRATION_STATUS.MIGRATED || status === MIGRATION_STATUS.NATIVE;
 }
+
+/** The subset of a v2-indexer (zigens) domain record that drives classification. */
+export interface V2IndexerRecord {
+  isMigrated?: boolean;
+  owner?: { id?: string };
+  ownerId?: string;
+  /**
+   * zigens exposes per-row provenance: "v1" = legacy ENS row, "v2" = ENSv2 row.
+   * The indexer's schema is designed to serve BOTH, so "present in the v2 index"
+   * must not be conflated with "on v2" — assert the protocol when it's present.
+   */
+  protocol?: string;
+}
+
+/**
+ * Classify a domain record served by the **v2 indexer** (zigens). Single source
+ * of truth shared by MetadataService and SyncService so they cannot drift:
+ *  - `protocol: "v1"` row → the name is a legacy row in the index → `unmigrated`
+ *  - RESERVED placeholder (owner == address(0)) → `unmigrated` (still v1-authoritative)
+ *  - otherwise on v2; `isMigrated` distinguishes `migrated` from `native` (born on v2)
+ */
+export function classifyV2IndexerRecord(record: V2IndexerRecord): MigrationStatus {
+  if (record.protocol === 'v1') {
+    return classifyMigrationStatus({ isUnmigrated: true });
+  }
+  return classifyMigrationStatus({
+    isOnV2: true,
+    isReserved: isReservedOwner(record.owner?.id ?? record.ownerId),
+    bornOnV2: record.isMigrated === false,
+  });
+}

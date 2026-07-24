@@ -120,6 +120,7 @@ const V2_GET_DOMAIN = `
       createdAt
       ttl
       isMigrated
+      protocol
       tokenId
       tokenVersion
       owner {
@@ -150,6 +151,7 @@ const V2_GET_DOMAINS = `
       createdAt
       ttl
       isMigrated
+      protocol
       tokenId
       tokenVersion
       owner {
@@ -170,6 +172,7 @@ const V2_GET_MIGRATION_STATUS = `
     domain(id: $id) {
       name
       isMigrated
+      protocol
       tokenVersion
       expiryDate
       owner {
@@ -243,6 +246,13 @@ export interface IndexerDomain {
   isMigrated?: boolean;
   tokenId?: string;
   tokenVersion?: number;
+  /** zigens row provenance: "v1" = legacy ENS row, "v2" = ENSv2 row. The v2
+   *  indexer can serve BOTH — classification must not equate presence with
+   *  being on v2 (see utils/migration.ts classifyV2IndexerRecord). */
+  protocol?: string;
+  /** Set ONLY by the blockchain fallback tier (fallback.ts): the on-chain
+   *  classification of the record (`unmigrated` | `migrated`; never `native`). */
+  chainMigrationStatus?: string;
 }
 
 export interface IndexerResponse<T> {
@@ -264,6 +274,10 @@ export interface IndexerMigrationStatus {
   resolver?: { address: string };
   expiryDate?: string;
   tokenVersion?: number;
+  /** zigens row provenance ("v1" | "v2") — see IndexerDomain.protocol. */
+  protocol?: string;
+  /** Set ONLY by the blockchain fallback tier — see IndexerDomain.chainMigrationStatus. */
+  chainMigrationStatus?: string;
 }
 
 export interface IndexerHierarchyItem {
@@ -282,7 +296,8 @@ export class IndexerService {
   private client: GraphQLClient;
   private fallbackClient?: GraphQLClient;
   private timeout: number;
-  private apiVersion: ApiVersion;
+  /** Query dialect: 'v1' = ENSNode subgraph (namehash ids), 'v2' = zigens (name-string ids). */
+  readonly apiVersion: ApiVersion;
 
   constructor(
     private config: {
@@ -370,11 +385,13 @@ export class IndexerService {
     return { domain: data.domain, usedFallback };
   }
 
-  // Get domain by pre-computed namehash (for v1 tokenId lookups)
+  // Get domain by pre-computed namehash (for tokenId lookups). Works on BOTH
+  // dialects: the v1 subgraph keys domains by namehash, and zigens' domain(id:)
+  // resolves "name or namehash" (verified live against graphql.ens.dev — a
+  // namehash id returns the domain; raw labelhash / versioned-tokenId forms do NOT).
   async getDomainByNamehash(
     nameHash: string,
   ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
-    // v1: use namehash directly; v2: not applicable, pass through
     const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
       domain: IndexerDomain | null;

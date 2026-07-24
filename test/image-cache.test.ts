@@ -57,8 +57,6 @@ describe('ImageCacheService', () => {
     migrationStatus: 'unmigrated' as const,
   };
 
-  const cacheKey = 'svg:nick.eth:sepolia:unmigrated:518:518';
-
   describe('L1 fresh hit', () => {
     it('should return immediately from KV without touching R2 or origin', async () => {
       const entry = JSON.stringify({

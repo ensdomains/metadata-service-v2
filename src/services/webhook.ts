@@ -20,6 +20,7 @@ import type { Context } from 'hono';
 import { CacheService, CacheKeys } from './cache';
 import { validateEnsName, canonicalizeName } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
+import { SUPPORTED_NETWORKS } from '../config/networks';
 
 // Webhook payload: a flat ENS name-change event. (Wire shape originated with
 // zigens' WebhookManager.buildPayload; kept stable for any sender.)
@@ -257,16 +258,21 @@ export class WebhookService {
     }
   }
 
-  // Invalidate endpoint-level metadata cache entries for a domain (all networks +
-  // registry types — keys end in ":{name}").
+  // Invalidate endpoint-level metadata cache entries for a domain. Metadata keys
+  // are fully deterministic (`meta:{network}:{registryType}:{name}` — see
+  // metadata-cache.ts buildCacheKey), so delete the exact key set directly.
+  // NEVER list the whole `meta:` namespace here: KV list() returns at most 1000
+  // keys per page, so a listing-based purge silently misses entries once the
+  // namespace outgrows a page (which production traffic does almost immediately).
   private async invalidateMetadataCache(domainName: string): Promise<void> {
     if (!this.metadataCacheKv) return;
     try {
-      const list = await this.metadataCacheKv.list({ prefix: 'meta:' });
-      const matching = list.keys.filter(k => k.name.endsWith(`:${domainName}`));
-      if (matching.length > 0) {
-        await Promise.all(matching.map(k => this.metadataCacheKv!.delete(k.name)));
-      }
+      const keys = SUPPORTED_NETWORKS.flatMap((network) =>
+        (['registry', 'namewrapper'] as const).map(
+          (registryType) => `meta:${network}:${registryType}:${domainName}`,
+        ),
+      );
+      await Promise.all(keys.map((k) => this.metadataCacheKv!.delete(k)));
     } catch (err) {
       console.warn(`[webhook] failed to invalidate metadata cache for ${domainName}:`, err);
     }
@@ -276,11 +282,18 @@ export class WebhookService {
   private async invalidateImageCaches(domainName: string): Promise<void> {
     if (this.svgCacheKv) {
       try {
+        // SVG keys embed variable params (status/size) after the name, so this
+        // one needs a prefix list — paginate the cursor: a single list() page
+        // caps at 1000 keys.
         const prefix = `svg:${domainName}:`;
-        const list = await this.svgCacheKv.list({ prefix });
-        if (list.keys.length > 0) {
-          await Promise.all(list.keys.map((k) => this.svgCacheKv!.delete(k.name)));
-        }
+        let cursor: string | undefined;
+        do {
+          const list = await this.svgCacheKv.list({ prefix, cursor });
+          if (list.keys.length > 0) {
+            await Promise.all(list.keys.map((k) => this.svgCacheKv!.delete(k.name)));
+          }
+          cursor = list.list_complete ? undefined : list.cursor;
+        } while (cursor);
       } catch (err) {
         console.warn(`[webhook] failed to invalidate SVG KV cache for ${domainName}:`, err);
       }

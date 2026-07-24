@@ -3,6 +3,9 @@
 import type { MetadataResponse } from '../types/api';
 import { MIGRATION_STATUS } from '../types';
 import { canonicalizeName } from '../utils/ens';
+import { SUPPORTED_NETWORKS } from '../config/networks';
+import { NotFoundError } from './errors';
+import { DomainExpiredError } from './metadata';
 
 interface MetadataCacheEntry {
   metadata: MetadataResponse;
@@ -105,16 +108,19 @@ export class MetadataCacheService {
     return { metadata, cacheStatus: 'miss', ttlConfig };
   }
 
-  // Invalidate all metadata cache entries for a domain
+  // Invalidate all metadata cache entries for a domain. Keys are deterministic
+  // (`meta:{network}:{registryType}:{name}`), so delete the exact key set —
+  // listing the whole `meta:` namespace breaks silently past 1000 keys (KV
+  // list() page cap).
   async invalidate(name: string): Promise<void> {
     try {
-      const prefix = `meta:`;
-      const list = await this.kv.list({ prefix });
-      // Delete entries that contain this domain name
-      const matching = list.keys.filter(k => k.name.endsWith(`:${name}`));
-      if (matching.length > 0) {
-        await Promise.all(matching.map(k => this.kv.delete(k.name)));
-      }
+      const canonical = canonicalizeName(name);
+      const keys = SUPPORTED_NETWORKS.flatMap((network) =>
+        (['registry', 'namewrapper'] as const).map(
+          (registryType) => buildCacheKey(network, registryType, canonical),
+        ),
+      );
+      await Promise.all(keys.map((k) => this.kv.delete(k)));
     } catch (err) {
       console.error(`[metadata-cache] invalidation failed for ${name}:`, err);
     }
@@ -124,10 +130,24 @@ export class MetadataCacheService {
     cacheKey: string,
     fetchMetadata: () => Promise<MetadataResponse>,
   ): Promise<void> {
-    const metadata = await fetchMetadata();
-    const migrationStatus = extractMigrationStatus(metadata);
-    const ttlConfig = getTtlConfig(migrationStatus);
-    await this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig);
+    try {
+      const metadata = await fetchMetadata();
+      const migrationStatus = extractMigrationStatus(metadata);
+      const ttlConfig = getTtlConfig(migrationStatus);
+      await this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig);
+    } catch (err) {
+      // A definitive origin verdict must evict the stale entry, or a burned/
+      // expired name keeps serving from KV until hardTtl (up to 30 days). Both
+      // errors are only thrown on a clean, corroborated verdict — transient
+      // upstream failures (UpstreamError) keep the stale copy, which is the
+      // point of SWR.
+      if (err instanceof NotFoundError || err instanceof DomainExpiredError) {
+        console.warn(`[metadata-cache] evicting ${cacheKey} — origin verdict: ${(err as Error).message}`);
+        await this.kv.delete(cacheKey);
+        return;
+      }
+      throw err;
+    }
   }
 
   private async writeKv(

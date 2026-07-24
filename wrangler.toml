@@ -62,6 +62,9 @@ MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
 SEPOLIA_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth_sepolia"
+# Sepolia is where ALL v2/migration on-chain checks run today — keep two fallbacks
+# (defaultFallbackRpcs is empty for sepolia in config/networks.ts).
+SEPOLIA_FALLBACK_RPC_2 = "https://sepolia.drpc.org"
 LOG_LEVEL = "info"
 MAX_AVATAR_BYTES = "26214400"  # 25 MB cap on fetched avatar size (DoS guard)
 # Secrets (set via `wrangler secret put`, never in plaintext here):

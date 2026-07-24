@@ -6,10 +6,10 @@
   "type": "module",
   "packageManager": "yarn@4.9.1",
   "scripts": {
-    "db:migrate:local": "wrangler d1 execute ens-metadata-db --local --file=migrations/001_initial_schema.sql",
-    "db:migrate:remote": "wrangler d1 execute ens-metadata-db --remote --file=migrations/001_initial_schema.sql",
+    "db:migrate:local": "wrangler d1 migrations apply ens-metadata-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply ens-metadata-db --remote",
     "predev": "node scripts/setup-local-r2.mjs && yarn db:migrate:local",
-    "dev": "wrangler dev",
+    "dev": "yarn predev && wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest",
     "test:coverage": "vitest --coverage",

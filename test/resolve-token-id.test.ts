@@ -18,6 +18,11 @@ vi.mock('../src/services/blockchain', async (importOriginal) => {
       getOwner: vi.fn(),
       getResolver: vi.fn(),
       healthCheck: vi.fn(),
+      // v2 wiring: not configured in this suite (mainnet-style placeholders)
+      isV2Configured: vi.fn().mockReturnValue(false),
+      getV2Registries: vi.fn().mockResolvedValue(null),
+      getV2Registration: vi.fn().mockResolvedValue(null),
+      isUnmigratedName: vi.fn().mockResolvedValue(true),
     })),
   };
 });
@@ -201,6 +206,37 @@ describe('MetadataService.resolveTokenId', () => {
       await expect(
         metadataService.resolveTokenId('mainnet', unknownAddress, '12345')
       ).rejects.toThrow('Unknown contract address: 0x0000000000000000000000000000000000000001');
+    });
+  });
+
+  describe('v2 ETHRegistry (sepolia)', () => {
+    // The configured last-known live registry (config/networks.ts sepolia.v2.ethRegistry)
+    const V2_ETH_REGISTRY = '0xdedb92913a25abe1f7bcdd85d8a344a43b398b67';
+
+    it('recognizes the v2 ETHRegistry address and resolves a namehash-form tokenId', async () => {
+      // Some consumers pass namehash-form ids; zigens domain(id:) resolves those.
+      const hash = '0x54cb177469278d1e8e843f0d60633cb4b038af8c4c5be8993161e87ca4a50b4c'; // namehash(fox.eth)
+      mockGetDomainByNamehash.mockResolvedValue({
+        domain: { name: 'fox.eth' },
+        usedFallback: false,
+      });
+
+      const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash);
+
+      expect(result.name).toBe('fox.eth');
+      expect(result.registryType).toBe('registry');
+      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(hash);
+    });
+
+    it('404s (NotFound, not "unknown contract") for a native v2 tokenId that no indexer can reverse', async () => {
+      // The ERC1155 tokenId is the labelhash with its low 32 bits replaced by the
+      // token version — the real labelhash is unrecoverable, so the indexer misses.
+      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000000';
+      mockGetDomainByNamehash.mockResolvedValue({ domain: null, usedFallback: false });
+
+      await expect(
+        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, versionedTokenId)
+      ).rejects.toThrow('No domain found for tokenId');
     });
   });
 
