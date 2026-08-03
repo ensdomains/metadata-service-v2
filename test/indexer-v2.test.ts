@@ -7,11 +7,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // against graphql.ens.dev.
 const requests: Array<{ document: string; variables: Record<string, unknown> }> = [];
 let nextResponse: unknown = { domain: null };
+// When set, every request rejects with this (ClientError-shaped for GraphQL
+// errors) instead of resolving — used to simulate schema-validation failures.
+let nextError: unknown = null;
 
 vi.mock('graphql-request', () => ({
   GraphQLClient: vi.fn().mockImplementation(() => ({
     request: vi.fn(async (opts: { document: string; variables: Record<string, unknown> }) => {
       requests.push({ document: opts.document, variables: opts.variables });
+      if (nextError) throw nextError;
       return nextResponse;
     }),
   })),
@@ -28,6 +32,7 @@ describe('IndexerService — v2 (zigens) dialect', () => {
   beforeEach(() => {
     requests.length = 0;
     nextResponse = { domain: null };
+    nextError = null;
   });
 
   it('getDomain queries by lowercased name string, not namehash', async () => {
@@ -70,6 +75,87 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
     expect(requests[0].variables).toEqual({ id: 'fox.eth' });
     expect(requests[0].document).toContain('protocol');
+  });
+
+  describe('getDomainByTokenId (native v2 tokenId reverse lookup)', () => {
+    // fox.eth labelhash with low 32 bits = token version 1 / canonical form
+    const VERSIONED = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001' as const;
+    const CANONICAL = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000000';
+
+    it('queries domains(where: { tokenId }) with the lowercased exact id first', async () => {
+      nextResponse = { domains: [{ id: 'fox.eth', name: 'fox.eth' }] };
+      const mixedCase = ('0x' + VERSIONED.slice(2).toUpperCase()) as `0x${string}`;
+      const { domain } = await makeV2().getDomainByTokenId(mixedCase);
+
+      expect(domain?.name).toBe('fox.eth');
+      expect(requests).toHaveLength(1);
+      expect(requests[0].document).toContain('tokenId: $id');
+      expect(requests[0].variables).toEqual({ id: VERSIONED });
+    });
+
+    it('falls back to the canonicalId filter (version bits zeroed) on an exact-id miss', async () => {
+      nextResponse = { domains: [] };
+      await makeV2().getDomainByTokenId(VERSIONED);
+
+      expect(requests).toHaveLength(2);
+      expect(requests[1].document).toContain('canonicalId: $id');
+      expect(requests[1].variables).toEqual({ id: CANONICAL });
+    });
+
+    it('treats a schema-rejects-the-filter error as a clean miss and stops probing for a while', async () => {
+      // The EXACT error live zigens returns for an unknown where-filter field
+      // (verified against graphql.ens.dev 2026-07-30): the message does NOT
+      // name the field; only extensions.code identifies it as validation.
+      nextError = Object.assign(new Error('validation failed'), {
+        response: {
+          errors: [
+            {
+              message:
+                'Unknown field in input object: the `where` (or similar input) contains a field not declared in its filter type.',
+              extensions: { code: 'VALIDATION_ERROR' },
+            },
+          ],
+        },
+      });
+
+      const svc = makeV2();
+      const first = await svc.getDomainByTokenId(VERSIONED);
+      expect(first.domain).toBeNull(); // no throw — clean miss, callers keep pre-filter behavior
+
+      // Both filters probed (2 primary attempts each: retry-once semantics)…
+      const probed = requests.length;
+      expect(probed).toBeGreaterThan(0);
+
+      // …and remembered as unsupported: the next lookup issues NO requests.
+      const second = await svc.getDomainByTokenId(VERSIONED);
+      expect(second.domain).toBeNull();
+      expect(requests).toHaveLength(probed);
+    });
+
+    it('also recognizes standard GraphQL unknown-field messages (spec wording, no extensions code)', async () => {
+      nextError = Object.assign(new Error('validation failed'), {
+        response: {
+          errors: [{ message: 'Field "tokenId" is not defined by type "DomainFilter".' }],
+        },
+      });
+
+      const { domain } = await makeV2().getDomainByTokenId(VERSIONED);
+      expect(domain).toBeNull();
+    });
+
+    it('still throws UpstreamError on a genuine outage (transport failure)', async () => {
+      nextError = new Error('fetch failed: ECONNREFUSED');
+
+      await expect(makeV2().getDomainByTokenId(VERSIONED)).rejects.toThrow('ensnode request failed');
+    });
+
+    it('is a no-op on the v1 dialect (the subgraph has no v2 tokens)', async () => {
+      const v1 = new IndexerService({ primaryEndpoint: 'https://subgraph.test', apiVersion: 'v1' });
+      const { domain } = await v1.getDomainByTokenId(VERSIONED);
+
+      expect(domain).toBeNull();
+      expect(requests).toHaveLength(0);
+    });
   });
 
   it('the v1 dialect still queries by namehash (regression guard for mainnet)', async () => {

@@ -409,14 +409,24 @@ export class MetadataService {
       registryType = 'namewrapper';
       nameHash = tokenIdToHex(tokenId);
     } else if (await this.isV2RegistryAddress(network, addr)) {
-      // v2 ETHRegistry. Its native tokenId (versioned labelhash) is NOT
-      // reverse-resolvable: the low 32 bits of the real labelhash are replaced by
-      // the token version, and the indexer keys domains by name/namehash only —
-      // so only a namehash-form id (which some consumers pass) can resolve.
-      // (Verified against live zigens: domain(id:) accepts name or namehash;
-      // labelhash / versioned-tokenId forms return null.)
+      // v2 ETHRegistry (ERC1155). Marketplaces pass the native tokenId — a
+      // labelhash whose low 32 bits are the token version — which is
+      // irreversible from the hash alone, so ask the indexer's tokenId/
+      // canonicalId filters first. Returns a clean miss (falls through below)
+      // while the filters aren't in the deployed zigens schema yet.
       registryType = 'registry';
-      nameHash = tokenIdToHex(tokenId);
+      const hexId = tokenIdToHex(tokenId);
+      try {
+        const { domain } = await this.indexerV2.getDomainByTokenId(hexId);
+        if (domain?.name) return { name: domain.name, registryType };
+      } catch (error) {
+        if (!(error instanceof UpstreamError)) throw error;
+        // Outage: the namehash path below hits the same endpoint and owns the
+        // outage semantics (surface 503, not a cacheable 404).
+      }
+      // Fall through for namehash-form ids, which some consumers pass and
+      // zigens' domain(id:) resolves directly.
+      nameHash = hexId;
     } else {
       throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }

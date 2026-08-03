@@ -1,6 +1,29 @@
 import { GraphQLClient } from "graphql-request";
-import { namehash } from "../utils/ens";
+import { canonicalTokenId, namehash } from "../utils/ens";
 import { UpstreamError } from "./errors";
+
+// How long to remember that the indexer schema rejected a tokenId/canonicalId
+// filter before probing again (the filter ships server-side; once its deploy
+// lands, isolates pick it up within this window without a redeploy here).
+const ID_FILTER_RECHECK_MS = 10 * 60 * 1000;
+
+/** True when the wrapped GraphQL failure is the schema rejecting the query
+ *  (filter not deployed yet) rather than an outage. zigens returns
+ *  `extensions.code: "VALIDATION_ERROR"` with a message that does NOT name the
+ *  offending field ("Unknown field in input object: …" — verified live), so
+ *  match the code plus the standard unknown-field/argument message family. The
+ *  only queries routed through this check are the fixed id-filter lookups, so a
+ *  validation error can only mean the filter is missing from the schema. */
+function isSchemaValidationError(error: UpstreamError): boolean {
+  const cause = (error as { cause?: unknown }).cause as
+    | { response?: { errors?: Array<{ message?: string; extensions?: { code?: string } }> } }
+    | undefined;
+  return (cause?.response?.errors ?? []).some(
+    (e) =>
+      e.extensions?.code === "VALIDATION_ERROR" ||
+      /unknown (field|argument)|not defined|does not exist|cannot query/i.test(e.message ?? ""),
+  );
+}
 
 // ---- v1 subgraph queries (mainnet — id = namehash) ----
 
@@ -166,6 +189,41 @@ const V2_GET_DOMAINS = `
     }
   }
 `;
+
+// Reverse lookup for native v2 ETHRegistry tokenIds (versioned labelhashes are
+// irreversible from the hash alone — only the indexer, which sees registration
+// events, can map them back to a name). `tokenId` matches the current version's
+// exact id; `canonicalId` matches the version-bits-zeroed form, so stale
+// (pre-re-registration) tokenIds still resolve to the name.
+const v2GetDomainsByIdFilter = (filterField: 'tokenId' | 'canonicalId') => `
+  query GetDomainsBy_${filterField}($id: String!) {
+    domains(first: 1, where: { ${filterField}: $id }) {
+      id
+      name
+      labelName
+      labelhash
+      expiryDate
+      createdAt
+      ttl
+      isMigrated
+      protocol
+      tokenId
+      tokenVersion
+      owner {
+        id
+      }
+      resolver {
+        address
+      }
+      registrant {
+        id
+      }
+    }
+  }
+`;
+
+const V2_GET_DOMAINS_BY_TOKEN_ID = v2GetDomainsByIdFilter('tokenId');
+const V2_GET_DOMAINS_BY_CANONICAL_ID = v2GetDomainsByIdFilter('canonicalId');
 
 const V2_GET_MIGRATION_STATUS = `
   query GetMigrationStatus($id: String!) {
@@ -398,6 +456,66 @@ export class IndexerService {
     }>(query, { name: nameHash });
 
     return { domain: data.domain, usedFallback };
+  }
+
+  // Reverse-resolve a native v2 ETHRegistry tokenId (versioned labelhash) to a
+  // domain via the zigens tokenId/canonicalId filters. v2 dialect only — the v1
+  // subgraph has no such tokens. Returns a clean null when the deployed schema
+  // doesn't have the filters yet (they ship separately, on the indexer side), so
+  // callers keep their pre-filter behavior until the server deploy lands.
+  async getDomainByTokenId(
+    tokenId: `0x${string}`,
+  ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
+    if (this.apiVersion !== 'v2') return { domain: null, usedFallback: false };
+    const id = tokenId.toLowerCase();
+
+    // Exact current-version id first (the common marketplace case) …
+    const byToken = await this.queryDomainsByIdFilter('tokenId', id, V2_GET_DOMAINS_BY_TOKEN_ID);
+    if (byToken.domain) return byToken;
+
+    // … then the version-bits-zeroed form, which also matches ids from before a
+    // re-registration bumped the token version.
+    const byCanonical = await this.queryDomainsByIdFilter(
+      'canonicalId',
+      canonicalTokenId(id),
+      V2_GET_DOMAINS_BY_CANONICAL_ID,
+    );
+    return {
+      domain: byCanonical.domain,
+      usedFallback: byToken.usedFallback || byCanonical.usedFallback,
+    };
+  }
+
+  /** One `domains(where: { <field>: $id })` lookup. A schema-rejects-the-filter
+   *  error is remembered (per filter, ID_FILTER_RECHECK_MS) and surfaces as a
+   *  clean miss; genuine outages still throw UpstreamError. */
+  private idFilterUnsupportedUntil: Record<'tokenId' | 'canonicalId', number> = {
+    tokenId: 0,
+    canonicalId: 0,
+  };
+
+  private async queryDomainsByIdFilter(
+    field: 'tokenId' | 'canonicalId',
+    id: string,
+    query: string,
+  ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
+    if (Date.now() < this.idFilterUnsupportedUntil[field]) {
+      return { domain: null, usedFallback: false };
+    }
+    try {
+      const { data, usedFallback } = await this.executeQuery<{ domains: IndexerDomain[] }>(
+        query,
+        { id },
+      );
+      return { domain: data.domains[0] ?? null, usedFallback };
+    } catch (error) {
+      if (error instanceof UpstreamError && isSchemaValidationError(error)) {
+        this.idFilterUnsupportedUntil[field] = Date.now() + ID_FILTER_RECHECK_MS;
+        console.warn(`[indexer] ${field} filter not in deployed schema yet, treating as miss:`, error.message);
+        return { domain: null, usedFallback: false };
+      }
+      throw error;
+    }
   }
 
   // Get multiple domains in batch
