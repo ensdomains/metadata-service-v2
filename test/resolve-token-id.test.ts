@@ -217,7 +217,7 @@ describe('MetadataService.resolveTokenId', () => {
 
   describe('v2 ETHRegistry (sepolia)', () => {
     // The configured last-known live registry (config/networks.ts sepolia.v2.ethRegistry)
-    const V2_ETH_REGISTRY = '0xdedb92913a25abe1f7bcdd85d8a344a43b398b67';
+    const V2_ETH_REGISTRY = '0xbdc85dd5b15d7ecb354cd7cb6f2c50b4f2c4f0e2';
 
     it('recognizes the v2 ETHRegistry address and resolves a namehash-form tokenId', async () => {
       // Some consumers pass namehash-form ids; zigens domain(id:) resolves those.
