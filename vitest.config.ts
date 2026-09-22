@@ -6,7 +6,7 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["test/**/*.test.ts", "src/**/*.test.ts"],
-    exclude: ["refproject/**", "node_modules/**", ".yarn/**"],
+    exclude: ["refproject/**", "node_modules/**"],
   },
   resolve: {
     alias: {

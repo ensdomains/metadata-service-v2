@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - run: yarn lint
+      - run: pnpm lint
 
   typecheck:
     name: Typecheck
@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - run: yarn typecheck
+      - run: pnpm typecheck
 
   test:
     name: Test (Node ${{ matrix.node-version }})
@@ -49,10 +49,10 @@ jobs:
       # NOTE: coverage is intentionally NOT run here — the pinned
       # @vitest/coverage-v8 (v3) does not match vitest (v2) and crashes under
       # `--coverage`. To re-enable: align @vitest/coverage-v8 to ^2.1.x in
-      # package.json, run `yarn install`, then add `--coverage` back plus an
+      # package.json, run `pnpm install`, then add `--coverage` back plus an
       # actions/upload-artifact step for `coverage/`.
       - name: Run tests
-        run: yarn vitest run
+        run: pnpm vitest run
 
   build:
     name: Build (bundle dry-run)
@@ -64,4 +64,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
       - name: Type-check and bundle the Worker (no deploy)
-        run: yarn build
+        run: pnpm build

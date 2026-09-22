@@ -25,24 +25,24 @@ Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and 
 
 ```bash
 # Install dependencies
-yarn install
+pnpm install
 
 # Start development server (also sets up local R2 and applies pending D1
-# migrations first — the `predev` step)
-yarn dev
+# migrations first — the `setup:local` step)
+pnpm dev
 
 # Apply D1 migrations manually
-yarn db:migrate:local
-yarn db:migrate:remote
+pnpm db:migrate:local
+pnpm db:migrate:remote
 
 # Run tests
-yarn test
+pnpm test
 
 # Type checking
-yarn typecheck
+pnpm typecheck
 
 # Linting
-yarn lint
+pnpm lint
 ```
 
 ## Deployment
@@ -54,10 +54,10 @@ wrangler secret put SEPOLIA_RPC_URL
 wrangler secret put WEBHOOK_SECRET
 
 # Apply D1 migrations to the remote database (once per new migration)
-yarn db:migrate:remote
+pnpm db:migrate:remote
 
 # Deploy to Cloudflare Workers
-yarn deploy
+pnpm run deploy
 ```
 
 Non-secret production vars (indexer URLs, fallback RPCs, `LOG_LEVEL`,

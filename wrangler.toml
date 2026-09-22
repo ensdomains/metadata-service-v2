@@ -22,7 +22,7 @@ type = "Data"
 globs = ["**/*.br"]
 fallthrough = true
 
-# NOTE: `yarn deploy` runs `wrangler deploy` with NO --env, so the DEFAULT
+# NOTE: `pnpm run deploy` runs `wrangler deploy` with NO --env, so the DEFAULT
 # (top-level) worker below IS production. Named environments are intentionally
 # omitted: wrangler does not inherit top-level bindings into `[env.*]`, so a
 # `--env production` deploy would ship a worker with no KV/R2/D1. Configure
