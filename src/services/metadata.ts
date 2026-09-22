@@ -574,7 +574,7 @@ export class MetadataService {
             );
 
             const fallbackResponse: MigrationStatusResponse = {
-              name: d1Record.name,
+              name,
               status: d1Record.status,
               owner: d1Record.owner ?? undefined,
               expirationDate: d1Record.expiration_date ?? undefined,

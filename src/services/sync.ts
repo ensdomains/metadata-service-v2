@@ -1,7 +1,7 @@
 // Sync service for storing ensnode data in D1 for fast local queries
 import { D1Service } from './d1';
 import { IndexerService, type IndexerDomain } from './indexer';
-import { validateEnsName } from '../utils/ens';
+import { validateEnsName, canonicalizeName } from '../utils/ens';
 import { MIGRATION_STATUS } from '../types';
 import { classifyV2IndexerRecord } from '../utils/migration';
 
@@ -114,7 +114,7 @@ export class SyncService {
         const existingMap = new Map(existing.map(d => [d.name, d]));
 
         namesToSync = validNames.filter(name => {
-          const record = existingMap.get(name);
+          const record = existingMap.get(canonicalizeName(name));
           return !record || (Date.now() - record.last_updated) >= this.config.staleThreshold;
         });
       }

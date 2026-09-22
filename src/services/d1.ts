@@ -4,7 +4,12 @@
 // worker serves both mainnet and sepolia and namehash collides across networks,
 // so all reads/writes filter by `network` to keep the two from overwriting each
 // other. See migrations/001_initial_schema.sql.
-import { namehash } from '../utils/ens';
+//
+// Every name-keyed read and write canonicalizes the name (NFC + lowercase) at
+// this boundary. Rows arrive lowercase from the indexer and canonicalized from
+// the webhook, while request names may be mixed-case — without this a `Fox.eth`
+// request never found its own `fox.eth` row.
+import { namehash, labelhash, canonicalizeName } from '../utils/ens';
 import type { IndexerDomain } from './indexer';
 import type { MigrationStatus } from '../types';
 import type { NetworkName } from '../config/networks';
@@ -68,12 +73,13 @@ export class D1Service {
 
   // Domain operations
   async storeDomain(domain: IndexerDomain, dataSource: 'ensnode' | 'blockchain' = 'ensnode'): Promise<void> {
+    const canonicalName = canonicalizeName(domain.name);
     const record: Omit<D1DomainRecord, 'sync_version'> = {
       network: this.network,
-      id: namehash(domain.name),
-      name: domain.name,
-      label_name: domain.labelName || domain.name.split('.')[0],
-      labelhash: domain.labelhash || namehash(domain.name.split('.')[0]),
+      id: namehash(canonicalName),
+      name: canonicalName,
+      label_name: domain.labelName || canonicalName.split('.')[0],
+      labelhash: domain.labelhash || labelhash(canonicalName.split('.')[0]),
       parent_id: domain.parentId || null,
       owner_id: domain.ownerId || null,
       resolver_id: domain.resolverId || null,
@@ -107,7 +113,7 @@ export class D1Service {
 
   async getDomain(name: string): Promise<D1DomainRecord | null> {
     const stmt = this.db.prepare('SELECT * FROM domains WHERE network = ?1 AND name = ?2');
-    const result = await stmt.bind(this.network, name).first<D1DomainRecord>();
+    const result = await stmt.bind(this.network, canonicalizeName(name)).first<D1DomainRecord>();
 
     if (result) {
       result.is_migrated = Boolean(result.is_migrated);
@@ -133,10 +139,11 @@ export class D1Service {
     expirationDate?: string;
     migrationDate?: string;
   }): Promise<void> {
+    const canonical = canonicalizeName(name);
     const record: Omit<D1MigrationRecord, 'sync_version'> = {
       network: this.network,
-      id: namehash(name),
-      name,
+      id: namehash(canonical),
+      name: canonical,
       status,
       owner: data.owner || null,
       expiration_date: data.expirationDate || null,
@@ -169,7 +176,7 @@ export class D1Service {
 
   async getMigrationStatus(name: string): Promise<D1MigrationRecord | null> {
     const stmt = this.db.prepare('SELECT * FROM migration_status WHERE network = ?1 AND name = ?2');
-    return await stmt.bind(this.network, name).first<D1MigrationRecord>();
+    return await stmt.bind(this.network, canonicalizeName(name)).first<D1MigrationRecord>();
   }
 
   // Registry hierarchy operations
@@ -179,7 +186,7 @@ export class D1Service {
     resolver: string;
     level: number;
   }>): Promise<void> {
-    const rootDomainId = namehash(name);
+    const rootDomainId = namehash(canonicalizeName(name));
 
     // Clear existing hierarchy for this domain
     await this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2')
@@ -189,12 +196,12 @@ export class D1Service {
     for (const level of hierarchy) {
       const record: Omit<D1HierarchyRecord, 'sync_version'> = {
         network: this.network,
-        id: namehash(level.name),
-        name: level.name,
+        id: namehash(canonicalizeName(level.name)),
+        name: canonicalizeName(level.name),
         owner: level.owner,
         resolver: level.resolver,
         level: level.level,
-        parent_id: level.level > 1 ? namehash(hierarchy.find(h => h.level === level.level - 1)?.name || '') : null,
+        parent_id: level.level > 1 ? namehash(canonicalizeName(hierarchy.find(h => h.level === level.level - 1)?.name || '')) : null,
         root_domain_id: rootDomainId,
         last_updated: Date.now(),
       };
@@ -217,7 +224,7 @@ export class D1Service {
   }
 
   async getHierarchy(name: string): Promise<D1HierarchyRecord[]> {
-    const rootDomainId = namehash(name);
+    const rootDomainId = namehash(canonicalizeName(name));
     const stmt = this.db.prepare(`
       SELECT * FROM registry_hierarchy
       WHERE network = ?1 AND root_domain_id = ?2
@@ -248,7 +255,7 @@ export class D1Service {
 
     const placeholders = names.map((_, i) => `?${i + 2}`).join(', ');
     const stmt = this.db.prepare(`SELECT * FROM domains WHERE network = ?1 AND name IN (${placeholders})`);
-    const result = await stmt.bind(this.network, ...names).all<D1DomainRecord>();
+    const result = await stmt.bind(this.network, ...names.map(canonicalizeName)).all<D1DomainRecord>();
 
     return (result.results || []).map(record => ({
       ...record,
