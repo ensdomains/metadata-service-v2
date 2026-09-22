@@ -15,7 +15,7 @@ import type {
 } from "../types/api";
 import { MIGRATION_STATUS, type NetworkName, type MigrationStatus, isMigrationStatus } from "../types";
 import { classifyMigrationStatus, classifyV2IndexerRecord, isOnV2 } from "../utils/migration";
-import { NotFoundError, UpstreamError } from "./errors";
+import { NotFoundError, UpstreamError, InvalidNameError } from "./errors";
 import {
   validateEnsName,
   getLabel,
@@ -184,7 +184,7 @@ export class MetadataService {
   ): Promise<MetadataResponse> {
     // Validate identifier as ENS name
     if (!validateEnsName(identifier)) {
-      throw new Error("Invalid ENS name format");
+      throw new InvalidNameError();
     }
 
     try {
@@ -378,7 +378,7 @@ export class MetadataService {
     opts?: { strict?: boolean },
   ): Promise<MigrationStatus> {
     if (!validateEnsName(name)) {
-      throw new Error('Invalid ENS name format');
+      throw new InvalidNameError();
     }
     // Throws NotFoundError when nothing can resolve the name.
     const { data, source, v2Consulted } = await this.fallback.getDomainMetadata(name);
@@ -545,7 +545,7 @@ export class MetadataService {
   // Get migration status (CF cache handles API response caching)
   async getMigrationStatus(name: string): Promise<MigrationStatusResponse> {
     if (!validateEnsName(name)) {
-      throw new Error("Invalid ENS name format");
+      throw new InvalidNameError();
     }
 
     try {
@@ -623,7 +623,7 @@ export class MetadataService {
   // Get registry hierarchy
   async getRegistryHierarchy(name: string): Promise<RegistryHierarchyResponse> {
     if (!validateEnsName(name)) {
-      throw new Error("Invalid ENS name format");
+      throw new InvalidNameError();
     }
 
     const cacheKey = CacheKeys.hierarchy(name, this.network);

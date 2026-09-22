@@ -30,3 +30,19 @@ export function isNotFoundError(e: unknown): e is NotFoundError {
 export function isUpstreamError(e: unknown): e is UpstreamError {
   return e instanceof UpstreamError;
 }
+
+/**
+ * The request named something that is not a well-formed ENS name. A client
+ * error (→ 400), never a 5xx: without this type the service-level validation
+ * threw a plain Error, which the route mapper flattened to a generic 500.
+ */
+export class InvalidNameError extends Error {
+  constructor(message = 'Invalid ENS name format') {
+    super(message);
+    this.name = 'InvalidNameError';
+  }
+}
+
+export function isInvalidNameError(e: unknown): e is InvalidNameError {
+  return e instanceof InvalidNameError;
+}

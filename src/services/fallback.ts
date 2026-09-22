@@ -4,7 +4,7 @@ import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService } from './resolver';
 import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
 import { type NetworkName } from '../types';
-import { NotFoundError, UpstreamError } from './errors';
+import { NotFoundError, UpstreamError, InvalidNameError } from './errors';
 
 export interface FallbackConfig {
   maxRetries: number;
@@ -205,7 +205,7 @@ export class FallbackService {
   // Domain metadata fallback
   async getDomainMetadata(name: string) {
     if (!validateEnsName(name)) {
-      throw new Error('Invalid ENS name format');
+      throw new InvalidNameError();
     }
 
     return this.executeWithFallback<IndexerDomain>(
@@ -272,7 +272,7 @@ export class FallbackService {
   // Migration status fallback
   async getMigrationStatus(name: string) {
     if (!validateEnsName(name)) {
-      throw new Error('Invalid ENS name format');
+      throw new InvalidNameError();
     }
 
     return this.executeWithFallback<IndexerMigrationStatus>(
@@ -320,7 +320,7 @@ export class FallbackService {
   // Registry hierarchy fallback
   async getRegistryHierarchy(name: string) {
     if (!validateEnsName(name)) {
-      throw new Error('Invalid ENS name format');
+      throw new InvalidNameError();
     }
 
     return this.executeWithFallback(

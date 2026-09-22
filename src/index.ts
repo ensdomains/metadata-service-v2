@@ -13,7 +13,7 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
-import { canonicalizeName } from "./utils/ens";
+import { canonicalizeName, validateEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
@@ -29,7 +29,7 @@ import type {
   ErrorResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
-import { NotFoundError, UpstreamError } from "./services/errors";
+import { NotFoundError, UpstreamError, InvalidNameError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
@@ -110,6 +110,9 @@ function httpError(c: any, error: unknown, fallbackMessage: string): Response {
   const timestamp = new Date().toISOString();
   if (error instanceof DomainExpiredError) {
     return c.json({ message: error.message, timestamp }, 410 as any);
+  }
+  if (error instanceof InvalidNameError) {
+    return c.json({ error: 'Invalid ENS name format', timestamp }, 400);
   }
   if (error instanceof NotFoundError) {
     return c.json({ error: 'Not found', timestamp }, 404);
@@ -494,8 +497,8 @@ app.get(
 
       // v2 route: param2 is registryType
       if (param2 === 'registry' || param2 === 'namewrapper') {
-        if (!param3 || param3.trim().length === 0) {
-          return c.json({ error: "Identifier cannot be empty", timestamp: new Date().toISOString() }, 400);
+        if (!validateEnsName(param3)) {
+          return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
         }
         return await handleMetadata(c, network, param2, param3);
       }
@@ -774,6 +777,9 @@ app.get(
         name = resolved.name;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
         // v2: param3 is the ENS name
+        if (!validateEnsName(param3)) {
+          return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
+        }
         name = param3;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
@@ -813,6 +819,9 @@ app.get(
         );
         name = resolved.name;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
+        if (!validateEnsName(param3)) {
+          return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
+        }
         name = param3;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
