@@ -1,6 +1,7 @@
 import { AvatarResolver } from '@ensdomains/ens-avatar';
 import { fromViem } from '@ensdomains/ens-avatar/viem';
 import { createPublicClient, http, isAddress, type Chain } from 'viem';
+import { fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
 import { normalize } from '../utils/ens';
 import { toSafeImage } from './media-safety';
 
@@ -39,6 +40,11 @@ export interface AvatarMetadata {
 // Hard cap on ENS media resolution (RPC + any NFT-metadata/CCIP fetch). Keeps a
 // slow RPC from stalling an image request until the 30s global timeout.
 const MEDIA_RESOLVE_TIMEOUT_MS = 8_000;
+
+// Per-request timeout for the ens-avatar resolver's own HTTP fetches (metadata
+// JSON, HEAD checks). Kept under MEDIA_RESOLVE_TIMEOUT_MS; the library default
+// is 30s, which outlived the race above and matched the whole request budget.
+const RESOLVER_FETCH_TIMEOUT_MS = 7_000;
 
 // Default max media image size (overridable via the MAX_AVATAR_BYTES env var).
 // A user-controlled URL is fetched and (for avatars) base64-embedded into the
@@ -91,11 +97,17 @@ export class AvatarService {
     // lookups through it. `{ strict: false }` accepts lowercase config addresses;
     // an unset/placeholder value falls back to viem's default resolver.
     const v2UR = isAddress(universalResolver ?? '', { strict: false }) ? universalResolver : undefined;
-    this.resolver = new AvatarResolver(fromViem(client, v2UR ? { universalResolverAddress: v2UR } : undefined));
+    // Never let a record resolve to this service itself (anti-recursion); the
+    // library's private-address checks stay on (allowPrivateIPs defaults false).
+    const resolverOptions = { urlDenyList: resolverDenyList(), timeout: RESOLVER_FETCH_TIMEOUT_MS };
+    this.resolver = new AvatarResolver(
+      fromViem(client, v2UR ? { universalResolverAddress: v2UR } : undefined),
+      resolverOptions,
+    );
     // With a v2 resolver in front, keep a default-resolver fallback for v1/migrated
     // names the v2 resolver doesn't return. (No fallback when there's no override —
     // the primary already IS the default resolver.)
-    this.legacyResolver = v2UR ? new AvatarResolver(fromViem(client)) : undefined;
+    this.legacyResolver = v2UR ? new AvatarResolver(fromViem(client), resolverOptions) : undefined;
   }
 
   /**
@@ -289,7 +301,9 @@ export class AvatarService {
 
     // Handle HTTP/HTTPS URLs (ens-avatar resolves IPFS and NFTs to HTTP URLs)
     if (uri.startsWith('http')) {
-      const response = await fetch(uri, {
+      // Validates the URL and every redirect hop (scheme, private hosts, this
+      // service's own hostnames); a blocked URL throws and degrades to "none".
+      const response = await fetchMediaUrl(uri, {
         signal: AbortSignal.timeout(7000),
         headers: {
           'user-agent': 'ENS-Metadata-V2/1.0.0',
@@ -310,7 +324,7 @@ export class AvatarService {
         return null;
       }
 
-      const arrayBuffer = await response.arrayBuffer();
+      const arrayBuffer = await readBodyCapped(response, this.maxAvatarBytes);
       if (arrayBuffer.byteLength > this.maxAvatarBytes) {
         console.warn(`${kind} for ${name} too large (${arrayBuffer.byteLength} bytes)`);
         return null;
