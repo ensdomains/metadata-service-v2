@@ -24,6 +24,7 @@ import { StorageManager } from "./utils/storage";
 import { RasterizeService } from "./services/rasterize";
 const rasterizeService = new RasterizeService();
 import { CachePresets } from "./utils/cache-headers";
+import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
   ErrorResponse,
@@ -227,6 +228,15 @@ function getServices(env: Env, network: NetworkName): FullServices {
   _fullServices.set(network, services);
   return services;
 }
+
+// Secret env values (RPC URLs carry provider keys) must never reach Workers
+// Logs; viem copies request URLs into its errors. Wrap the console once, and
+// register this request's secrets before anything can log.
+installConsoleRedaction();
+app.use("*", async (c, next) => {
+  registerLogSecrets([c.env?.MAINNET_RPC_URL, c.env?.SEPOLIA_RPC_URL, c.env?.WEBHOOK_SECRET]);
+  await next();
+});
 
 // Middleware
 app.use(trimTrailingSlash());
