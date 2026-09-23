@@ -4,6 +4,11 @@ import { MIGRATION_STATUS, type MigrationStatus } from "../types";
 import { getCharacterSet } from "../utils/ens";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
+import { isSafeImageType } from "./media-safety";
+
+// Standard base64 alphabet only. The avatar payload is interpolated into an SVG
+// attribute, so anything else must never reach the markup.
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 // Escape user-controlled text before it is interpolated into SVG markup. The
 // layout composer inlines `text` into `<text>...</text>` without escaping, so a
@@ -78,8 +83,16 @@ export class ImageGenerationService {
     const colors = this.getColorScheme(migrationStatus, characterSet);
 
     try {
-      // Create data URI for avatar if available
-      const backgroundImageUrl = avatarBase64
+      // The avatar becomes `<image href="data:{type};base64,{payload}">`, and the
+      // layout composer does not escape that attribute. Embed it only when the
+      // type is on the closed image allowlist and the payload is plain base64,
+      // whatever the caller passed (e.g. a type read back from an older cache).
+      const embedAvatar =
+        !!avatarBase64 && isSafeImageType(avatarMimeType) && BASE64_RE.test(avatarBase64);
+      if (avatarBase64 && !embedAvatar) {
+        console.warn(`[image] not embedding avatar for ${name}: unsafe type ${JSON.stringify(avatarMimeType)}`);
+      }
+      const backgroundImageUrl = embedAvatar
         ? `data:${avatarMimeType};base64,${avatarBase64}`
         : null;
 
@@ -100,7 +113,7 @@ export class ImageGenerationService {
         fontFamily: 'Satoshi',
         fontBase64: satoshiFontBase64,
         textColor: colors.text,
-        backgroundColor: avatarBase64 ? 'transparent' : colors.background,
+        backgroundColor: embedAvatar ? 'transparent' : colors.background,
         backgroundImageUrl,
         customElements: [
           this.generateStatusBadge(migrationStatus, colors, size.width, characterSet !== "letter" && characterSet !== "digit" && characterSet !== "alphanumeric"),

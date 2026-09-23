@@ -2,6 +2,7 @@
 import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type NetworkName } from '../types';
 import { canonicalizeName } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
+import { toSafeImage } from './media-safety';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';
 import type { AvatarService } from './avatar';
 
@@ -21,16 +22,6 @@ export interface ImageCacheResult {
   ttlConfig: TtlConfig;
 }
 
-// Convert ArrayBuffer to base64 string
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
 // Compute SHA-256 hex digest of an ArrayBuffer
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
@@ -42,10 +33,15 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // `name` stays first so the per-name invalidation prefix (`svg:${name}:`) still
 // matches across both networks. `network` prevents mainnet/sepolia collisions —
 // the same name renders differently per network (avatar, migration status).
+// Bump when cards rendered by older code must never be served again. v2: cards
+// rendered before the avatar type allowlist could carry markup injected through
+// the avatar's MIME type (WEB-1549).
+const CARD_CACHE_VERSION = 'v2';
+
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
   // prefix (`svg:${name}:`) still matches across both networks.
-  return `svg:${canonicalizeName(name)}:${network}:${params.migrationStatus}:${params.width}:${params.height}`;
+  return `svg:${canonicalizeName(name)}:${network}:${params.migrationStatus}:${params.width}:${params.height}:${CARD_CACHE_VERSION}`;
 }
 
 export class ImageCacheService {
@@ -199,9 +195,14 @@ export class ImageCacheService {
     if (!avatarBase64) {
       try {
         const r2Avatar = await this.storage.getAvatar(avatarKey);
-        if (r2Avatar) {
-          avatarBase64 = arrayBufferToBase64(r2Avatar.data);
-          avatarMimeType = r2Avatar.contentType;
+        // Re-classify the cached bytes instead of trusting the stored type:
+        // objects written before the image allowlist carry whatever type the
+        // remote server claimed. A rejected object falls through to a fresh
+        // resolve below, which overwrites it.
+        const safe = r2Avatar ? toSafeImage(new Uint8Array(r2Avatar.data)) : null;
+        if (r2Avatar && safe) {
+          avatarBase64 = safe.buffer.toString('base64');
+          avatarMimeType = safe.mimeType;
           avatarHash = await sha256Hex(r2Avatar.data);
         }
       } catch (err) {

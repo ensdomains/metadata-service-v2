@@ -23,6 +23,7 @@ import { ImageCacheService } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
 import { RasterizeService } from "./services/rasterize";
+import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
 import { CachePresets } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
@@ -338,6 +339,7 @@ app.get(
       return new Response(new Uint8Array(avatar.buffer), {
         status: 200,
         headers: {
+          ...MEDIA_SECURITY_HEADERS,
           'Content-Type': avatar.mimeType,
           'Content-Length': avatar.buffer.length.toString(),
           'Cache-Control': 'public, max-age=3600',
@@ -410,6 +412,7 @@ app.get(
       return new Response(new Uint8Array(header.buffer), {
         status: 200,
         headers: {
+          ...MEDIA_SECURITY_HEADERS,
           'Content-Type': header.mimeType,
           'Content-Length': header.buffer.length.toString(),
           'Cache-Control': 'public, max-age=3600',
@@ -499,6 +502,7 @@ async function handleImage(c: any, network: NetworkName, name: string) {
   const response = new Response(result.svg, {
     status: 200,
     headers: {
+      ...MEDIA_SECURITY_HEADERS,
       'Content-Type': result.contentType,
       'X-Cache-Status': cacheStatus,
       'Cache-Control': `public, max-age=${ttlConfig.softTtl}, stale-while-revalidate=${ttlConfig.hardTtl - ttlConfig.softTtl}`,
@@ -1043,6 +1047,7 @@ app.get(
       const pngResponse = new Response(png.buffer as ArrayBuffer, {
         status: 200,
         headers: {
+          ...MEDIA_SECURITY_HEADERS,
           'Content-Type': 'image/png',
           'Content-Length': png.byteLength.toString(),
           'X-Cache-Status': result.cacheStatus,

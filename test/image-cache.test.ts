@@ -146,7 +146,8 @@ describe('ImageCacheService', () => {
       vi.mocked(r2Bucket.get)
         .mockResolvedValueOnce(null) // SVG miss
         .mockResolvedValueOnce({
-          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+          // A real PNG signature: cached avatars are re-classified by their bytes.
+          arrayBuffer: vi.fn().mockResolvedValue(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).buffer),
           text: vi.fn(),
           body: null,
           bodyUsed: false,
@@ -309,13 +310,13 @@ describe('ImageCacheService', () => {
   });
 
   describe('R2 avatar with content type', () => {
-    it('should use stored content type from R2 avatar metadata', async () => {
+    it('should use an R2 avatar with a stored content type (type re-derived from its bytes)', async () => {
       (svgCacheKv.get as Mock).mockResolvedValue(null);
       // SVG miss, then avatar hit with JPEG content type
       vi.mocked(r2Bucket.get)
         .mockResolvedValueOnce(null) // SVG key miss
         .mockResolvedValueOnce({     // avatar hit
-          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+          arrayBuffer: vi.fn().mockResolvedValue(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46]).buffer),
           httpMetadata: { contentType: 'image/jpeg' },
           text: vi.fn(),
           body: null,
