@@ -1,8 +1,8 @@
 import { AvatarResolver } from '@ensdomains/ens-avatar';
 import { fromViem } from '@ensdomains/ens-avatar/viem';
-import { createPublicClient, http, isAddress, type Chain } from 'viem';
+import { createPublicClient, isAddress, type Chain } from 'viem';
 import { createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
-import { guardedCcipRequest } from './ccip-request';
+import { ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
 import { normalize } from '../utils/ens';
 import { toSafeImage } from './media-safety';
 
@@ -90,8 +90,9 @@ export class AvatarService {
     // (the image still renders without the avatar).
     const client = createPublicClient({
       chain,
-      transport: http(rpcUrl, { timeout: 6_000, retryCount: 1 }),
-      // CCIP-read gateway URLs come from contracts anyone can deploy.
+      transport: ccipBudgetedHttp(rpcUrl, { timeout: 6_000, retryCount: 1 }),
+      // CCIP-read gateway URLs come from contracts anyone can deploy, and the
+      // transport bounds how many lookups they can chain (ccip-request.ts).
       ccipRead: { request: guardedCcipRequest },
     });
 

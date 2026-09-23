@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createPublicClient, encodeErrorResult, encodeFunctionData, http, parseAbi } from 'viem';
+import { createPublicClient, decodeFunctionData, encodeAbiParameters, encodeErrorResult, encodeFunctionData, http, parseAbi } from 'viem';
 import { mainnet } from 'viem/chains';
 import { createMockEnv } from './mocks/hono-env';
-import { guardedCcipRequest, MAX_CCIP_RESPONSE_BYTES } from '../src/services/ccip-request';
-import { withRequestBudget, MAX_CCIP_BYTES_PER_REQUEST } from '../src/services/request-budget';
+import { ccipBudgetedHttp, guardedCcipRequest, MAX_CCIP_RESPONSE_BYTES } from '../src/services/ccip-request';
+import {
+  withRequestBudget,
+  MAX_CCIP_BYTES_PER_REQUEST,
+  MAX_CCIP_REQUESTS_PER_REQUEST,
+  MAX_OFFCHAIN_LOOKUPS_PER_REQUEST,
+} from '../src/services/request-budget';
 
 vi.mock('../src/services/rasterize', () => ({
   RasterizeService: class {
@@ -78,6 +83,9 @@ function stubNetwork(rpcPrefix: string, revert: string) {
 // concurrent reader: the chunk that was refused, plus one the stream had already
 // queued ahead of the reader (both are discarded when the read is cancelled).
 const bound = (lookups: number) => MAX_CCIP_BYTES_PER_REQUEST + lookups * N * 2 * CHUNK;
+// Once the turns are spent, each further call site in a route costs the one
+// eth_call whose revert is refused (measured: 2 on /avatar).
+const ROUTE_CALL_SITES = 4;
 
 describe('CCIP batch-gateway fan-out', () => {
   const RESOLVER = '0x2222222222222222222222222222222222222222' as const;
@@ -110,6 +118,146 @@ describe('CCIP batch-gateway fan-out', () => {
     // Avatar resolution may run a few lookups, all inside the same request.
     expect(counter.pulled).toBeLessThanOrEqual(bound(4));
     expect(counter.pulled).toBeLessThan((counter.gatewayRequests) * RESPONSE_BYTES);
+  }, 120_000);
+});
+
+// viem follows OffchainLookup recursively with no depth limit: the callback
+// reverts with a new OffchainLookup, viem calls the gateway and then the
+// contract again, and so on. A turn costs one RPC eth_call plus a gateway fetch
+// of a few bytes, or no fetch at all when the lookup goes to the local batch
+// gateway with no queries (or with a query that lists no URLs), which neither
+// the byte allowance nor guardedCcipRequest ever sees. The stub fails every
+// fetch past SUBREQUEST_LIMIT, as the Workers runtime does, so an unbounded loop
+// terminates.
+describe('recursive OffchainLookup', () => {
+  const SUBREQUEST_LIMIT = 1000;
+  const LOOPING = '0x3333333333333333333333333333333333333333' as const;
+  const OTHER = '0x4444444444444444444444444444444444444444' as const;
+  const WORD = `0x${'00'.repeat(31)}2a` as const;
+  type Shape = 'gateway' | 'empty-batch' | 'empty-urls';
+  type EthCall = { to: string; data: string };
+
+  function lookupRevert(sender: `0x${string}`, shape: Shape) {
+    if (shape === 'gateway') {
+      return encodeErrorResult({ abi: offchainLookup, errorName: 'OffchainLookup', args: [sender, ['https://gw.example/{data}'], '0x01', '0x12345678', '0x'] });
+    }
+    const queries = shape === 'empty-batch' ? [] : [{ sender, urls: [] as string[], data: '0x01' as `0x${string}` }];
+    return encodeErrorResult({
+      abi: offchainLookup,
+      errorName: 'OffchainLookup',
+      args: [sender, ['x-batch-gateway:true'], encodeFunctionData({ abi: batchAbi, functionName: 'query', args: [queries] }), '0x12345678', '0x'],
+    });
+  }
+
+  const reverting = (data: string) => ({ error: { code: 3, message: 'execution reverted', data } });
+
+  // `reply` answers each eth_call; every gateway returns a few bytes.
+  function stubNetworkCalls(rpcPrefix: string, reply: (call: EthCall) => object) {
+    const counter = { gatewayRequests: 0, ethCalls: 0 };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (counter.gatewayRequests + counter.ethCalls >= SUBREQUEST_LIMIT) throw new Error('Too many subrequests.');
+      if (url.startsWith(rpcPrefix)) {
+        const body = JSON.parse(String(init?.body));
+        const one = (b: { id: number; method: string; params: [EthCall] }) => {
+          if (b.method !== 'eth_call') return { jsonrpc: '2.0', id: b.id, result: '0x1' };
+          counter.ethCalls++;
+          return { jsonrpc: '2.0', id: b.id, ...reply(b.params[0]) };
+        };
+        return new Response(JSON.stringify(Array.isArray(body) ? body.map(one) : one(body)), { headers: { 'content-type': 'application/json' } });
+      }
+      counter.gatewayRequests++;
+      return new Response('0x01', { headers: { 'content-type': 'text/plain' } });
+    }));
+    return counter;
+  }
+
+  const client = () =>
+    createPublicClient({ chain: mainnet, transport: ccipBudgetedHttp('https://rpc.example', { retryCount: 0 }), ccipRead: { request: guardedCcipRequest } });
+
+  for (const shape of ['gateway', 'empty-batch', 'empty-urls'] as const) {
+    it(`${shape}: control, without a request scope one call loops until the subrequest limit`, async () => {
+      const counter = stubNetworkCalls('https://rpc.example', () => reverting(lookupRevert(LOOPING, shape)));
+      await client().call({ to: LOOPING, data: '0xdeadbeef' }).catch(() => {});
+      expect(counter.gatewayRequests + counter.ethCalls).toBe(SUBREQUEST_LIMIT);
+    }, 120_000);
+
+    it(`${shape}: inside one request the lookup ends after the turn budget`, async () => {
+      const counter = stubNetworkCalls('https://rpc.example', () => reverting(lookupRevert(LOOPING, shape)));
+      await expect(withRequestBudget(() => client().call({ to: LOOPING, data: '0xdeadbeef' }))).rejects.toThrow();
+      // Every turn is an eth_call; the one over the budget is not followed.
+      expect(counter.ethCalls).toBe(MAX_OFFCHAIN_LOOKUPS_PER_REQUEST + 1);
+      expect(counter.gatewayRequests).toBe(shape === 'gateway' ? MAX_OFFCHAIN_LOOKUPS_PER_REQUEST : 0);
+    }, 120_000);
+  }
+
+  it('a real lookup (one turn, then the callback answers) is unaffected', async () => {
+    stubNetworkCalls('https://rpc.example', ({ data }) => (data.startsWith('0x12345678') ? { result: WORD } : reverting(lookupRevert(LOOPING, 'gateway'))));
+    const { data } = await withRequestBudget(() => client().call({ to: LOOPING, data: '0xdeadbeef' }));
+    expect(data).toBe(WORD);
+  });
+
+  it('calls that do not revert with OffchainLookup still work after the turns are spent', async () => {
+    stubNetworkCalls('https://rpc.example', ({ to }) => (to.toLowerCase() === LOOPING ? reverting(lookupRevert(LOOPING, 'empty-batch')) : { result: WORD }));
+    await withRequestBudget(async () => {
+      await expect(client().call({ to: LOOPING, data: '0xdeadbeef' })).rejects.toThrow();
+      const { data } = await client().call({ to: OTHER, data: '0xdeadbeef' });
+      expect(data).toBe(WORD);
+    });
+  });
+
+  it('one batch lookup sends at most MAX_CCIP_REQUESTS_PER_REQUEST gateway requests', async () => {
+    const queries = Array.from({ length: 100 }, (_, i) => ({ sender: LOOPING, urls: [`https://gw.example/${i}/{data}`], data: '0x01' as `0x${string}` }));
+    const revert = encodeErrorResult({
+      abi: offchainLookup,
+      errorName: 'OffchainLookup',
+      args: [LOOPING, ['x-batch-gateway:true'], encodeFunctionData({ abi: batchAbi, functionName: 'query', args: [queries] }), '0x12345678', '0x'],
+    });
+    const counter = stubNetworkCalls('https://rpc.example', ({ data }) => (data.startsWith('0x12345678') ? { result: WORD } : reverting(revert)));
+    await withRequestBudget(() => client().call({ to: LOOPING, data: '0xdeadbeef' })).catch(() => {});
+    expect(counter.gatewayRequests).toBe(MAX_CCIP_REQUESTS_PER_REQUEST);
+  });
+
+  async function requestAvatar(env: Record<string, string>) {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { default: app } = await import('../src/index');
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+    return app.request('/mainnet/avatar/attacker.eth', undefined, env, ctx);
+  }
+
+  it('through /avatar, a looping resolver lookup stays within both caps', async () => {
+    const env = createMockEnv() as unknown as Record<string, string>;
+    const counter = stubNetworkCalls(env.MAINNET_RPC_URL, () => reverting(lookupRevert(mainnet.contracts.ensUniversalResolver.address, 'gateway')));
+    await requestAvatar(env);
+    expect(counter.gatewayRequests).toBeGreaterThan(0);
+    expect(counter.gatewayRequests).toBeLessThanOrEqual(MAX_CCIP_REQUESTS_PER_REQUEST);
+    expect(counter.ethCalls).toBeLessThanOrEqual(MAX_OFFCHAIN_LOOKUPS_PER_REQUEST + ROUTE_CALL_SITES);
+  }, 120_000);
+
+  it('through /avatar, an NFT avatar whose contract loops on empty batches stays within the turn budget', async () => {
+    const env = createMockEnv() as unknown as Record<string, string>;
+    const UR = mainnet.contracts.ensUniversalResolver.address.toLowerCase();
+    const NFT = '0x5555555555555555555555555555555555555555' as const;
+    const urAbi = parseAbi(['function resolveWithGateways(bytes name, bytes data, string[] gateways) view returns (bytes, address)']);
+    let nftCalls = 0;
+    const counter = stubNetworkCalls(env.MAINNET_RPC_URL, ({ to, data }) => {
+      if (to.toLowerCase() === NFT) {
+        nftCalls++;
+        return reverting(lookupRevert(NFT, 'empty-batch'));
+      }
+      if (to.toLowerCase() !== UR) return { result: '0x' };
+      // The avatar text record (text(bytes32,string) = 0x59d1d43c) names the
+      // NFT; any other record read (the owner's address) returns OTHER.
+      const record = (decodeFunctionData({ abi: urAbi, data: data as `0x${string}` }).args[1] as string).startsWith('0x59d1d43c')
+        ? encodeAbiParameters([{ type: 'string' }], [`eip155:1/erc721:${NFT}/1`])
+        : encodeAbiParameters([{ type: 'address' }], [OTHER]);
+      return { result: encodeAbiParameters([{ type: 'bytes' }, { type: 'address' }], [record, OTHER]) };
+    });
+    await requestAvatar(env);
+    expect(nftCalls).toBeGreaterThan(0);
+    expect(nftCalls).toBeLessThanOrEqual(MAX_OFFCHAIN_LOOKUPS_PER_REQUEST + ROUTE_CALL_SITES);
+    expect(counter.gatewayRequests).toBe(0);
   }, 120_000);
 });
 
