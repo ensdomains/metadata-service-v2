@@ -10,9 +10,6 @@ export interface ResolverData {
   expiry?: bigint;
   isWrapped: boolean;
   fuses?: number;
-  addresses: Record<string, string>;
-  texts: Record<string, string>;
-  contenthash?: string;
 }
 
 export interface NameData {
@@ -96,45 +93,12 @@ export class ResolverService {
         }
       }
 
-      // Get resolver records using enhanced methods
-      const addresses: Record<string, string> = {};
-      const texts: Record<string, string> = {};
-      let contenthash: string | undefined;
-
-      if (resolver && !isEmptyAddress(resolver)) {
-        try {
-          // Get ETH address using enhanced method
-          const ethAddress = await this.blockchain.getAddr(network, resolver, node, 60);
-          if (ethAddress && !isEmptyAddress(ethAddress)) {
-            addresses.eth = ethAddress;
-          }
-
-          // Get common text records using enhanced method
-          const textKeys = ['email', 'url', 'avatar', 'description', 'notice', 'keywords', 'discord', 'github', 'reddit', 'twitter'];
-          const textResults = await Promise.allSettled(
-            textKeys.map(key => this.blockchain.getText(network, resolver, node, key))
-          );
-
-          textResults.forEach((result, index) => {
-            if (result.status === 'fulfilled' && result.value) {
-              texts[textKeys[index]] = result.value;
-            }
-          });
-
-          // Get contenthash using enhanced method
-          try {
-            const contentHashResult = await this.blockchain.getContenthash(network, resolver, node);
-            if (contentHashResult && contentHashResult !== '0x') {
-              contenthash = contentHashResult;
-            }
-          } catch (error) {
-            // Contenthash not supported or empty
-          }
-
-        } catch (error) {
-          console.warn('Failed to resolve records:', error);
-        }
-      }
+      // Resolver records (addr/text/contenthash) are deliberately not read on
+      // this path either: no caller consumes them, and the resolver is a
+      // contract the name's owner chooses. Each read was an eth_call into that
+      // code, repeated on every fallback RPC client when it fails and followed
+      // through CCIP-Read when it reverts with OffchainLookup. Avatar/header
+      // records are read through the ens-avatar UR path.
 
       // For .eth names, try to get expiry from registrar
       if (name.endsWith('.eth') && name.split('.').length === 2) {
@@ -168,9 +132,6 @@ export class ResolverService {
         expiry,
         isWrapped,
         fuses,
-        addresses,
-        texts,
-        contenthash,
       };
 
       return {
@@ -215,8 +176,6 @@ export class ResolverService {
         owner: record.owner,
         resolver: record.resolver,
         isWrapped: false,
-        addresses: {},
-        texts: {},
       },
       expirationDate: record.expiry ? new Date(Number(record.expiry) * 1000) : undefined,
     };
