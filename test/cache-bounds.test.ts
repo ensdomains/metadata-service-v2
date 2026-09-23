@@ -238,10 +238,11 @@ describe('metadata-cache SWR revalidation verdicts', () => {
     const svc = new MetadataCacheService(kv);
     seedStaleEntry(kv);
 
-    // Origin's clean miss: NotFoundError is thrown only when ALL tiers
-    // definitively missed (name burned while the webhook was down).
+    // Origin's clean miss: a definitive NotFoundError is thrown only when ALL
+    // tiers, the primary index included, missed (name burned while the webhook
+    // was down).
     const fetchDead = async (): Promise<MetadataResponse> => {
-      throw new NotFoundError('getDomain: not found in any source');
+      throw new NotFoundError('getDomain: not found in any source', { definitive: true });
     };
 
     // First request: stale hit → background revalidate kicks off.
@@ -257,6 +258,20 @@ describe('metadata-cache SWR revalidation verdicts', () => {
     await expect(
       svc.get('sepolia', 'registry', 'burnedname.eth', ctx2, fetchDead),
     ).rejects.toThrow(NotFoundError);
+  });
+
+  it('keeps the stale entry when the not-found is not definitive (primary index skipped)', async () => {
+    const kv = makeKv();
+    const svc = new MetadataCacheService(kv);
+    seedStaleEntry(kv);
+    const fetchUnsure = async (): Promise<MetadataResponse> => {
+      throw new NotFoundError('getDomain: not found in any source', { definitive: false });
+    };
+    const ctx = makeSwrCtx();
+    const res = await svc.get('sepolia', 'registry', 'burnedname.eth', ctx, fetchUnsure);
+    expect(res.cacheStatus).toBe('stale');
+    await ctx.drain().catch(() => {});
+    expect(kv.store.has(CACHE_KEY)).toBe(true);
   });
 
   it('evicts the stale entry when revalidation hits a DomainExpiredError', async () => {

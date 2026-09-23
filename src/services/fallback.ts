@@ -88,7 +88,10 @@ export class FallbackService {
           console.warn(`IndexerV2 ${operationName} upstream failure, tripping breaker:`, error);
           this.markIndexerV2Unhealthy();
         } else {
-          v2Consulted = true; // definitive: the v2 index does not have it
+          // Only a clean miss proves the v2 index lacks the name. Any other error
+          // (e.g. a malformed 200 response) is not an answer, so the final
+          // not-found must not be treated as definitive.
+          if (error instanceof NotFoundError) v2Consulted = true;
           console.log(`IndexerV2 ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
         }
         retries++;
@@ -147,7 +150,9 @@ export class FallbackService {
         { cause: lastError },
       );
     }
-    throw new NotFoundError(`${operationName}: not found in any source`);
+    throw new NotFoundError(`${operationName}: not found in any source`, {
+      definitive: v2Consulted || !this.config.indexerV2.enabled,
+    });
   }
 
   // Check if indexerV2 is healthy based on recent request outcomes (no proactive health check query)
@@ -212,6 +217,13 @@ export class FallbackService {
       {
         indexerV2: async () => {
           const { domain } = await this.indexerV2.getDomain(name);
+          // Only an explicit `domain: null` is the index answering "no such
+          // name". A body without the field (e.g. a proxy or maintenance JSON
+          // such as {"data":{}}) is not an answer, so it must not become a
+          // definitive not-found.
+          if (domain === undefined) {
+            throw new Error(`Malformed indexerV2 response for ${name}: no domain field`);
+          }
           if (!domain) {
             throw new NotFoundError(`Domain ${name} not found in indexerV2`);
           }

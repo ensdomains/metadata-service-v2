@@ -137,11 +137,11 @@ export class MetadataCacheService {
       await this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig);
     } catch (err) {
       // A definitive origin verdict must evict the stale entry, or a burned/
-      // expired name keeps serving from KV until hardTtl (up to 30 days). Both
-      // errors are only thrown on a clean, corroborated verdict — transient
-      // upstream failures (UpstreamError) keep the stale copy, which is the
-      // point of SWR.
-      if (err instanceof NotFoundError || err instanceof DomainExpiredError) {
+      // expired name keeps serving from KV until hardTtl (up to 30 days).
+      // Transient upstream failures (UpstreamError) and a not-found that is not
+      // definitive (the primary index was skipped, e.g. circuit breaker open)
+      // keep the stale copy, which is the point of SWR.
+      if ((err instanceof NotFoundError && err.definitive) || err instanceof DomainExpiredError) {
         console.warn(`[metadata-cache] evicting ${cacheKey} — origin verdict: ${(err as Error).message}`);
         await this.kv.delete(cacheKey);
         return;

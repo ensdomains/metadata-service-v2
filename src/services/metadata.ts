@@ -254,8 +254,12 @@ export class MetadataService {
       if (error instanceof DomainExpiredError) throw error;
 
       console.error(`Failed to resolve metadata for ${identifier}:`, error);
-      // Try D1 as last resort if available
-      if (this.d1) {
+      // Try D1 as last resort if available. Not for a definitive NotFoundError:
+      // every live source, the primary index included, agreed the name does not
+      // exist, and a stale row must not overturn that (→ 404, and the metadata
+      // cache evicts). D1 stays the rescue for outages, and for a miss while the
+      // primary index was skipped (circuit breaker open).
+      if (this.d1 && !(error instanceof NotFoundError && error.definitive)) {
         try {
           const d1Record = await this.d1.getDomain(identifier);
           if (d1Record) {
