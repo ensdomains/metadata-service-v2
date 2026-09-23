@@ -9,8 +9,8 @@
 // same request with every URL and redirect hop checked by fetchMediaUrl
 // (private hosts and this service's own hostnames are refused), one timeout
 // per gateway, a bounded response, and a per-request budget of gateway bytes
-// and gateway requests (request-budget.ts), since a batch-gateway lookup fans
-// out to as many requests as the contract asks for. ccipBudgetedHttp, the
+// and gateway fetches (request-budget.ts; every redirect hop is a fetch), since
+// a batch-gateway lookup fans out to as many requests as the contract asks for. ccipBudgetedHttp, the
 // transport of every client that reads contracts, counts OffchainLookup turns
 // against the same budget, since viem follows recursive lookups with no depth
 // limit.
@@ -32,11 +32,22 @@ export const CCIP_TIMEOUT_MS = 8_000;
 // Real gateway responses (signed resolver results, proofs) are kilobytes.
 export const MAX_CCIP_RESPONSE_BYTES = 1024 * 1024;
 
+class CcipAllowanceSpentError extends Error {
+  constructor() {
+    super('CCIP allowance for this request is spent');
+    this.name = 'CcipAllowanceSpentError';
+  }
+}
+
+// Charged before every gateway fetch, redirect hops included: each one is a
+// Worker subrequest.
+function chargeGatewayFetch(): void {
+  if (!takeCcipRequest()) throw new CcipAllowanceSpentError();
+}
+
 export async function guardedCcipRequest({ data, sender, urls }: CcipRequestParameters): Promise<Hex> {
   let error: Error = new Error('An unknown error occurred.');
   for (const url of urls) {
-    // Once this request's allowance is spent, do not send the request at all.
-    if (!takeCcipRequest()) throw new Error('CCIP allowance for this request is spent');
     const method = url.includes('{data}') ? 'GET' : 'POST';
     const body = method === 'POST' ? { data, sender } : undefined;
     try {
@@ -45,7 +56,7 @@ export async function guardedCcipRequest({ data, sender, urls }: CcipRequestPara
         body: body ? JSON.stringify(body) : undefined,
         headers: body ? { 'Content-Type': 'application/json' } : {},
         signal: AbortSignal.timeout(CCIP_TIMEOUT_MS),
-      });
+      }, undefined, chargeGatewayFetch);
       const raw = await readBodyCapped(response, MAX_CCIP_RESPONSE_BYTES, takeCcipBytes);
       if (!raw) throw new Error('gateway response over the size cap or this request\'s CCIP allowance');
       const text = new TextDecoder().decode(raw);
@@ -62,6 +73,8 @@ export async function guardedCcipRequest({ data, sender, urls }: CcipRequestPara
       }
       return result;
     } catch (err) {
+      // Once this request's allowance is spent, do not try the other gateways.
+      if (err instanceof CcipAllowanceSpentError) throw err;
       error = new HttpRequestError({ body, details: (err as Error).message, url });
     }
   }

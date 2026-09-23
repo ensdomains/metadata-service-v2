@@ -76,7 +76,9 @@ export function assertFetchableMediaUrl(url: URL, denyList: readonly string[] = 
 /**
  * GET a media URL, validating the initial URL and every redirect target.
  * Returns the first non-redirect response. Throws BlockedMediaUrlError for a
- * blocked hop or an over-long redirect chain.
+ * blocked hop or an over-long redirect chain. `beforeEachFetch`, when given,
+ * runs before every request that is actually sent (each redirect hop is one)
+ * and may throw to stop the chain.
  */
 export interface MediaRequestInit {
   method?: string;
@@ -89,6 +91,7 @@ export async function fetchMediaUrl(
   url: string,
   init: MediaRequestInit = {},
   denyList: readonly string[] = SELF_HOSTNAMES,
+  beforeEachFetch?: () => void,
 ): Promise<Response> {
   let current: URL;
   try {
@@ -100,6 +103,7 @@ export async function fetchMediaUrl(
   let request: MediaRequestInit = init;
   for (let hop = 0; ; hop++) {
     assertFetchableMediaUrl(current, denyList);
+    beforeEachFetch?.();
     const response = await fetch(current.toString(), { ...request, redirect: 'manual' });
 
     const location = response.status >= 300 && response.status < 400 ? response.headers.get('Location') : null;

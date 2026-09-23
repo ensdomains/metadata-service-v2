@@ -3,6 +3,7 @@ import { createPublicClient, decodeFunctionData, encodeAbiParameters, encodeErro
 import { mainnet } from 'viem/chains';
 import { createMockEnv } from './mocks/hono-env';
 import { ccipBudgetedHttp, guardedCcipRequest, MAX_CCIP_RESPONSE_BYTES } from '../src/services/ccip-request';
+import { MAX_MEDIA_REDIRECTS } from '../src/services/media-fetch';
 import {
   withRequestBudget,
   MAX_CCIP_BYTES_PER_REQUEST,
@@ -259,6 +260,49 @@ describe('recursive OffchainLookup', () => {
     expect(nftCalls).toBeLessThanOrEqual(MAX_OFFCHAIN_LOOKUPS_PER_REQUEST + ROUTE_CALL_SITES);
     expect(counter.gatewayRequests).toBe(0);
   }, 120_000);
+});
+
+// A gateway may answer with a redirect, and fetchMediaUrl follows up to
+// MAX_MEDIA_REDIRECTS of them. Every hop is a Worker subrequest, so every hop is
+// charged to the allowance, not just the first request to each gateway URL.
+describe('gateway redirect hops', () => {
+  const REDIRECTING = '0x6666666666666666666666666666666666666666' as const;
+  const GATEWAYS = 5;
+
+  function stubRedirectingGateways() {
+    const revert = encodeErrorResult({
+      abi: offchainLookup,
+      errorName: 'OffchainLookup',
+      args: [REDIRECTING, Array.from({ length: GATEWAYS }, (_, i) => `https://gw${i}.example/{data}`), '0x01', '0x12345678', '0x'],
+    });
+    const counter = { gatewayFetches: 0 };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith('https://rpc.example')) {
+        const body = JSON.parse(String(init?.body));
+        const one = (b: { id: number }) => ({ jsonrpc: '2.0', id: b.id, error: { code: 3, message: 'execution reverted', data: revert } });
+        return new Response(JSON.stringify(Array.isArray(body) ? body.map(one) : one(body)), { headers: { 'content-type': 'application/json' } });
+      }
+      counter.gatewayFetches++;
+      return new Response(null, { status: 302, headers: { Location: `${new URL(url).origin}/hop/${counter.gatewayFetches}` } });
+    }));
+    return counter;
+  }
+
+  const client = () =>
+    createPublicClient({ chain: mainnet, transport: ccipBudgetedHttp('https://rpc.example', { retryCount: 0 }), ccipRead: { request: guardedCcipRequest } });
+
+  it('control: without a request scope every gateway follows all of its redirects', async () => {
+    const counter = stubRedirectingGateways();
+    await client().call({ to: REDIRECTING, data: '0xdeadbeef' }).catch(() => {});
+    expect(counter.gatewayFetches).toBe(GATEWAYS * (MAX_MEDIA_REDIRECTS + 1));
+  });
+
+  it('inside one request, every hop is charged and fetching stops at the cap', async () => {
+    const counter = stubRedirectingGateways();
+    await withRequestBudget(() => client().call({ to: REDIRECTING, data: '0xdeadbeef' })).catch(() => {});
+    expect(counter.gatewayFetches).toBe(MAX_CCIP_REQUESTS_PER_REQUEST);
+  });
 });
 
 describe('after the allowance is spent', () => {

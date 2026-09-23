@@ -10,7 +10,8 @@
 // the same allowance.
 //
 // Bytes alone do not bound the work, so the budget also counts:
-//  - gateway requests, since one batch sends as many as it has queries;
+//  - gateway fetches, redirect hops included, since one batch sends as many
+//    requests as it has queries and each can follow up to 10 redirects;
 //  - OffchainLookup turns. viem follows OffchainLookup recursively with no
 //    depth limit: when the callback reverts with another OffchainLookup it
 //    calls the gateway (or the local batch gateway, which with no queries sends
@@ -70,7 +71,8 @@ export function takeCcipBytes(bytes: number): boolean {
 }
 
 /**
- * Take one gateway request from this request's allowance before sending it.
+ * Take one gateway fetch (the first request or a redirect hop) from this
+ * request's allowance before sending it.
  * Returns false once MAX_CCIP_REQUESTS_PER_REQUEST requests were sent, or once
  * the byte allowance has refused a read (every further response would be
  * refused at its first chunk).
