@@ -29,7 +29,7 @@ import type {
   ErrorResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
-import { NotFoundError, UpstreamError, InvalidNameError } from "./services/errors";
+import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
@@ -113,6 +113,9 @@ function httpError(c: any, error: unknown, fallbackMessage: string): Response {
   }
   if (error instanceof InvalidNameError) {
     return c.json({ error: 'Invalid ENS name format', timestamp }, 400);
+  }
+  if (error instanceof InvalidTokenIdError) {
+    return c.json({ error: 'Invalid token id', timestamp }, 400);
   }
   if (error instanceof NotFoundError) {
     return c.json({ error: 'Not found', timestamp }, 404);

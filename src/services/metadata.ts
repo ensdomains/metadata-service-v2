@@ -15,7 +15,7 @@ import type {
 } from "../types/api";
 import { MIGRATION_STATUS, type NetworkName, type MigrationStatus, isMigrationStatus } from "../types";
 import { classifyMigrationStatus, classifyV2IndexerRecord, isOnV2 } from "../utils/migration";
-import { NotFoundError, UpstreamError, InvalidNameError } from "./errors";
+import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./errors";
 import {
   validateEnsName,
   getLabel,
@@ -394,6 +394,17 @@ export class MetadataService {
     contractAddress: string,
     tokenId: string,
   ): Promise<{ name: string; registryType: 'registry' | 'namewrapper' }> {
+    // A uint256 token id, in decimal or 0x/0X-prefixed hex. Anything else,
+    // including values of 2^256 or more, is a client error, rejected before it
+    // reaches BigInt()/pad() or an indexer query. (BigInt is safe once the
+    // format check has passed.)
+    if (!/^(0[xX][0-9a-fA-F]+|[0-9]+)$/.test(tokenId) || BigInt(tokenId) >= 2n ** 256n) {
+      throw new InvalidTokenIdError();
+    }
+    // One canonical form (lowercase, 0x + 64 hex digits) for every contract
+    // path, so the same uint256 resolves however it was written.
+    const tokenHex = `0x${BigInt(tokenId).toString(16).padStart(64, '0')}` as `0x${string}`;
+
     const contracts = CONTRACTS[network];
     const addr = contractAddress.toLowerCase();
 
@@ -403,11 +414,11 @@ export class MetadataService {
     if (addr === contracts.registrar.toLowerCase()) {
       // BaseRegistrar: tokenId is labelhash → convert to .eth namehash
       registryType = 'registry';
-      nameHash = constructEthNameHash(tokenId, Version.v1);
+      nameHash = constructEthNameHash(tokenHex, Version.v1);
     } else if (addr === contracts.nameWrapper.toLowerCase()) {
       // NameWrapper: tokenId is already a namehash
       registryType = 'namewrapper';
-      nameHash = tokenIdToHex(tokenId);
+      nameHash = tokenIdToHex(tokenHex);
     } else if (await this.isV2RegistryAddress(network, addr)) {
       // v2 ETHRegistry (ERC1155). Marketplaces pass the native tokenId — a
       // labelhash whose low 32 bits are the token version — which is
@@ -415,7 +426,7 @@ export class MetadataService {
       // canonicalId filters first. Returns a clean miss (falls through below)
       // while the filters aren't in the deployed zigens schema yet.
       registryType = 'registry';
-      const hexId = tokenIdToHex(tokenId);
+      const hexId = tokenHex;
       try {
         const { domain } = await this.indexerV2.getDomainByTokenId(hexId);
         if (domain?.name) return { name: domain.name, registryType };

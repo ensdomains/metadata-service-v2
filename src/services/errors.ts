@@ -46,3 +46,15 @@ export class InvalidNameError extends Error {
 export function isInvalidNameError(e: unknown): e is InvalidNameError {
   return e instanceof InvalidNameError;
 }
+
+/**
+ * A v1/v2 NFT token id that is neither a decimal integer nor 0x-prefixed hex.
+ * A client error (→ 400): it used to reach BigInt(), whose SyntaxError the route
+ * mapper reported as a generic 500.
+ */
+export class InvalidTokenIdError extends Error {
+  constructor(message = 'Invalid token id') {
+    super(message);
+    this.name = 'InvalidTokenIdError';
+  }
+}

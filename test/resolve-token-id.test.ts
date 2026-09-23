@@ -265,6 +265,18 @@ describe('MetadataService.resolveTokenId', () => {
       expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedHex);
     });
 
+    it.each([
+      ['0X5A95EE1DC2A184B02AF4E3B4DEAE1B95AACBF29F651487D77E4A9B3C00000001', '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001'],
+      ['0x1', `0x${'0'.repeat(63)}1`],
+    ])('looks %s up in canonical form (lowercase, 64 hex digits) in both lookups', async (written, canonical) => {
+      mockGetDomainByNamehash.mockResolvedValue({ domain: { name: 'fox.eth' }, usedFallback: false });
+
+      await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, written);
+
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(canonical);
+      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(canonical);
+    });
+
     it('falls through to the namehash path when the filter lookup misses (filter not deployed)', async () => {
       const hash = '0x54cb177469278d1e8e843f0d60633cb4b038af8c4c5be8993161e87ca4a50b4c'; // namehash(fox.eth)
       mockGetDomainByTokenId.mockResolvedValue({ domain: null, usedFallback: false });
