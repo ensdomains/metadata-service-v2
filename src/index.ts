@@ -270,7 +270,14 @@ app.use(
 
 app.use("*", requestLogger);
 app.use("*", logger());
-app.use("*", prettyJSON());
+// ?pretty re-indents JSON responses, and indentation grows with nesting depth:
+// a small, deeply nested document becomes a huge string (8 KB of nested arrays
+// re-indents to 32 MB). The avatar metadata route returns JSON whose structure
+// the name's owner controls (NFT/URI metadata passed through), so it is never
+// re-indented. Every other JSON response is built by this service.
+const pretty = prettyJSON();
+const USER_SHAPED_JSON_ROUTE = /^\/[^/]+\/avatar\/[^/]+\/meta$/;
+app.use("*", (c, next) => (USER_SHAPED_JSON_ROUTE.test(c.req.path) ? next() : pretty(c, next)));
 // 30s timeout for all routes except /health (health has its own graceful handling)
 app.use("*", async (c, next) => {
   if (c.req.path === '/health' || c.req.path === '/') return next();
