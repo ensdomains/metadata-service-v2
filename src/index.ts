@@ -272,11 +272,12 @@ app.use("*", requestLogger);
 app.use("*", logger());
 // ?pretty re-indents JSON responses, and indentation grows with nesting depth:
 // a small, deeply nested document becomes a huge string (8 KB of nested arrays
-// re-indents to 32 MB). The avatar metadata route returns JSON whose structure
-// the name's owner controls (NFT/URI metadata passed through), so it is never
-// re-indented. Every other JSON response is built by this service.
+// re-indents to 32 MB). The avatar and header routes serve content the name's
+// owner controls (the avatar metadata JSON as-is, and the avatar and header
+// media), so they are never re-indented. Every other JSON response is built by
+// this service from fixed shapes.
 const pretty = prettyJSON();
-const USER_SHAPED_JSON_ROUTE = /^\/[^/]+\/avatar\/[^/]+\/meta$/;
+const USER_SHAPED_JSON_ROUTE = /^\/[^/]+\/(avatar\/[^/]+(\/meta)?|header\/[^/]+)$/;
 app.use("*", (c, next) => (USER_SHAPED_JSON_ROUTE.test(c.req.path) ? next() : pretty(c, next)));
 // 30s timeout for all routes except /health (health has its own graceful handling)
 app.use("*", async (c, next) => {
@@ -660,6 +661,16 @@ app.post("/batch-metadata", async (c) => {
     if (body.names.length > 100) {
       const errorResponse: ErrorResponse = {
         error: "Cannot process more than 100 names at once",
+        timestamp: new Date().toISOString(),
+      };
+      return c.json(errorResponse, 400);
+    }
+
+    // Each name is echoed back in its result, so it must be a string: any other
+    // JSON value would give the response a shape (and depth) the client chose.
+    if (!body.names.every((name: unknown) => typeof name === 'string')) {
+      const errorResponse: ErrorResponse = {
+        error: "Every entry in 'names' must be a string",
         timestamp: new Date().toISOString(),
       };
       return c.json(errorResponse, 400);
