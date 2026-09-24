@@ -1,22 +1,48 @@
 import { describe, it, expect, vi } from 'vitest';
 import { HttpRequestError } from 'viem';
+import { AvatarResolver, type ChainClient, type Fetcher, type ReadContractParams } from '@ensdomains/ens-avatar';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
 import { NETWORKS } from '../src/config/networks';
 
 // A minimal stand-in for @ensdomains/ens-avatar's AvatarResolver — only
-// getMetadata is exercised by getAvatarMeta.
-type FakeResolver = { getMetadata: ReturnType<typeof vi.fn> };
+// getMetadata (and the chain client it reads the record through) is exercised
+// by getAvatarMeta.
+type FakeResolver = { getMetadata: ReturnType<typeof vi.fn>; client?: FakeClient };
+type FakeClient = { getEnsRecord: ReturnType<typeof vi.fn>; readContract: ReturnType<typeof vi.fn> };
+
+// A chain client whose `avatar` text record is `record`.
+const fakeClient = (record: string | null): FakeClient => ({
+  getEnsRecord: vi.fn().mockResolvedValue({ record, address: null }),
+  readContract: vi.fn(),
+});
+
+// A fake resolver that, like ens-avatar, reads the avatar record through its
+// chain client before returning `meta`.
+function readingResolver(record: string, meta: unknown): FakeResolver {
+  return {
+    client: fakeClient(record),
+    getMetadata: vi.fn(async function (this: { client: FakeClient }, ens: string) {
+      await this.client.getEnsRecord(ens, 'avatar');
+      return meta;
+    }),
+  };
+}
 
 // Build a real AvatarService, then swap in fake resolvers so no RPC/network is
 // touched (the constructor only wires viem/ens-avatar lazily; nothing fires until
 // a resolver method is called).
 function makeService(primary: FakeResolver, legacy?: FakeResolver): AvatarService {
   const svc = new AvatarService('https://rpc.invalid', NETWORKS.mainnet.chain);
+  for (const resolver of [primary, legacy]) {
+    if (resolver && !resolver.client) resolver.client = fakeClient(null);
+  }
   (svc as unknown as { resolver: FakeResolver }).resolver = primary;
   (svc as unknown as { legacyResolver?: FakeResolver }).legacyResolver = legacy;
   return svc;
 }
+
+const NFT_RECORD = 'eip155:1/erc721:0xabc/1';
 
 const IMG_URL = 'https://meta.test/mainnet/avatar/nick.eth';
 
@@ -38,7 +64,7 @@ describe('AvatarService.getAvatarMeta', () => {
         reference_url: 'https://opensea.io/assets/0xabc/1',
       },
     };
-    const primary = { getMetadata: vi.fn().mockResolvedValue(meta) };
+    const primary = readingResolver(NFT_RECORD, meta);
     const svc = makeService(primary);
 
     const result = await svc.getAvatarMeta('nick.eth', IMG_URL);
@@ -96,7 +122,8 @@ describe('AvatarService.getAvatarMeta', () => {
     const primary = { getMetadata: vi.fn().mockResolvedValue({ image_data: '<svg/>' }) };
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
     expect(result?.image).toBe(IMG_URL);
-    expect(result?.image_data).toBe('<svg/>'); // original inline data preserved
+    // The inline markup itself is not echoed: the image endpoint serves it.
+    expect(result).not.toHaveProperty('image_data');
   });
 
   it('returns null when the name has no avatar record', async () => {
@@ -146,5 +173,265 @@ describe('AvatarService.getAvatarMeta', () => {
     const result = await makeService(primary).getAvatarMeta('in_valid.eth', IMG_URL);
     expect(result).toBeNull();
     expect(primary.getMetadata).not.toHaveBeenCalled();
+  });
+});
+
+describe('AvatarService.getAvatarMeta sanitization', () => {
+  // getMetadata returns metadata as published: every field below is chosen by
+  // the record/token owner, and /meta consumers render them.
+  const uriMeta = (meta: Record<string, unknown>) => readingResolver('https://cdn.test/avatar.json', meta);
+
+  it.each([
+    'javascript:alert(document.domain)',
+    ' JaVaScRiPt:alert(1)',
+    'java\tscript:alert(1)',
+    'vbscript:msgbox(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==',
+  ])('treats a non-image image value (%j) as no usable image', async (image) => {
+    const result = await makeService(uriMeta({ image, name: 'x' })).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toBeNull();
+  });
+
+  it('does not skip an unusable image for a later field (the avatar endpoint would not either)', async () => {
+    const primary = uriMeta({ image: 'javascript:alert(1)', image_url: 'https://cdn.test/ok.png' });
+    expect(await makeService(primary).getAvatarMeta('nick.eth', IMG_URL)).toBeNull();
+  });
+
+  it.each([
+    '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script></svg>',
+    '  <?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>',
+    'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+',
+    'data:image/svg+xml,%3Csvg%20onload%3D%22alert(1)%22%2F%3E',
+    'data:image/png;base64,iVBORw0KGgo=',
+  ])('replaces an inline image (%j) with the avatar image URL', async (image) => {
+    const result = await makeService(uriMeta({ image, image_url: image })).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result?.image).toBe(IMG_URL);
+    expect(result?.image_url).toBe(IMG_URL);
+    const body = JSON.stringify(result);
+    expect(body).not.toContain('data:');
+    expect(body).not.toContain('<');
+  });
+
+  it('never echoes image_data, even next to an http(s) image', async () => {
+    const primary = uriMeta({ image: 'https://cdn.test/a.png', image_data: '<svg onload="alert(1)"/>' });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result?.image).toBe('https://cdn.test/a.png');
+    expect(result).not.toHaveProperty('image_data');
+  });
+
+  it('treats an inline image as unusable when no avatar image URL is supplied', async () => {
+    const primary = uriMeta({ image: 'data:image/png;base64,iVBORw0KGgo=' });
+    expect(await makeService(primary).getAvatarMeta('nick.eth')).toBeNull();
+  });
+
+  it('keeps http(s) image fields and drops a non-http(s) image_url', async () => {
+    const primary = uriMeta({ image: 'http://cdn.test/a.png', image_url: 'javascript:alert(1)' });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result?.image).toBe('http://cdn.test/a.png');
+    expect(result).not.toHaveProperty('image_url');
+  });
+
+  it('rewrites ipfs/ipns/ar media links to gateways', async () => {
+    const primary = uriMeta({
+      image: 'ipns://k51qzi5uqu5dlvj2/pic.png',
+      image_url: 'ipfs://QmHash/pic.png',
+      animation_url: 'ar://TXID',
+      external_url: 'ipfs://ipfs/QmSite',
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toMatchObject({
+      image: 'https://ipfs.io/ipns/k51qzi5uqu5dlvj2/pic.png',
+      image_url: 'https://ipfs.io/ipfs/QmHash/pic.png',
+      animation_url: 'https://arweave.net/TXID',
+      external_url: 'https://ipfs.io/ipfs/QmSite',
+    });
+  });
+
+  it('keeps only http(s) link fields and leaves unrelated fields alone', async () => {
+    const primary = uriMeta({
+      image: 'https://cdn.test/a.png',
+      name: 'Name <b>as published</b>',
+      description: 'desc',
+      attributes: [{ trait_type: 't', value: 'v' }],
+      background_color: 'ffffff',
+      animation_url: 'https://cdn.test/anim.mp4',
+      external_url: 'javascript:alert(1)',
+      external_link: 'data:text/html,<script>alert(1)</script>',
+      youtube_url: 'vbscript:msgbox(1)',
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({
+      uri: 'nick.eth',
+      image: 'https://cdn.test/a.png',
+      name: 'Name <b>as published</b>',
+      description: 'desc',
+      attributes: [{ trait_type: 't', value: 'v' }],
+      background_color: 'ffffff',
+      animation_url: 'https://cdn.test/anim.mp4',
+    });
+  });
+
+  it('drops is_owner/host_meta that a non-NFT record supplies itself', async () => {
+    const primary = uriMeta({
+      image: 'https://cdn.test/a.png',
+      is_owner: true,
+      host_meta: { chain_id: 1, namespace: 'erc721', contract_address: '0xabc', token_id: '1' },
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result?.image).toBe('https://cdn.test/a.png');
+    expect(result).not.toHaveProperty('is_owner');
+    expect(result).not.toHaveProperty('host_meta');
+  });
+
+  it('drops is_owner/host_meta when the record the library read is unknown', async () => {
+    // A resolver that never reads the record through its client: the service
+    // can't tell the record is an NFT, so it treats it as not one.
+    const primary = { getMetadata: vi.fn().mockResolvedValue({ image: 'https://cdn.test/a.png', is_owner: true, host_meta: {} }) };
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).not.toHaveProperty('is_owner');
+    expect(result).not.toHaveProperty('host_meta');
+  });
+
+  it.each([NFT_RECORD, 'did:nft:eip155:1_erc721:0xabc_1', 'EIP155:1/ERC1155:0xabc/1'])(
+    'keeps library-computed is_owner/host_meta for an NFT record (%s) while sanitizing its token metadata',
+    async (record) => {
+      const host_meta = { chain_id: 1, namespace: 'erc721', contract_address: '0xabc', token_id: '1' };
+      const primary = readingResolver(record, {
+        image: '<svg onload="alert(1)"/>',
+        animation_url: 'javascript:alert(1)',
+        is_owner: false,
+        host_meta,
+      });
+      const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+      expect(result).toMatchObject({ image: IMG_URL, is_owner: false, host_meta });
+      expect(result).not.toHaveProperty('animation_url');
+    },
+  );
+
+  it('classifies the legacy resolver fallback by the record it read', async () => {
+    const primary = readingResolver('https://cdn.test/none.json', null);
+    const legacy = readingResolver(NFT_RECORD, { image: 'https://cdn.test/a.png', is_owner: true, host_meta: { token_id: '1' } });
+    const result = await makeService(primary, legacy).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toMatchObject({ is_owner: true, host_meta: { token_id: '1' } });
+  });
+});
+
+// The same guarantees against the ens-avatar version the service ships with: a
+// real AvatarResolver over a fake chain client (and a fake fetcher, the way the
+// service can swap in its own), so the record observation is exercised through
+// the library itself rather than a stand-in.
+describe('AvatarService.getAvatarMeta with the real ens-avatar resolver', () => {
+  const OWNER = '0x1111111111111111111111111111111111111111';
+  const CONTRACT = '0x2222222222222222222222222222222222222222';
+  const RECORD_URL = 'https://cdn.test/avatar.json';
+
+  type Gate = { promise: Promise<void>; open: () => void };
+  const gate = (): Gate => {
+    let open!: () => void;
+    const promise = new Promise<void>((resolve) => (open = resolve));
+    return { promise, open };
+  };
+
+  // Records per name, optionally held until a gate opens; token metadata for the
+  // NFT on-chain (tokenURI data: JSON) and URI-record JSON behind RECORD_URL.
+  function realService(opts: {
+    records: Record<string, string>;
+    recordGates?: Record<string, Gate>;
+    tokenGate?: Gate;
+    tokenMeta?: Record<string, unknown>;
+    recordJson?: Record<string, unknown>;
+  }): AvatarService {
+    const client: ChainClient = {
+      async getEnsRecord(name: string) {
+        await opts.recordGates?.[name]?.promise;
+        return { record: opts.records[name] ?? null, address: OWNER };
+      },
+      async readContract<T>({ functionName }: ReadContractParams): Promise<T> {
+        if (functionName === 'ownerOf') return OWNER as T;
+        await opts.tokenGate?.promise;
+        const json = Buffer.from(JSON.stringify(opts.tokenMeta ?? {})).toString('base64');
+        return `data:application/json;base64,${json}` as T;
+      },
+    };
+    const fetcher: Fetcher = {
+      async head() {
+        return { status: 200, headers: { 'content-type': 'application/json' }, data: undefined };
+      },
+      async get<T>() {
+        return { status: 200, headers: {}, data: (opts.recordJson ?? {}) as T };
+      },
+      async getArrayBuffer() {
+        throw new Error('unexpected getArrayBuffer');
+      },
+    };
+    const resolver = new AvatarResolver(client);
+    resolver.fetcher = fetcher;
+    const svc = new AvatarService('https://rpc.invalid', NETWORKS.mainnet.chain);
+    (svc as unknown as { resolver: AvatarResolver }).resolver = resolver;
+    (svc as unknown as { legacyResolver?: AvatarResolver }).legacyResolver = undefined;
+    return svc;
+  }
+
+  it("strips is_owner/host_meta from a URI record's own JSON and sanitizes its fields", async () => {
+    const svc = realService({
+      records: { 'nick.eth': RECORD_URL },
+      recordJson: {
+        name: 'forged',
+        image: 'https://cdn.test/a.png',
+        image_data: '<svg onload="alert(1)"/>',
+        external_url: 'javascript:alert(1)',
+        is_owner: true,
+        host_meta: { chain_id: 1, namespace: 'erc721', contract_address: CONTRACT, token_id: '1' },
+      },
+    });
+    const result = await svc.getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({ name: 'forged', image: 'https://cdn.test/a.png', uri: 'nick.eth' });
+  });
+
+  it('keeps the library-computed is_owner/host_meta of an NFT record and sanitizes its token metadata', async () => {
+    const svc = realService({
+      records: { 'nick.eth': `eip155:1/erc721:${CONTRACT}/7` },
+      tokenMeta: { name: 'Token #7', image: '<svg onload="alert(1)"/>', animation_url: 'vbscript:msgbox(1)' },
+    });
+    const result = await svc.getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({
+      name: 'Token #7',
+      image: IMG_URL,
+      is_owner: true,
+      uri: 'nick.eth',
+      host_meta: {
+        chain_id: 1,
+        namespace: 'erc721',
+        contract_address: CONTRACT,
+        token_id: '7',
+        reference_url: `https://opensea.io/assets/${CONTRACT}/7`,
+      },
+    });
+  });
+
+  it('classifies concurrent lookups on the shared resolver independently', async () => {
+    // nft.eth reads its record first but finishes last; uri.eth's record is read
+    // in between. A record noted on shared state would misclassify one of them.
+    const uriGate = gate();
+    const tokenGate = gate();
+    const svc = realService({
+      records: { 'nft.eth': `eip155:1/erc721:${CONTRACT}/7`, 'uri.eth': RECORD_URL },
+      recordGates: { 'uri.eth': uriGate },
+      tokenGate,
+      tokenMeta: { image: 'https://cdn.test/token.png' },
+      recordJson: { image: 'https://cdn.test/a.png', is_owner: true, host_meta: { token_id: '1' } },
+    });
+
+    const nft = svc.getAvatarMeta('nft.eth', IMG_URL);
+    const uri = svc.getAvatarMeta('uri.eth', IMG_URL);
+    uriGate.open();
+    const uriResult = await uri;
+    tokenGate.open();
+    const nftResult = await nft;
+
+    expect(uriResult).not.toHaveProperty('is_owner');
+    expect(uriResult).not.toHaveProperty('host_meta');
+    expect(nftResult).toMatchObject({ is_owner: true, host_meta: { token_id: '7' } });
   });
 });
