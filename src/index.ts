@@ -28,6 +28,7 @@ import { CachePresets } from "./utils/cache-headers";
 import type {
   HealthResponse,
   ErrorResponse,
+  MetadataResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
 import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
@@ -63,6 +64,7 @@ export interface Env {
   MAX_AVATAR_BYTES?: string; // max fetched avatar size in bytes (default 25 MB)
   D1_READ_MAX_AGE_SECS?: string; // D1 rows older than this are a miss (default 7 days)
   D1_RETENTION_SECS?: string; // daily cron deletes D1 rows older than this (default 30 days)
+  MAX_BATCH_NAMES?: string; // max names per POST /batch-metadata (default 25)
   LOG_LEVEL: string;
 }
 
@@ -637,12 +639,58 @@ app.get(
   }
 );
 
+// POST /batch-metadata limits (WEB-1552). The batch is sized for 1000
+// subrequests per invocation (fetch and KV count; D1 has its own 1000-query
+// cap). One distinct name can cost ~20 of them, counted from the code with each
+// call answering on its first attempt:
+//  - indexers down (sepolia): KV get + write-back 2, checkExpiry 2 RPC reads,
+//    zigens 2 and v1 subgraph 2 (primary + one retry each), blockchain tier 6
+//    (v2 getState; v1 owner, resolver, isWrapped owner, NameWrapper.getData,
+//    nameExpires), v2 registry discovery (2 reads per lookup) 4 while not
+//    cached = 18;
+//  - indexer up and the name's D1 row stale: the awaited D1 sync adds 3
+//    indexer queries and 11 D1 queries = 21.
+// 100 names was 1800-2100. 25 stays under 1000 even if every RPC read on the
+// indexer-outage path needs one failover attempt (25 x 30 = 750).
+const DEFAULT_MAX_BATCH_NAMES = 25;
+// Distinct names resolved at once. An invocation has 6 connections waiting for
+// response headers; starting the whole batch at once also let every name hit a
+// failing indexer before its circuit breaker opened.
+const BATCH_CONCURRENCY = 10;
+// A name not started within this budget gets a per-name error, so a slow
+// outage degrades the batch instead of running it into the 30s route timeout
+// (one 504 for every name). In an indexer outage a name already in flight
+// needs ~10s more at most (two 2s attempts per indexer tier, then chain reads).
+const BATCH_TIME_BUDGET_MS = 15_000;
+
+function getMaxBatchNames(env: Env): number {
+  // Invalid/garbage value → the default.
+  const parsed = parseInt(env.MAX_BATCH_NAMES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BATCH_NAMES;
+}
+
+// Calls fn on every item with at most `limit` calls in flight; results keep the
+// input order.
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // Batch metadata endpoint
 app.post("/batch-metadata", async (c) => {
   try {
-    const body = await c.req.json();
+    // A body that is not JSON (or is JSON null) is a client error, not a 500.
+    const body = await c.req.json().catch(() => null);
 
-    if (!body.names || !Array.isArray(body.names)) {
+    if (!body?.names || !Array.isArray(body.names)) {
       const errorResponse: ErrorResponse = {
         error: "Request body must contain 'names' array",
         timestamp: new Date().toISOString(),
@@ -658,9 +706,10 @@ app.post("/batch-metadata", async (c) => {
       return c.json(errorResponse, 400);
     }
 
-    if (body.names.length > 100) {
+    const maxNames = getMaxBatchNames(c.env);
+    if (body.names.length > maxNames) {
       const errorResponse: ErrorResponse = {
-        error: "Cannot process more than 100 names at once",
+        error: `Cannot process more than ${maxNames} names at once`,
         timestamp: new Date().toISOString(),
       };
       return c.json(errorResponse, 400);
@@ -688,46 +737,56 @@ app.post("/batch-metadata", async (c) => {
     const url = new URL(c.req.url);
     const baseUrl = `${url.protocol}//${url.host}`;
 
-    // Resolve each name through the metadata cache (KV + SWR)
-    const results = await Promise.allSettled(
-      body.names.map(async (name: string) => {
-        try {
-          // Same expiry gate as the single-name route (before the cache): an
-          // expired name's KV entry must not be served until hardTtl. checkExpiry
-          // is v2-aware and fails open on outages.
-          await metadataService.checkExpiry(name);
-          const { metadata } = await metadataCacheService.get(
+    // Invalid names are answered without resolving them. Each distinct name is
+    // resolved once, in its canonical form (the metadata cache key's), and every
+    // entry for it shares the result while echoing the name as given.
+    const names: string[] = body.names;
+    const distinct = [...new Set(names.filter((name) => validateEnsName(name)).map(canonicalizeName))];
+
+    type Outcome = { metadata: MetadataResponse } | { error?: string };
+    const deadline = Date.now() + BATCH_TIME_BUDGET_MS;
+    const outcomes = await mapWithConcurrency(distinct, BATCH_CONCURRENCY, async (name): Promise<Outcome> => {
+      if (Date.now() >= deadline) return { error: 'Batch time budget exceeded' };
+      try {
+        // Same expiry gate as the single-name route (before the cache): an
+        // expired name's KV entry must not be served until hardTtl. checkExpiry
+        // is v2-aware and fails open on outages.
+        await metadataService.checkExpiry(name);
+        const { metadata } = await metadataCacheService.get(
+          network,
+          registryType,
+          name,
+          c.executionCtx,
+          () => metadataService.getMetadata(
             network,
-            registryType,
+            registryType as 'registry' | 'namewrapper',
             name,
+            baseUrl,
             c.executionCtx,
-            () => metadataService.getMetadata(
-              network,
-              registryType as 'registry' | 'namewrapper',
-              name,
-              baseUrl,
-              c.executionCtx,
-            ),
-          );
-          return { name, metadata };
-        } catch (err) {
-          if (err instanceof DomainExpiredError) {
-            return { name, error: err.message };
-          }
-          return { name, error: `Failed to resolve ${name}` };
-        }
-      }),
-    );
+          ),
+        );
+        return { metadata };
+      } catch (err) {
+        // An expiry verdict keeps its message; any other failure is reported per
+        // entry below, as "Failed to resolve <entry>".
+        return { error: err instanceof DomainExpiredError ? err.message : undefined };
+      }
+    });
+    const outcomeByName = new Map(distinct.map((name, i) => [name, outcomes[i]]));
+
+    const results = names.map((name) => {
+      if (!validateEnsName(name)) return { name, error: 'Invalid ENS name format' };
+      const outcome = outcomeByName.get(canonicalizeName(name))!;
+      return 'metadata' in outcome
+        ? { name, metadata: outcome.metadata }
+        : { name, error: outcome.error ?? `Failed to resolve ${name}` };
+    });
 
     const batchResponse = {
-      results: results.map((r, i) =>
-        r.status === 'fulfilled'
-          ? r.value
-          : { name: body.names[i], error: 'Processing failed' },
-      ),
-      total: body.names.length,
-      successful: results.filter(r => r.status === 'fulfilled' && !('error' in r.value)).length,
-      failed: results.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && 'error' in r.value)).length,
+      results,
+      total: names.length,
+      successful: results.filter(r => !('error' in r)).length,
+      failed: results.filter(r => 'error' in r).length,
     };
 
     return c.json(batchResponse);
