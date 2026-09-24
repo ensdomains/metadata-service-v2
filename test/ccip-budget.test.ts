@@ -305,6 +305,47 @@ describe('gateway redirect hops', () => {
   });
 });
 
+// WEB-1550 / WEB-1555: a gateway URL, from the revert or from a gateway's
+// redirect, may only use its scheme's default port. A refused URL sends
+// nothing, so it is not charged to the allowance either.
+describe('gateway ports', () => {
+  const SENDER = '0x1111111111111111111111111111111111111111' as const;
+
+  function stubGateways(routes: Record<string, () => Response> = {}) {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      requested.push(url);
+      return routes[url]?.() ?? new Response('0x02');
+    }));
+    return requested;
+  }
+
+  it('refuses gateways on non-default ports without a request or a charge', async () => {
+    const ports = ['8080', '6379', '22'];
+    // More refused gateways than the allowance has fetches: were they charged,
+    // the last gateway would be refused too.
+    const refused = Array.from({ length: MAX_CCIP_REQUESTS_PER_REQUEST + 1 }, (_, i) => `https://gw${i}.example:${ports[i % ports.length]}/{data}`);
+    const requested = stubGateways();
+    const result = await withRequestBudget(() =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [...refused, 'https://gw.example:443/{data}'] }),
+    );
+    expect(result).toBe('0x02');
+    expect(requested).toEqual(['https://gw.example/0x01']);
+  });
+
+  it('refuses a gateway redirect to a non-default port and moves on to the next gateway', async () => {
+    const requested = stubGateways({
+      'https://gw.example/0x01': () => new Response(null, { status: 307, headers: { Location: 'https://gw.example:8545/0x01' } }),
+    });
+    const result = await withRequestBudget(() =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: ['https://gw.example/{data}', 'https://gw2.example/{data}'] }),
+    );
+    expect(result).toBe('0x02');
+    expect(requested).toEqual(['https://gw.example/0x01', 'https://gw2.example/0x01']);
+  });
+});
+
 describe('after the allowance is spent', () => {
   it('sends no further gateway requests in the same request', async () => {
     const { takeCcipBytes } = await import('../src/services/request-budget');
