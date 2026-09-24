@@ -28,8 +28,10 @@ export class SyncService {
     private config: SyncConfig
   ) {}
 
-  // Sync a single domain from ensnode to D1
-  async syncDomain(name: string, force: boolean = false): Promise<SyncResult> {
+  // Sync a single domain from ensnode to D1. `fetched` is the domain the caller
+  // already read from the same indexer (getMetadata): it is stored as-is
+  // instead of being queried again.
+  async syncDomain(name: string, force: boolean = false, fetched?: IndexerDomain): Promise<SyncResult> {
     const startTime = Date.now();
     let processed = 0;
     let stored = 0;
@@ -57,8 +59,10 @@ export class SyncService {
 
       processed = 1;
 
-      // Fetch from ensnode
-      const { domain, usedFallback } = await this.indexerV2.getDomain(name);
+      // Fetch from ensnode, unless the caller already has the domain
+      const { domain, usedFallback } = fetched
+        ? { domain: fetched, usedFallback: false }
+        : await this.indexerV2.getDomain(name);
 
       if (domain) {
         await this.d1.storeDomain(domain, 'ensnode');

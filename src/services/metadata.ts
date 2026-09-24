@@ -89,6 +89,8 @@ export interface MetadataServiceConfig {
   fallbackToBlockchain: boolean;
   internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
+  /** D1 rows older than this are a miss on read (default D1_READ_MAX_AGE_MS). */
+  d1ReadMaxAgeMs?: number;
   network?: NetworkName;
 }
 
@@ -170,17 +172,19 @@ export class MetadataService {
 
     // Initialize D1 and sync services if enabled
     if (config.d1Enabled && db) {
-      this.d1 = new D1Service(db, this.network);
+      this.d1 = new D1Service(db, this.network, { readMaxAgeMs: config.d1ReadMaxAgeMs });
       this.sync = new SyncService(this.d1, this.indexerV2, DEFAULT_SYNC_CONFIG);
     }
   }
 
-  // Get metadata for a single domain (no API response caching - CF handles this)
+  // Get metadata for a single domain (no API response caching - CF handles this).
+  // `executionCtx` (the request's) runs the D1 sync after the response.
   async getMetadata(
     network: NetworkName,
     registryType: "registry" | "namewrapper",
     identifier: string,
     baseUrl?: string,
+    executionCtx?: Pick<ExecutionContext, 'waitUntil'>,
   ): Promise<MetadataResponse> {
     // Validate identifier as ENS name
     if (!validateEnsName(identifier)) {
@@ -226,13 +230,20 @@ export class MetadataService {
           registryType,
         );
 
-        // Store in D1 if enabled
-        if (this.d1 && this.sync) {
-          await this.sync
-            .syncDomain(identifier)
+        // Store in D1 if enabled, off the response path: the sync (its D1 reads
+        // and writes, and its migration/hierarchy follow-ups) runs under
+        // waitUntil and stores the domain fetched above instead of querying
+        // the indexer for it again. Only primary-indexer rows are stored, as
+        // syncDomain always did: an indexerV1 hit means the primary indexer
+        // just missed or failed for this name. Without an execution context
+        // the sync still runs, just not registered with the runtime.
+        if (source === "indexerV2" && this.sync) {
+          const sync = this.sync
+            .syncDomain(identifier, false, domain as IndexerDomain)
             .catch((error) =>
               console.warn(`Failed to sync ${identifier} to D1:`, error),
             );
+          executionCtx?.waitUntil(sync);
         }
       } else {
         // Built from blockchain data

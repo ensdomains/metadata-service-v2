@@ -28,6 +28,7 @@ function makeDb() {
         };
       },
     }),
+    batch: async (stmts: Array<{ run: () => Promise<unknown> }>) => Promise.all(stmts.map((s) => s.run())),
   } as unknown as D1Database;
   return { db, calls };
 }
