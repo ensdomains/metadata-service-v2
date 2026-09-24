@@ -1,10 +1,16 @@
 // Fallback and retry logic for when indexerV2 is down
 import type { IndexerService, IndexerDomain, IndexerMigrationStatus } from './indexer';
 import { type BlockchainService, CONTRACTS } from './blockchain';
-import type { ResolverService } from './resolver';
+import type { ResolverService, NameData } from './resolver';
 import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
 import { type NetworkName } from '../types';
 import { NotFoundError, UpstreamError, InvalidNameError } from './errors';
+
+// How many levels the registry-hierarchy blockchain tier resolves at once. A
+// name can be up to MAX_NAME_LABELS deep: walking it one RPC round-trip after
+// another is slow, and resolving every level at once would fan out against the
+// RPC providers.
+export const HIERARCHY_RESOLVE_CONCURRENCY = 4;
 
 export interface FallbackConfig {
   maxRetries: number;
@@ -343,17 +349,44 @@ export class FallbackService {
           const parts = name.split('.');
           const hierarchyItems = [];
 
-          // Build hierarchy by resolving each level
+          // Resolve the levels, TLD first, up to HIERARCHY_RESOLVE_CONCURRENCY at
+          // a time. outcomes[k] is the level with the last k+1 labels (the final
+          // one is the requested name). Levels are claimed in order and no new
+          // level is claimed after an UpstreamError, so every level before a
+          // failure has settled and the ordered pass below throws the same error
+          // a sequential walk would.
+          const outcomes: Array<{ nameData: NameData } | { error: unknown }> = [];
+          let nextLevel = 0;
+          let upstreamFailed = false;
+          const resolveLevels = async () => {
+            while (nextLevel < parts.length && !upstreamFailed) {
+              const k = nextLevel++;
+              const domainName = parts.slice(parts.length - 1 - k).join('.');
+              try {
+                const nameData = await this.resolver.resolveName(
+                  domainName,
+                  namehash(domainName),
+                  this.config.blockchain.preferredNetwork
+                );
+                outcomes[k] = { nameData };
+              } catch (error) {
+                outcomes[k] = { error };
+                if (error instanceof UpstreamError) upstreamFailed = true;
+              }
+            }
+          };
+          await Promise.all(
+            Array.from({ length: Math.min(HIERARCHY_RESOLVE_CONCURRENCY, parts.length) }, resolveLevels)
+          );
+
+          // Build hierarchy from each level's outcome
           for (let i = parts.length - 1; i >= 0; i--) {
             const domainName = parts.slice(i).join('.');
-            const node = namehash(domainName);
 
             try {
-              const nameData = await this.resolver.resolveName(
-                domainName,
-                node,
-                this.config.blockchain.preferredNetwork
-              );
+              const outcome = outcomes[parts.length - 1 - i];
+              if ('error' in outcome) throw outcome.error;
+              const { nameData } = outcome;
 
               hierarchyItems.push({
                 name: domainName,

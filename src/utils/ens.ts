@@ -182,6 +182,12 @@ export function isEmptyHash(hash: string): boolean {
 // cache-flooding via arbitrarily long names.
 export const MAX_ENS_NAME_LENGTH = 255;
 
+// Max accepted number of labels in a name. Real names are a few levels deep, so
+// 32 is far above any legitimate use. Caps the per-label work of the name-taking
+// routes (the registry-hierarchy blockchain tier resolves every ancestor level),
+// which MAX_ENS_NAME_LENGTH alone leaves at up to 128 one-character labels.
+export const MAX_NAME_LABELS = 32;
+
 /**
  * Canonical form for cache keys, indexer queries, and invalidation matching.
  * ENS labels are case-insensitive (the namehash lowercases ASCII), so two
@@ -216,6 +222,10 @@ export function validateEnsName(name: string): boolean {
   // Basic validation - contains at least one dot and ends with valid TLD
   const parts = name.split(".");
   if (parts.length < 2) {
+    return false;
+  }
+
+  if (parts.length > MAX_NAME_LABELS) {
     return false;
   }
 
