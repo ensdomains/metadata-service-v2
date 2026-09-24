@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { HttpRequestError } from 'viem';
-import { AvatarResolver, type ChainClient, type Fetcher, type ReadContractParams } from '@ensdomains/ens-avatar';
+import { AvatarResolver, utils, type ChainClient, type Fetcher, type ReadContractParams } from '@ensdomains/ens-avatar';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
 import { NETWORKS } from '../src/config/networks';
@@ -43,6 +43,8 @@ function makeService(primary: FakeResolver, legacy?: FakeResolver): AvatarServic
 }
 
 const NFT_RECORD = 'eip155:1/erc721:0xabc/1';
+
+const CID = 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG';
 
 const IMG_URL = 'https://meta.test/mainnet/avatar/nick.eth';
 
@@ -248,6 +250,40 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     });
   });
 
+  it.each([
+    [CID, `https://ipfs.io/ipfs/${CID}`],
+    [`ipfs/${CID}/1.png`, `https://ipfs.io/ipfs/${CID}/1.png`],
+    [`/ipfs/${CID}/1.png`, `https://ipfs.io/ipfs/${CID}/1.png`],
+    [
+      'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi',
+      'https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi',
+    ],
+    ['/ipns/example.eth/pic.png', 'https://ipfs.io/ipns/example.eth/pic.png'],
+  ])('resolves a CID-path image (%s) as the avatar endpoint does, keeping the NFT response', async (image, expected) => {
+    const host_meta = { chain_id: 1, namespace: 'erc721', contract_address: '0xabc', token_id: '1' };
+    const primary = readingResolver(NFT_RECORD, { image, is_owner: true, host_meta });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toMatchObject({ image: expected, is_owner: true, host_meta });
+  });
+
+  it('resolves CID paths in link fields, but not data:-wrapped, script or over-long values', async () => {
+    // 512 characters: the longest value the service resolves as a storage path.
+    const withinCap = `ipfs/${CID}/${'a'.repeat(512 - `ipfs/${CID}/`.length)}`;
+    const primary = uriMeta({
+      image: `ipfs/${CID}/1.png`,
+      image_url: 'data:,https://cdn.test/x.png',
+      animation_url: withinCap,
+      external_url: `${withinCap}a`,
+      youtube_url: `javascript:${CID}`,
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({
+      uri: 'nick.eth',
+      image: `https://ipfs.io/ipfs/${CID}/1.png`,
+      animation_url: `https://ipfs.io/${withinCap}`,
+    });
+  });
+
   it('keeps only http(s) link fields and leaves unrelated fields alone', async () => {
     const primary = uriMeta({
       image: 'https://cdn.test/a.png',
@@ -409,6 +445,18 @@ describe('AvatarService.getAvatarMeta with the real ens-avatar resolver', () => 
       },
     });
   });
+
+  it.each([CID, `ipfs/${CID}/7.png`, `/ipfs/${CID}/7.png`])(
+    'serves a CID-path token image (%s) as the URL the avatar endpoint resolves it to',
+    async (image) => {
+      const svc = realService({ records: { 'nick.eth': `eip155:1/erc721:${CONTRACT}/7` }, tokenMeta: { image } });
+      const result = await svc.getAvatarMeta('nick.eth', IMG_URL);
+      // The library's own image resolution (what getAvatar serves) for the same token.
+      const avatarImage = utils.getImageURI({ metadata: { image } });
+      expect(avatarImage).toMatch(/^https:\/\/ipfs\.io\/ipfs\//);
+      expect(result).toMatchObject({ image: avatarImage, is_owner: true, host_meta: { token_id: '7' } });
+    },
+  );
 
   it('classifies concurrent lookups on the shared resolver independently', async () => {
     // nft.eth reads its record first but finishes last; uri.eth's record is read

@@ -223,16 +223,47 @@ const NFT_RECORD = /^(?:did:nft:)?eip155:/i;
 // carried). `image` and `image_url` are handled separately.
 const LINK_FIELDS = ['animation_url', 'external_url', 'external_link', 'youtube_url'] as const;
 
-/** `value` as a canonical http(s) URL (ipfs/ipns/ar rewritten first), else null. */
-function toHttpUrl(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
+// Longest value handed to ens-avatar's resolveURI in resolveStoragePath. Real
+// CIDs are under 100 characters; alpha.2 runs CID.parse, which is quadratic in
+// the input length, on the uncapped value (the hardened release caps CIDs at 256).
+const MAX_STORAGE_PATH_LENGTH = 512;
+
+/**
+ * The storage forms the library's image resolution also accepts — a bare CID,
+ * `ipfs/<cid>/…`, `/ipfs/<cid>/…`, `ipns/<name>` — as the gateway URL the avatar
+ * endpoint resolves them to (ens-avatar's resolveURI, default gateways, as the
+ * service's resolvers use). Only its gateway rewrites count (isOnChain false):
+ * its fallback strips a data: prefix, turning e.g. `data:,https://…` into a URL.
+ */
+function resolveStoragePath(value: string): string | null {
+  if (value.length > MAX_STORAGE_PATH_LENGTH) return null;
+  try {
+    const { uri, isOnChain } = avatarUtils.resolveURI(value);
+    return isOnChain ? null : uri;
+  } catch {
+    return null;
+  }
+}
+
+function parseHttpUrl(value: string | null): string | null {
+  if (value === null) return null;
   let url: URL;
   try {
-    url = new URL(toGatewayUrl(value.trim()));
+    url = new URL(value);
   } catch {
     return null;
   }
   return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+}
+
+/**
+ * `value` as a canonical http(s) URL (ipfs/ipns/ar URIs and CID paths rewritten
+ * to gateways first), else null.
+ */
+function toHttpUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return parseHttpUrl(toGatewayUrl(trimmed)) ?? parseHttpUrl(resolveStoragePath(trimmed));
 }
 
 /**
