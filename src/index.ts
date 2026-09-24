@@ -12,6 +12,7 @@ import {
   rateLimiter,
   requestLogger,
 } from "./middleware/validation";
+import { securityHeaders } from "./middleware/security-headers";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
 import { canonicalizeName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
@@ -229,6 +230,9 @@ function getServices(env: Env, network: NetworkName): FullServices {
 }
 
 // Middleware
+// First, so the security headers wrap everything below: other middleware,
+// notFound, onError and edge-cache hits (see middleware/security-headers.ts).
+app.use("*", securityHeaders);
 app.use(trimTrailingSlash());
 app.use(
   "*",
