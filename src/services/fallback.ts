@@ -1,5 +1,6 @@
 // Fallback logic for when indexerV2 is down
 import type { IndexerService, IndexerDomain, IndexerMigrationStatus } from './indexer';
+import type { SharedBreakerState } from './breaker-state';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService, NameData } from './resolver';
 import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
@@ -57,6 +58,8 @@ export class FallbackService {
     private resolver: ResolverService,
     // Optional secondary v1 ENSNode indexer (e.g. sepolia v1 names absent from zigens).
     private indexerV1?: IndexerService,
+    // Optional cross-isolate state for the indexerV2 breaker (see breaker-state.ts).
+    private sharedBreaker?: SharedBreakerState,
   ) {}
 
   // Execute operation with automatic fallback logic
@@ -77,7 +80,7 @@ export class FallbackService {
     // circuit-breaker is open the tier is skipped entirely — v2Consulted then
     // stays false so downstream classification/404 decisions know the v2 index
     // was NOT actually checked.
-    if (this.config.indexerV2.enabled && this.isIndexerV2Healthy()) {
+    if (this.config.indexerV2.enabled && await this.isIndexerV2Healthy()) {
       try {
         const data = await operation.indexerV2();
         return {
@@ -99,7 +102,7 @@ export class FallbackService {
         } else if (error instanceof UpstreamError) {
           sawUpstream = true;
           console.warn(`IndexerV2 ${operationName} upstream failure, tripping breaker:`, error);
-          this.markIndexerV2Unhealthy();
+          await this.markIndexerV2Unhealthy();
         } else {
           // Only a clean miss proves the v2 index lacks the name. Any other
           // error is not an answer, so the final not-found must not be treated
@@ -169,7 +172,17 @@ export class FallbackService {
   }
 
   // Check if indexerV2 is healthy based on recent request outcomes (no proactive health check query)
-  private isIndexerV2Healthy(): boolean {
+  private async isIndexerV2Healthy(): Promise<boolean> {
+    // A trip shared by another isolate that ends later than this isolate's own
+    // cooldown: adopt it, so this isolate skips the indexer until it ends too.
+    const sharedUntil = (await this.sharedBreaker?.trippedUntil()) ?? 0;
+    const localUntil = this.indexerV2Healthy ? 0 : this.lastHealthCheck + this.config.indexerV2.healthCheckIntervalMs;
+    if (sharedUntil > Date.now() && sharedUntil > localUntil) {
+      this.indexerV2Healthy = false;
+      this.lastHealthCheck = sharedUntil - this.config.indexerV2.healthCheckIntervalMs;
+      console.warn('IndexerV2 breaker tripped by another isolate, skipping until', new Date(sharedUntil).toISOString());
+    }
+
     // If marked unhealthy, respect the cooldown period before retrying
     if (!this.indexerV2Healthy) {
       const now = Date.now();
@@ -184,11 +197,12 @@ export class FallbackService {
     return this.indexerV2Healthy;
   }
 
-  // Mark indexerV2 as unhealthy
-  private markIndexerV2Unhealthy(): void {
+  // Mark indexerV2 as unhealthy, here and for the other isolates
+  private async markIndexerV2Unhealthy(): Promise<void> {
     this.indexerV2Healthy = false;
     this.lastHealthCheck = Date.now();
     console.warn('Marked indexerV2 as unhealthy, will retry in', this.config.indexerV2.healthCheckIntervalMs, 'ms');
+    await this.sharedBreaker?.trip(this.lastHealthCheck + this.config.indexerV2.healthCheckIntervalMs);
   }
 
   // Domain metadata fallback
@@ -448,10 +462,12 @@ export class FallbackService {
     };
   }
 
-  // Reset health status (for manual recovery)
-  resetHealthStatus(): void {
+  // Reset health status (for manual recovery). Clears the shared trip too;
+  // isolates that already adopted it keep skipping until it ends.
+  async resetHealthStatus(): Promise<void> {
     this.indexerV2Healthy = true;
     this.lastHealthCheck = 0;
+    await this.sharedBreaker?.reset();
     console.log('Fallback service health status reset');
   }
 }
