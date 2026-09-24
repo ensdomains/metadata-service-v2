@@ -915,6 +915,14 @@ const handleWebhook = async (c: any) => {
           const name = payload?.name ? canonicalizeName(payload.name) : undefined;
           if (!name) return;
 
+          // Drop this isolate's cached expiry verdicts for the name on every
+          // network, for any event type: a renewal, re-registration or burn
+          // changes the verdict. Only services built in this isolate hold any;
+          // other isolates re-read within EXPIRY_VERDICT_TTL_MS.
+          for (const net of SUPPORTED_NETWORKS) {
+            _fullServices.get(net)?.metadataService.evictExpiryVerdict(name);
+          }
+
           // The event carries ENS protocol (v1/v2), not chain — and the chain
           // cannot be derived from the payload (v1 contracts share addresses
           // across chains, and a v2-dialect indexer like zigens emits v1 events
