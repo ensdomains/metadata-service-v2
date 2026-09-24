@@ -312,7 +312,8 @@ app.use("*", async (c, next) => {
   return timeout(30000)(c, next);
 });
 app.use("*", rateLimiter);
-// Per-request allowance for CCIP-read gateway responses (see request-budget.ts).
+// Per-request allowance for CCIP-read gateway responses and the upstream
+// deadline, under the 30s timeout above (see request-budget.ts).
 app.use("*", (_c, next) => withRequestBudget(next));
 // Outbound fetches made for this request never target the host it is served on
 // (see media-fetch.ts).

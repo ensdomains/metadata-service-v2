@@ -4,7 +4,7 @@ import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService, NameData } from './resolver';
 import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
 import { type NetworkName } from '../types';
-import { NotFoundError, UpstreamError, InvalidNameError } from './errors';
+import { NotFoundError, RequestDeadlineError, UpstreamError, InvalidNameError } from './errors';
 
 // How many levels the registry-hierarchy blockchain tier resolves at once. A
 // name can be up to MAX_NAME_LABELS deep: walking it one RPC round-trip after
@@ -89,7 +89,11 @@ export class FallbackService {
         // Only an actual upstream failure trips the circuit-breaker. A NotFoundError
         // (name genuinely absent from the v2 index) is a clean miss — fall through
         // to the next tier WITHOUT marking the healthy indexer as unhealthy.
-        if (error instanceof UpstreamError) {
+        if (error instanceof RequestDeadlineError) {
+          // Running out of the request's time is not the indexer's failure: no
+          // answer for this request, but no reason to trip the breaker either.
+          sawUpstream = true;
+        } else if (error instanceof UpstreamError) {
           sawUpstream = true;
           console.warn(`IndexerV2 ${operationName} upstream failure, tripping breaker:`, error);
           this.markIndexerV2Unhealthy();

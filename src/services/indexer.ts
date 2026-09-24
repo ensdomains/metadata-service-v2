@@ -1,6 +1,7 @@
 import { GraphQLClient } from "graphql-request";
 import { canonicalTokenId, namehash } from "../utils/ens";
-import { UpstreamError } from "./errors";
+import { RequestDeadlineError, UpstreamError } from "./errors";
+import { timeLeftForAttempt } from "./request-budget";
 
 // How long to remember that the indexer schema rejected a tokenId/canonicalId
 // filter before probing again (the filter ships server-side; once its deploy
@@ -411,21 +412,35 @@ export class IndexerService {
   // thrown. A *successful* response with empty data is NOT an error — callers map
   // a null result to NotFoundError, which the fallback layer treats as a clean
   // miss rather than an upstream failure.
+  //
+  // Inside a request, each attempt's timeout is cut to what is left of the
+  // request's deadline (the signal aborts the fetch itself), and no attempt
+  // starts once it is (nearly) spent. An attempt that fails with the deadline
+  // spent ends the query in RequestDeadlineError: running out of the request's
+  // time is not the indexer's failure and must not trip the circuit-breaker.
   private async executeQuery<T>(
     query: string,
     variables?: Record<string, any>,
     rootField?: keyof T & string,
   ): Promise<{ data: T; usedFallback: boolean }> {
-    const request = (client: GraphQLClient) =>
-      client.request<T>({ document: query, variables, signal: AbortSignal.timeout(this.timeout) })
-        .then((data) => answerOf<T>(data, rootField));
+    const request = async (client: GraphQLClient, lastError: unknown) => {
+      const timeLeft = timeLeftForAttempt('ensnode request', lastError);
+      const signal = AbortSignal.timeout(Math.min(this.timeout, timeLeft));
+      try {
+        return answerOf<T>(await client.request<T>({ document: query, variables, signal }), rootField);
+      } catch (error) {
+        timeLeftForAttempt('ensnode answered', error);
+        throw error;
+      }
+    };
 
     // Primary, with a single retry on transient failure.
     let primaryError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return { data: await request(this.client), usedFallback: false };
+        return { data: await request(this.client, primaryError), usedFallback: false };
       } catch (error) {
+        if (error instanceof RequestDeadlineError) throw error;
         primaryError = error;
         if (attempt === 0) console.warn(`[indexer] primary request failed (attempt ${attempt + 1}), retrying:`, error);
       }
@@ -434,8 +449,9 @@ export class IndexerService {
 
     if (this.fallbackClient) {
       try {
-        return { data: await request(this.fallbackClient), usedFallback: true };
+        return { data: await request(this.fallbackClient, primaryError), usedFallback: true };
       } catch (fallbackError) {
+        if (fallbackError instanceof RequestDeadlineError) throw fallbackError;
         throw new UpstreamError(
           `All ensnode endpoints failed for query. Last error: ${fallbackError}`,
           { cause: fallbackError },

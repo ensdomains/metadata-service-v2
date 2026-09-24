@@ -3,7 +3,13 @@ import { ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
 import { NETWORKS, SUPPORTED_NETWORKS, type NetworkName, type V1Contracts, type V2Contracts } from '../config/networks';
 import type { NetworkConfig } from '../types';
 import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
-import { UpstreamError } from './errors';
+import { RequestDeadlineError, UpstreamError } from './errors';
+import { deadlineFetch, raceRequestDeadline, timeLeftForAttempt } from './request-budget';
+
+// Per-call RPC timeout. A healthy node answers an eth_call in well under a
+// second; a primary plus three fallbacks at one attempt each (20s) fit the
+// request deadline (request-budget.ts).
+const RPC_TIMEOUT_MS = 5_000;
 
 // Per-network contract address lookups, derived from the central registry
 // (src/config/networks.ts). Typed by NetworkName so `CONTRACTS[network]` needs no cast.
@@ -259,32 +265,40 @@ export class BlockchainService {
     for (const network of SUPPORTED_NETWORKS) {
       const def = NETWORKS[network];
 
-      this.clients.set(network, createPublicClient({
-        chain: def.chain,
-        // CCIP-read gateway URLs come from resolver contracts anyone can deploy,
-        // and the transport bounds how many lookups they can chain.
-        ccipRead: { request: guardedCcipRequest },
-        // Per-call timeout must stay well under the 30s global request budget —
-        // a slow RPC otherwise consumes the whole budget and the request 500s at
-        // the global timeout instead of failing fast / using a fallback.
-        transport: ccipBudgetedHttp(this.env[def.rpcUrlEnvKey], {
-          timeout: 8_000,
-          retryCount: 2,
-          retryDelay: 500,
-        }),
-      }));
-
       const envFallbacks = def.fallbackRpcEnvKeys
         .map((key) => this.env[key])
         .filter(Boolean) as string[];
       // Fall back to the registry's public defaults only when none are configured.
       const fallbackUrls = envFallbacks.length > 0 ? envFallbacks : [...def.defaultFallbackRpcs];
 
-      this.fallbackClients.set(network, fallbackUrls.map((url) =>
+      // One attempt per client: the next client in the chain is the retry.
+      // viem also retries timeouts, so the old primary (8s, retryCount 2) alone
+      // could hang for ~25s of the 30s request timeout before any fallback was
+      // tried (WEB-1552). Only the last client, with nothing left to fail over
+      // to, keeps one retry for transient errors (429/5xx). deadlineFetch aborts
+      // every RPC fetch at the request's deadline.
+      this.clients.set(network, createPublicClient({
+        chain: def.chain,
+        // CCIP-read gateway URLs come from resolver contracts anyone can deploy,
+        // and the transport bounds how many lookups they can chain.
+        ccipRead: { request: guardedCcipRequest },
+        transport: ccipBudgetedHttp(this.env[def.rpcUrlEnvKey], {
+          timeout: RPC_TIMEOUT_MS,
+          retryCount: fallbackUrls.length === 0 ? 1 : 0,
+          retryDelay: 500,
+          fetchFn: deadlineFetch,
+        }),
+      }));
+
+      this.fallbackClients.set(network, fallbackUrls.map((url, i) =>
         createPublicClient({
           chain: def.chain,
           ccipRead: { request: guardedCcipRequest },
-          transport: ccipBudgetedHttp(url, { timeout: 8_000, retryCount: 1 }),
+          transport: ccipBudgetedHttp(url, {
+            timeout: RPC_TIMEOUT_MS,
+            retryCount: i === fallbackUrls.length - 1 ? 1 : 0,
+            fetchFn: deadlineFetch,
+          }),
         })
       ));
     }
@@ -306,7 +320,11 @@ export class BlockchainService {
     return primary ? [primary, ...fallbacks] : fallbacks;
   }
 
-  // Execute call with automatic fallback
+  // Execute call with automatic fallback. Inside a request, no client is tried
+  // once the request's deadline is (nearly) spent, and each attempt is raced
+  // against what is left of it: viem takes no per-call AbortSignal, and an
+  // attempt can also wait on CCIP-read gateways. Both end in
+  // RequestDeadlineError (an UpstreamError).
   async executeWithFallback<T>(
     network: NetworkName,
     operation: (client: PublicClient) => Promise<T>
@@ -319,9 +337,12 @@ export class BlockchainService {
       const isUsingFallback = i > 0;
 
       try {
-        const result = await operation(client);
+        const what = `RPC client ${i} for ${network}`;
+        const timeLeft = timeLeftForAttempt(what, lastError ?? undefined);
+        const result = await raceRequestDeadline(operation(client), timeLeft, what);
         return { result, usedFallback: isUsingFallback };
       } catch (error) {
+        if (error instanceof RequestDeadlineError) throw error;
         lastError = error as Error;
         console.warn(`Client ${i} failed for ${network}:`, error);
         
