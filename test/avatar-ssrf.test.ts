@@ -7,6 +7,7 @@ import {
   BlockedMediaUrlError,
   SELF_HOSTNAMES,
   MAX_MEDIA_REDIRECTS,
+  normalizeHostname,
   resolverDenyList,
 } from '../src/services/media-fetch';
 
@@ -83,6 +84,29 @@ describe('assertFetchableMediaUrl', () => {
     'https://notmetadata.ens.domains.example.com/a.png',
   ])('allows a public URL: %s', (url) => {
     expect(blocked(url)).toBe(false);
+  });
+});
+
+// Every hostname checked here is attacker-chosen (a record, a redirect
+// Location, an OffchainLookup gateway URL), and the URL parser accepts hosts of
+// any length. The trailing-dot regex /\.+$/ was quadratic on a long run of dots
+// followed by a letter (40k dots: over 2 s of CPU per check).
+describe('hostname handling stays linear', () => {
+  it('normalizeHostname strips trailing dots without backtracking', () => {
+    const host = new URL(`https://a${'.'.repeat(40_000)}b/x.png`).hostname;
+    const started = performance.now();
+    expect(normalizeHostname(host)).toBe(host);
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(normalizeHostname('METADATA.ens.domains...')).toBe('metadata.ens.domains');
+    expect(normalizeHostname('[::1]')).toBe('::1');
+  });
+
+  it('refuses hostnames longer than DNS allows before classifying them', () => {
+    expect(blocked(`https://a${'.'.repeat(40_000)}b/x.png`)).toBe(true);
+    expect(blocked(`https://${'a.'.repeat(130)}com/x.png`)).toBe(true); // 263 characters
+    const longest = `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`;
+    expect(longest).toHaveLength(253);
+    expect(blocked(`https://${longest}./x.png`)).toBe(false); // the longest valid name, with its trailing dot
   });
 });
 

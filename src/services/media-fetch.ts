@@ -21,7 +21,10 @@
 //
 // Hostnames are normalized before comparison (lowercase, IPv6 brackets and any
 // trailing dots removed): `metadata.ens.domains.` is the same host as
-// `metadata.ens.domains`, and `localhost.` is still localhost.
+// `metadata.ens.domains`, and `localhost.` is still localhost. A hostname
+// longer than DNS allows is refused before anything else looks at it: the URL
+// parser accepts hosts of any length, and every one checked here is chosen by
+// whoever controls a record, a redirect or an OffchainLookup revert.
 import { utils as avatarUtils, type Fetcher, type FetcherResponse } from '@ensdomains/ens-avatar';
 
 /** This service's own public hostnames (see MetadataService's default origin and docs/webhook.md). */
@@ -33,6 +36,10 @@ export const SELF_HOSTNAMES: readonly string[] = [
 // Same limit as the ens-avatar resolver, so any URL it accepts is also fetchable.
 export const MAX_MEDIA_REDIRECTS = 10;
 
+// RFC 1035: 253 characters, plus one optional trailing dot. Longer hosts cannot
+// resolve.
+const MAX_HOSTNAME_LENGTH = 254;
+
 export class BlockedMediaUrlError extends Error {
   constructor(message: string) {
     super(message);
@@ -41,7 +48,13 @@ export class BlockedMediaUrlError extends Error {
 }
 
 export function normalizeHostname(hostname: string): string {
-  return hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.+$/, '');
+  const host = hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+  // Strip trailing dots in one backward scan. The regex /\.+$/ retries from
+  // every dot in a run and is quadratic on a long run of dots followed by a
+  // letter.
+  let end = host.length;
+  while (end > 0 && host.charCodeAt(end - 1) === 0x2e) end--;
+  return host.slice(0, end);
 }
 
 function isDenied(host: string, denyList: readonly string[]): boolean {
@@ -63,6 +76,9 @@ export function resolverDenyList(hosts: readonly string[] = SELF_HOSTNAMES): str
 export function assertFetchableMediaUrl(url: URL, denyList: readonly string[] = SELF_HOSTNAMES): void {
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw new BlockedMediaUrlError(`blocked media URL scheme: ${url.protocol}`);
+  }
+  if (url.hostname.length > MAX_HOSTNAME_LENGTH) {
+    throw new BlockedMediaUrlError(`blocked media host: longer than ${MAX_HOSTNAME_LENGTH} characters`);
   }
   const host = normalizeHostname(url.hostname);
   if (!host || avatarUtils.isPrivateHostname(host)) {
