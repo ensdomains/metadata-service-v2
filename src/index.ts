@@ -1044,8 +1044,12 @@ app.get(
 
       const result = await imageCacheService.getImage(name, options, c.executionCtx);
 
+      // Never rasterize an owner-chosen SVG avatar here: its resvg cost is
+      // unbounded by its size (see withoutSvgAvatar). The shared (cached) card
+      // keeps it for the /image route, which the client renders.
+      let svgForRasterize = imageService.withoutSvgAvatar(result.svg, name, options.migrationStatus);
+
       // Square custom size: rewrite SVG width/height (viewBox stays fixed for auto-scaling)
-      let svgForRasterize = result.svg;
       if (hasCustomSize && !isNonSquare) {
         svgForRasterize = svgForRasterize.replace(
           /<svg([^>]*)\bwidth="(\d+)"([^>]*)\bheight="(\d+)"/,
