@@ -48,6 +48,12 @@ interface RequestBudget {
   offchainLookups: number;
   /** Epoch ms after which no upstream work is started or awaited. */
   deadline: number;
+  /**
+   * Upstream endpoints that failed at the transport level (timeout, HTTP error,
+   * rate limit) earlier in this request. Later reads skip them: without this,
+   * every sequential read in a request waited out the same hung primary again.
+   */
+  failedEndpoints: Set<string>;
 }
 
 const storage = new AsyncLocalStorage<RequestBudget>();
@@ -55,9 +61,26 @@ const storage = new AsyncLocalStorage<RequestBudget>();
 /** Run `fn` with a fresh budget (called once per incoming request). */
 export function withRequestBudget<T>(fn: () => T): T {
   return storage.run(
-    { ccipBytes: 0, ccipRequests: 0, ccipExhausted: false, offchainLookups: 0, deadline: Date.now() + REQUEST_DEADLINE_MS },
+    {
+      ccipBytes: 0,
+      ccipRequests: 0,
+      ccipExhausted: false,
+      offchainLookups: 0,
+      deadline: Date.now() + REQUEST_DEADLINE_MS,
+      failedEndpoints: new Set(),
+    },
     fn,
   );
+}
+
+/** True if `endpoint` failed at the transport level earlier in this request. */
+export function endpointFailedInRequest(endpoint: string): boolean {
+  return storage.getStore()?.failedEndpoints.has(endpoint) ?? false;
+}
+
+/** Remember for the rest of this request that `endpoint` failed (no-op outside a request). */
+export function markEndpointFailed(endpoint: string): void {
+  storage.getStore()?.failedEndpoints.add(endpoint);
 }
 
 /**

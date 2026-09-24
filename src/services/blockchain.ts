@@ -1,10 +1,27 @@
-import { createPublicClient, PublicClient, getContract } from 'viem';
+import {
+  createPublicClient,
+  PublicClient,
+  getContract,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  ExecutionRevertedError,
+  HttpRequestError,
+  LimitExceededRpcError,
+  RawContractError,
+  TimeoutError,
+} from 'viem';
 import { ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
 import { NETWORKS, SUPPORTED_NETWORKS, type NetworkName, type V1Contracts, type V2Contracts } from '../config/networks';
 import type { NetworkConfig } from '../types';
 import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
 import { RequestDeadlineError, UpstreamError } from './errors';
-import { deadlineFetch, raceRequestDeadline, timeLeftForAttempt } from './request-budget';
+import {
+  deadlineFetch,
+  endpointFailedInRequest,
+  markEndpointFailed,
+  raceRequestDeadline,
+  timeLeftForAttempt,
+} from './request-budget';
 
 // Per-call RPC timeout. A healthy node answers an eth_call in well under a
 // second; a primary plus three fallbacks at one attempt each (20s) fit the
@@ -244,6 +261,38 @@ export const RESOLVER_ABI = [
   },
 ] as const;
 
+// viem does not export its CCIP-read error classes; match them by name.
+const OFFCHAIN_LOOKUP_ERRORS = new Set([
+  'OffchainLookupError',
+  'OffchainLookupResponseMalformedError',
+  'OffchainLookupSenderMismatchError',
+]);
+
+/**
+ * True when `error` says the RPC endpoint itself failed: it timed out, answered
+ * with an HTTP error or could not be reached, or rate-limited us. A revert,
+ * empty return data or a failed CCIP-read (whose gateway the name's owner
+ * chooses) is an answer about the name, not about the endpoint.
+ */
+function isTransportFailure(error: unknown): boolean {
+  let transport = false;
+  for (let e: unknown = error, depth = 0; e instanceof Error && depth < 16; e = e.cause, depth++) {
+    if (
+      e instanceof ContractFunctionRevertedError ||
+      e instanceof ContractFunctionZeroDataError ||
+      e instanceof ExecutionRevertedError ||
+      e instanceof RawContractError ||
+      OFFCHAIN_LOOKUP_ERRORS.has(e.name)
+    ) {
+      return false;
+    }
+    if (e instanceof HttpRequestError || e instanceof TimeoutError || e instanceof LimitExceededRpcError) {
+      transport = true;
+    }
+  }
+  return transport;
+}
+
 export class BlockchainService {
   private clients: Map<NetworkName, PublicClient> = new Map();
   private fallbackClients: Map<NetworkName, PublicClient[]> = new Map();
@@ -335,6 +384,11 @@ export class BlockchainService {
     for (let i = 0; i < clients.length; i++) {
       const client = clients[i];
       const isUsingFallback = i > 0;
+      // An endpoint that already timed out or errored in this request is
+      // skipped, so a hung primary costs one attempt per request, not one per
+      // read.
+      const endpoint = `rpc:${network}:${i}`;
+      if (endpointFailedInRequest(endpoint)) continue;
 
       try {
         const what = `RPC client ${i} for ${network}`;
@@ -344,6 +398,7 @@ export class BlockchainService {
       } catch (error) {
         if (error instanceof RequestDeadlineError) throw error;
         lastError = error as Error;
+        if (isTransportFailure(error)) markEndpointFailed(endpoint);
         console.warn(`Client ${i} failed for ${network}:`, error);
         
         // If this is not the last client, continue to next
@@ -351,6 +406,10 @@ export class BlockchainService {
           continue;
         }
       }
+    }
+
+    if (!lastError) {
+      throw new UpstreamError(`All RPC clients for ${network} already failed in this request`);
     }
 
     // All clients failed — this IS the upstream-unreadable verdict, so type it:

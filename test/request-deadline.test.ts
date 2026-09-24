@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { HttpRequestError, type PublicClient } from 'viem';
 import { BlockchainService } from '../src/services/blockchain';
 import { IndexerService } from '../src/services/indexer';
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from '../src/services/fallback';
@@ -63,6 +64,12 @@ const after = (ms: number, respond: Handler): Handler => (init) => new Promise<R
 });
 
 const status = (code: number): Handler => async () => new Response('unavailable', { status: code });
+
+// eth_call reverting, as a node answers a contract revert.
+const rpcRevert: Handler = async (init) => {
+  const { id } = JSON.parse(String(init?.body));
+  return Response.json({ jsonrpc: '2.0', id, error: { code: 3, message: 'execution reverted', data: '0x' } });
+};
 
 // eth_call answering an address (registry.owner()).
 const rpcOwner: Handler = async (init) => {
@@ -221,6 +228,103 @@ describe('RPC fallback chain under the request deadline', () => {
     expect(signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(DEADLINE_MS);
     expect(signal.aborted).toBe(true);
+  });
+});
+
+describe('RPC endpoints that failed earlier in the request', () => {
+  it('skips a primary that hung earlier in the same request', async () => {
+    const net = stubFetch({ [PRIMARY]: hang, [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      const first = await svc.getOwner('mainnet', NODE);
+      const start = Date.now();
+      const second = await svc.getOwner('mainnet', NODE);
+      return { first, second, secondMs: Date.now() - start };
+    }), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toMatchObject({ first: OWNER, second: OWNER });
+    expect(out.value!.secondMs).toBeLessThanOrEqual(50); // not another 5s on the hung primary
+    expect(net.count(PRIMARY)).toBe(1);
+    expect(net.count(FALLBACK_1)).toBe(2);
+  });
+
+  it('forgets failed endpoints when the request ends, and remembers none outside a request', async () => {
+    const net = stubFetch({ [PRIMARY]: status(503), [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
+    const svc = new BlockchainService(env);
+
+    await settle(inRequest(DEADLINE_MS, () => svc.getOwner('mainnet', NODE)), 60_000);
+    await settle(inRequest(DEADLINE_MS, () => svc.getOwner('mainnet', NODE)), 60_000);
+    expect(net.count(PRIMARY)).toBe(2);
+
+    await settle(svc.getOwner('mainnet', NODE), 60_000);
+    await settle(svc.getOwner('mainnet', NODE), 60_000);
+    expect(net.count(PRIMARY)).toBe(4);
+    expect(net.count(FALLBACK_1)).toBe(4);
+  });
+
+  it('keeps an endpoint that answered with a revert', async () => {
+    const net = stubFetch({ [PRIMARY]: rpcRevert, [FALLBACK_1]: rpcRevert, [FALLBACK_2]: rpcRevert });
+    const svc = new BlockchainService(env);
+    const owner = (client: PublicClient) => client.readContract({
+      address: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
+      abi: [{ inputs: [{ name: 'node', type: 'bytes32' }], name: 'owner', outputs: [{ name: '', type: 'address' }], stateMutability: 'view', type: 'function' }],
+      functionName: 'owner',
+      args: [NODE as `0x${string}`],
+    });
+
+    await settle(inRequest(DEADLINE_MS, async () => {
+      await svc.executeWithFallback('mainnet', owner).catch(() => {});
+      await svc.executeWithFallback('mainnet', owner).catch(() => {});
+    }), 60_000);
+
+    expect(net.count(PRIMARY)).toBe(2);
+    expect(net.count(FALLBACK_1)).toBe(2);
+  });
+
+  it('keeps an endpoint when a CCIP-read gateway, not the endpoint, failed', async () => {
+    const svc = new BlockchainService(env);
+    // viem's OffchainLookupError, wrapping the gateway's HttpRequestError.
+    const gatewayDown = Object.assign(new Error('Offchain lookup failed', {
+      cause: new HttpRequestError({ url: 'https://gateway.example', status: 502 }),
+    }), { name: 'OffchainLookupError' });
+    const endpointDown = new HttpRequestError({ url: PRIMARY, status: 502 });
+    const clients: PublicClient[] = [];
+    const run = (fail: Error) => {
+      let first = true;
+      return svc.executeWithFallback('mainnet', async (client) => {
+        clients.push(client);
+        if (first) { first = false; throw fail; }
+        return 'ok';
+      });
+    };
+
+    await settle(inRequest(DEADLINE_MS, async () => {
+      await run(gatewayDown); // primary throws, fallback 1 answers
+      await run(endpointDown); // primary tried again, throws, fallback 1 answers
+      await run(endpointDown); // primary skipped: fallback 1 throws, fallback 2 answers
+    }), 60_000);
+
+    const [primary, fallback1, fallback2] = svc.getAllClients('mainnet');
+    expect(clients).toEqual([primary, fallback1, primary, fallback1, fallback1, fallback2]);
+  });
+
+  it('fails at once when every endpoint already failed in this request', async () => {
+    const net = stubFetch({ [PRIMARY]: status(503), [FALLBACK_1]: status(503), [FALLBACK_2]: status(503) });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      await svc.getOwner('mainnet', NODE).catch(() => {});
+      const fetches = net.calls.length;
+      const start = Date.now();
+      const error = await svc.getOwner('mainnet', NODE).catch((e: unknown) => e);
+      return { error, fetches: net.calls.length - fetches, ms: Date.now() - start };
+    }), 60_000);
+
+    expect(out.value!.error).toBeInstanceOf(UpstreamError);
+    expect(out.value!.fetches).toBe(0);
+    expect(out.value!.ms).toBe(0);
   });
 });
 
