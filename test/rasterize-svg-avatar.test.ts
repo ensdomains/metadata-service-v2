@@ -11,7 +11,19 @@ import { createMockEnv } from './mocks/hono-env';
 // raster avatars are unchanged. The layout composer is NOT mocked here: the
 // replacement must match the markup the real composer emits.
 
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+// Headers only: the rasterizer is mocked, and forRasterization reads just the
+// declared pixel size.
+function pngHeader(width: number, height: number): Buffer {
+  const ihdr = Buffer.alloc(25);
+  ihdr.writeUInt32BE(13, 0);
+  ihdr.write('IHDR', 4, 'ascii');
+  ihdr.writeUInt32BE(width, 8);
+  ihdr.writeUInt32BE(height, 12);
+  ihdr[16] = 8;
+  ihdr[17] = 6;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr]);
+}
+const PNG = pngHeader(400, 400);
 const HOSTILE_SVG = Buffer.from(
   '<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500"><defs>' +
     '<filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="50"/></filter>' +
@@ -75,14 +87,14 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
-describe('ImageGenerationService.withoutSvgAvatar', () => {
+describe('ImageGenerationService.forRasterization', () => {
   it.each(['unmigrated', 'migrated', 'native'] as const)(
     'turns a %s card with an SVG avatar into exactly the no-avatar card',
     async (migrationStatus) => {
       const withAvatar = await card('nick.eth', { avatarBase64: svgB64, avatarMimeType: 'image/svg+xml', migrationStatus });
       expect(withAvatar).toContain(`data:image/svg+xml;base64,${svgB64}`);
 
-      const stripped = svc.withoutSvgAvatar(withAvatar, 'nick.eth', migrationStatus);
+      const stripped = svc.forRasterization(withAvatar, 'nick.eth', migrationStatus);
       expect(stripped).not.toContain('data:image/svg+xml');
       expect(collapse(stripped)).toBe(collapse(await card('nick.eth', { migrationStatus })));
     },
@@ -91,19 +103,19 @@ describe('ImageGenerationService.withoutSvgAvatar', () => {
   it('uses the character-set colour and the custom card size', async () => {
     const size = { width: 800, height: 600 };
     const withAvatar = await card('a-b.eth', { avatarBase64: svgB64, avatarMimeType: 'image/svg+xml', size });
-    const stripped = svc.withoutSvgAvatar(withAvatar, 'a-b.eth');
+    const stripped = svc.forRasterization(withAvatar, 'a-b.eth');
     expect(stripped).toContain('<rect width="800" height="600" fill="#4ECDC4"/>');
     expect(collapse(stripped)).toBe(collapse(await card('a-b.eth', { size })));
   });
 
   it('leaves a card with a raster avatar untouched', async () => {
     const withAvatar = await card('nick.eth', { avatarBase64: pngB64, avatarMimeType: 'image/png' });
-    expect(svc.withoutSvgAvatar(withAvatar, 'nick.eth')).toBe(withAvatar);
+    expect(svc.forRasterization(withAvatar, 'nick.eth')).toBe(withAvatar);
   });
 
   it('fails closed when an SVG data URI survives in other markup', () => {
     const odd = `<svg xmlns="http://www.w3.org/2000/svg"><image xlink:href='data:image/svg+xml;base64,${svgB64}' width="518" height="518"/></svg>`;
-    expect(() => svc.withoutSvgAvatar(odd, 'nick.eth')).toThrow(/unexpected embedded SVG/);
+    expect(() => svc.forRasterization(odd, 'nick.eth')).toThrow(/unexpected embedded data URI/);
   });
 });
 

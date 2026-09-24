@@ -1044,10 +1044,11 @@ app.get(
 
       const result = await imageCacheService.getImage(name, options, c.executionCtx);
 
-      // Never rasterize an owner-chosen SVG avatar here: its resvg cost is
-      // unbounded by its size (see withoutSvgAvatar). The shared (cached) card
-      // keeps it for the /image route, which the client renders.
-      let svgForRasterize = imageService.withoutSvgAvatar(result.svg, name, options.migrationStatus);
+      // Never rasterize an owner-chosen SVG avatar, or a raster one declaring
+      // a huge pixel size, here: resvg's cost is unbounded by the file size
+      // (see forRasterization). The shared (cached) card keeps the avatar for
+      // the /image route, which the client renders.
+      let svgForRasterize = imageService.forRasterization(result.svg, name, options.migrationStatus);
 
       // Square custom size: rewrite SVG width/height (viewBox stays fixed for auto-scaling)
       if (hasCustomSize && !isNonSquare) {

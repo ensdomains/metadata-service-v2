@@ -5,16 +5,27 @@ import { getCharacterSet } from "../utils/ens";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
 import { isSafeImageType } from "./media-safety";
+import { rasterDimensions } from "./raster-dimensions";
 
 // Standard base64 alphabet only. The avatar payload is interpolated into an SVG
 // attribute, so anything else must never reach the markup.
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
-// An SVG avatar as the layout composer embeds it in the card (the payload is
+// An avatar as the layout composer embeds it in the card (the payload is
 // BASE64_RE-validated, so it cannot contain a quote), and, as a fail-closed
-// backstop, any SVG data URI still in an href once that element is replaced.
-const SVG_AVATAR_ELEMENT_RE = /<image href="data:image\/svg\+xml;base64,[A-Za-z0-9+/]*={0,2}" width="(\d+)" height="(\d+)"\/>/g;
-const SVG_DATA_HREF_RE = /\bhref\s*=\s*["']\s*data:image\/svg\+xml/i;
+// backstop, any data: URI in an href (resvg also renders SVG served as
+// data:text/plain or data:;base64).
+const AVATAR_ELEMENT_RE = /<image href="data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+/]*={0,2})" width="(\d+)" height="(\d+)"\/>/g;
+const DATA_HREF_RE = /\bhref\s*=\s*["']?\s*data:/gi;
+
+// Raster formats resvg decodes, and the largest raster avatar the Worker
+// rasterizes, in declared pixels. resvg allocates the whole decoded bitmap in
+// WebAssembly memory, which never shrinks for the life of the isolate: up to
+// 2048x2048 a render adds ~40 MB, 4096x4096 ~100 MB, and a 61 KiB PNG declaring
+// 8000x8000 ~0.4 GB, against a 128 MB isolate limit. The card draws the avatar
+// at 518px, so nothing visible is lost below the cap.
+const RASTERIZABLE_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_RASTERIZED_AVATAR_PIXELS = 2048 * 2048;
 
 // Escape user-controlled text before it is interpolated into SVG markup. The
 // layout composer inlines `text` into `<text>...</text>` without escaping, so a
@@ -156,23 +167,36 @@ export class ImageGenerationService {
   }
 
   // The card as it may be rasterized on this service (the /rasterize route runs
-  // resvg inside the Worker): an embedded SVG avatar is replaced by the card's
-  // no-avatar background. Rendering an owner-chosen SVG costs CPU out of all
-  // proportion to its size (<use> fan-out, per-element filters, masks or group
-  // opacity, plain full-canvas fills at up to 2000px output), from under a KiB
-  // to far past the 30s CPU limit, and neither a byte cap nor a feature
-  // blocklist bounds it. Raster avatars are left in place (resvg decodes them).
+  // resvg inside the Worker). An embedded avatar is kept only if it is a PNG,
+  // JPEG, GIF or WebP whose header declares at most MAX_RASTERIZED_AVATAR_PIXELS;
+  // anything else is replaced by the card's no-avatar background:
+  // - an SVG avatar: rendering owner-chosen SVG costs CPU out of all proportion
+  //   to its size (<use> fan-out, per-element filters, masks or group opacity,
+  //   plain full-canvas fills at up to 2000px output), from under a KiB to far
+  //   past the 30s CPU limit, and neither a byte cap nor a feature blocklist
+  //   bounds it;
+  // - a raster avatar that is too large, or whose size cannot be read: resvg
+  //   decodes the full bitmap, so a small file declaring a huge size exhausts
+  //   the isolate's memory.
   // `name` and `migrationStatus` must be the ones the card was generated with.
-  withoutSvgAvatar(svg: string, name: string, migrationStatus: MigrationStatus = "unmigrated"): string {
+  forRasterization(svg: string, name: string, migrationStatus: MigrationStatus = "unmigrated"): string {
     const { background } = this.getColorScheme(migrationStatus, getCharacterSet(name));
+    let kept = 0;
     const out = svg.replace(
-      SVG_AVATAR_ELEMENT_RE,
-      (_match, width: string, height: string) => `<rect width="${width}" height="${height}" fill="${background}"/>`,
+      AVATAR_ELEMENT_RE,
+      (element, type: string, payload: string, width: string, height: string) => {
+        const size = RASTERIZABLE_AVATAR_TYPES.has(type) ? rasterDimensions(type, payload) : null;
+        if (size && size.width * size.height <= MAX_RASTERIZED_AVATAR_PIXELS) {
+          kept++;
+          return element;
+        }
+        return `<rect width="${width}" height="${height}" fill="${background}"/>`;
+      },
     );
-    // An SVG avatar in any other markup (e.g. after a composer change) must
-    // still never reach the rasterizer.
-    if (SVG_DATA_HREF_RE.test(out)) {
-      throw new Error(`Refusing to rasterize the card for ${name}: unexpected embedded SVG`);
+    // Every data: URI left must be an avatar vetted above; one in any other
+    // markup (e.g. after a composer change) must never reach the rasterizer.
+    if ((out.match(DATA_HREF_RE) ?? []).length !== kept) {
+      throw new Error(`Refusing to rasterize the card for ${name}: unexpected embedded data URI`);
     }
     return out;
   }
