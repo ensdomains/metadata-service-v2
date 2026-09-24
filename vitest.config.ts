@@ -7,6 +7,11 @@ export default defineConfig({
     environment: "node",
     include: ["test/**/*.test.ts", "src/**/*.test.ts"],
     exclude: ["refproject/**", "node_modules/**"],
+    coverage: {
+      provider: "v8",
+      // Measure the Worker source only, not scripts/ or demo/.
+      include: ["src/**"],
+    },
   },
   resolve: {
     alias: {

@@ -21,3 +21,13 @@ allowBuilds:
   esbuild: true
   sharp: true
   workerd: true
+
+# `pnpm audit` (CI "Dependency audit" job) exceptions. Each entry says why the
+# advisory cannot affect the deployed Worker and when to drop it.
+auditConfig:
+  ignoreGhsas:
+    # ws < 8.21.0 memory-exhaustion DoS (high). ws is pinned exactly (8.18.3)
+    # by viem, which only loads it through isows for WebSocket transports on
+    # Node; the Worker uses HTTP transports and its bundle contains neither ws
+    # nor isows. Remove once viem is bumped to >= 2.54.2 (pins ws 8.21.0).
+    - GHSA-96hv-2xvq-fx4p

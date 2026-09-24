@@ -1,0 +1,26 @@
+# gitleaks configuration for the CI secret scan (.github/workflows/ci.yml).
+# Runs gitleaks' built-in rules; the allowlist below only exempts the exact,
+# made-up credential strings that tests use as fixtures, and only under test/.
+# Add a new fixture here deliberately (or mark its line `gitleaks:allow`);
+# never allowlist a value that was ever a real key.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake credentials used as test fixtures"
+condition = "AND"
+paths = ['''^test/''']
+regexes = [
+  # test/log-redaction*.ts (WEB-1554): fake RPC provider keys the redaction
+  # tests plant in URLs and then assert never reach a log line.
+  '''^AbCdEfGhIjKlMnOpQrStUvWx1234$''',
+  '''^ZyXwVuTsRqPoNmLk98765$''',
+  '''^MainKeyAbCdEfGh0123456789Zz$''',
+  '''^SepKeyZyXwVu9876543210Qq$''',
+  '''^Sh0rtKey1234$''',
+  '''^AbCdEf(\+|%2B)GhIjKlMnOpQr$''',
+  # An earlier revision of test/api-simple.test.ts: placeholder token id in a
+  # mock response (still in git history, which the scan covers).
+  '''^0x1234567890abcdef$''',
+]
