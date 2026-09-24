@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { HttpRequestError } from 'viem';
 import { AvatarService } from '../src/services/avatar';
+import { UpstreamError } from '../src/services/errors';
 import { NETWORKS } from '../src/config/networks';
 
 // A minimal stand-in for @ensdomains/ens-avatar's AvatarResolver — only
@@ -132,10 +134,10 @@ describe('AvatarService.getAvatarMeta', () => {
     expect(legacy.getMetadata).not.toHaveBeenCalled();
   });
 
-  it('degrades to null when resolution throws (e.g. RPC down)', async () => {
-    const primary = { getMetadata: vi.fn().mockRejectedValue(new Error('rpc down')) };
-    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
-    expect(result).toBeNull();
+  it('fails the lookup (UpstreamError, not null) when resolution throws (e.g. RPC down)', async () => {
+    const rpcDown = new HttpRequestError({ url: 'https://rpc.invalid', status: 503 });
+    const primary = { getMetadata: vi.fn().mockRejectedValue(rpcDown) };
+    await expect(makeService(primary).getAvatarMeta('nick.eth', IMG_URL)).rejects.toBeInstanceOf(UpstreamError);
   });
 
   it('returns null for a non-normalizable name without hitting the resolver', async () => {

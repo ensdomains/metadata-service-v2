@@ -5,6 +5,7 @@ import { AvatarService } from '../src/services/avatar';
 import { BlockchainService } from '../src/services/blockchain';
 import { guardedCcipRequest, MAX_CCIP_RESPONSE_BYTES } from '../src/services/ccip-request';
 import { createGuardedFetcher, fetchMediaUrl, BlockedMediaUrlError } from '../src/services/media-fetch';
+import { UpstreamError } from '../src/services/errors';
 
 // SSRF follow-ups (WEB-1550), found by an adversarial review of the first fix:
 //  - the ens-avatar resolvers' OWN requests (record JSON, NFT metadata, HEAD)
@@ -255,8 +256,10 @@ describe('guardedCcipRequest', () => {
       requested.push(url);
       return new Response('not hex');
     }));
-    const img = await new AvatarService('https://rpc.example/', mainnet).getAvatarImage('attacker.eth');
-    expect(img).toBeNull();
+    // Once viem has wrapped it, a refused gateway cannot be told from an
+    // unreachable one, so the lookup fails (short-lived) rather than caching
+    // "no avatar"; what matters here is that nothing was requested.
+    await expect(new AvatarService('https://rpc.example/', mainnet).getAvatarImage('attacker.eth')).rejects.toBeInstanceOf(UpstreamError);
     expect(requested).toEqual([]);
   });
 });

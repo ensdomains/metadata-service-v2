@@ -19,7 +19,7 @@ import { CacheService } from "./services/cache";
 import { runD1Retention } from "./services/d1";
 import { ImageGenerationService } from "./services/image";
 import { AvatarService } from "./services/avatar";
-import { ImageCacheService } from "./services/image-cache";
+import { ImageCacheService, type ImageCacheResult } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
 import { withRequestBudget } from "./services/request-budget";
@@ -87,6 +87,25 @@ function getCfCache(): Cache | null {
 // globally-purgeable TTLs live in KV (L1) + R2 (L2), which the webhook DOES purge;
 // after this short window a colo re-fetches and picks up the purged-fresh data.
 const EDGE_CACHE_MAX_AGE_SECS = 300;
+
+// Client Cache-Control for an NFT card rendered without its avatar because the
+// avatar lookup failed (RPC, CCIP gateway or media host outage, timeout). The
+// card is kept out of KV/R2 (ImageCacheService) and out of the edge cache, so
+// the avatar shows up as soon as the upstream recovers. A name whose upstream
+// fails for good (e.g. a CCIP gateway answering 503 for a suspended name) is
+// therefore looked up again on each request past this window: each client
+// re-requests it at most about once per window (and the rate limiter bounds
+// each client), which is the cost accepted for never pinning a missing avatar
+// for the full card TTL.
+const DEGRADED_CARD_CACHE_CONTROL = 'public, max-age=60';
+
+// Client Cache-Control for an NFT card (SVG or PNG): the per-migration-status
+// stale-while-revalidate policy, or the short one above for a degraded card.
+function cardCacheControl(result: ImageCacheResult): string {
+  if (result.avatarFailed) return DEGRADED_CARD_CACHE_CONTROL;
+  const { softTtl, hardTtl } = result.ttlConfig;
+  return `public, max-age=${softTtl}, stale-while-revalidate=${hardTtl - softTtl}`;
+}
 
 // L0 edge cache (caches.default) helpers — one consistent mechanism for all GET
 // read routes. `match` returns a fresh Response on hit; `put` stores only OK
@@ -365,6 +384,8 @@ app.get(
         },
       });
     } catch (error) {
+      // A failed lookup (UpstreamError → 503) is not an answer: keep it short-lived.
+      Object.entries(CachePresets.error()).forEach(([key, value]) => c.header(key, value));
       return httpError(c, error, "Failed to resolve avatar");
     }
   }
@@ -406,6 +427,8 @@ app.get(
       edgeCachePut(c, res);
       return res;
     } catch (error) {
+      // A failed lookup (UpstreamError → 503) is not an answer: keep it short-lived.
+      Object.entries(CachePresets.error()).forEach(([key, value]) => c.header(key, value));
       return httpError(c, error, "Failed to resolve avatar metadata");
     }
   }
@@ -438,6 +461,8 @@ app.get(
         },
       });
     } catch (error) {
+      // A failed lookup (UpstreamError → 503) is not an answer: keep it short-lived.
+      Object.entries(CachePresets.error()).forEach(([key, value]) => c.header(key, value));
       return httpError(c, error, "Failed to resolve header");
     }
   }
@@ -516,7 +541,7 @@ async function handleImage(c: any, network: NetworkName, name: string) {
   options.migrationStatus = isMigrationStatus(statusParam) ? statusParam : resolvedStatus;
 
   const result = await imageCacheService.getImage(name, options, c.executionCtx);
-  const { ttlConfig, cacheStatus } = result;
+  const { cacheStatus } = result;
 
   const response = new Response(result.svg, {
     status: 200,
@@ -524,12 +549,13 @@ async function handleImage(c: any, network: NetworkName, name: string) {
       ...MEDIA_SECURITY_HEADERS,
       'Content-Type': result.contentType,
       'X-Cache-Status': cacheStatus,
-      'Cache-Control': `public, max-age=${ttlConfig.softTtl}, stale-while-revalidate=${ttlConfig.hardTtl - ttlConfig.softTtl}`,
+      'Cache-Control': cardCacheControl(result),
     },
   });
 
-  // Store in CF edge cache — next identical request returns instantly
-  edgeCachePut(c, response);
+  // Store in CF edge cache — next identical request returns instantly. Not a
+  // card whose avatar lookup failed (see DEGRADED_CARD_CACHE_CONTROL).
+  if (!result.avatarFailed) edgeCachePut(c, response);
 
   return response;
 }
@@ -1075,14 +1101,15 @@ app.get(
           'Content-Type': 'image/png',
           'Content-Length': png.byteLength.toString(),
           'X-Cache-Status': result.cacheStatus,
-          'Cache-Control': `public, max-age=${result.ttlConfig.softTtl}, stale-while-revalidate=${result.ttlConfig.hardTtl - result.ttlConfig.softTtl}`,
+          'Cache-Control': cardCacheControl(result),
         },
       });
 
       // Store in CF edge cache with the shared capped TTL — caches.default is
       // per-colo and unpurgeable by the webhook, so the full softTtl (hours)
-      // must never reach it (see EDGE_CACHE_MAX_AGE_SECS).
-      edgeCachePut(c, pngResponse);
+      // must never reach it (see EDGE_CACHE_MAX_AGE_SECS). A card whose avatar
+      // lookup failed is not stored at all (see DEGRADED_CARD_CACHE_CONTROL).
+      if (!result.avatarFailed) edgeCachePut(c, pngResponse);
 
       return pngResponse;
     } catch (error) {

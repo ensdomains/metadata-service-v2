@@ -57,6 +57,9 @@ export interface ImageGenerationOptions {
   };
   avatarBase64?: string;
   avatarMimeType?: string;
+  // The caller already looked the avatar up (avatarBase64 is unset when the
+  // name has none or the lookup failed): do not look it up again.
+  skipAvatarLookup?: boolean;
 }
 
 export interface GeneratedImage {
@@ -90,7 +93,7 @@ export class ImageGenerationService {
     let { avatarBase64, avatarMimeType } = options;
 
     // Fetch avatar if not provided and avatar service is available
-    if (!avatarBase64 && this.avatarService) {
+    if (!avatarBase64 && this.avatarService && !options.skipAvatarLookup) {
       try {
         const avatar = await this.avatarService.getAvatarBase64(name);
         if (avatar) {

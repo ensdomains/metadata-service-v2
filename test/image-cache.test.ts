@@ -283,6 +283,22 @@ describe('ImageCacheService', () => {
       await Promise.all(waitUntilPromises);
       expect(svgCacheKv.put).toHaveBeenCalled();
     });
+
+    it('tells the caller the avatar failed, and does not let the image service look it up again', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      vi.mocked(avatarService.getAvatarImage).mockRejectedValueOnce(new Error('RPC timeout')).mockResolvedValueOnce(null);
+
+      const failed = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+      const absent = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      // The route uses this to skip the edge cache and send a short Cache-Control.
+      expect(failed.avatarFailed).toBe(true);
+      expect(absent.avatarFailed).toBe(false);
+      // One lookup per render: a second one would double the wait on an outage.
+      expect(avatarService.getAvatarImage).toHaveBeenCalledTimes(2);
+      expect(avatarService.getAvatarBase64).not.toHaveBeenCalled();
+    });
   });
 
   describe('Stale revalidation with avatar failure', () => {

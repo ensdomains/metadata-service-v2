@@ -20,6 +20,10 @@ export interface ImageCacheResult {
   contentType: string;
   cacheStatus: CacheStatus;
   ttlConfig: TtlConfig;
+  // True when the card was rendered without its avatar because the avatar
+  // lookup failed (not because the name has none). Such a card is not written
+  // to KV/R2, and routes must not cache it for long either.
+  avatarFailed: boolean;
 }
 
 // Compute SHA-256 hex digest of an ArrayBuffer
@@ -93,7 +97,7 @@ export class ImageCacheService {
 
         if (ageSeconds < entry.softTtl) {
           console.log(`[image-cache] L1 HIT ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
-          return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'hit', ttlConfig };
+          return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'hit', ttlConfig, avatarFailed: false };
         }
 
         // Stale — return immediately, revalidate in background
@@ -103,7 +107,7 @@ export class ImageCacheService {
             console.error(`[image-cache] background revalidate failed for ${name}:`, err),
           ),
         );
-        return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig };
+        return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
       }
     } catch (err) {
       console.error(`[image-cache] KV read error for ${cacheKey}:`, err);
@@ -120,7 +124,7 @@ export class ImageCacheService {
             console.error(`[image-cache] KV backfill failed for ${cacheKey}:`, err),
           ),
         );
-        return { svg: r2Svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig };
+        return { svg: r2Svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
       }
     } catch (err) {
       console.error(`[image-cache] R2 read error for ${cacheKey}:`, err);
@@ -139,7 +143,7 @@ export class ImageCacheService {
       );
     }
 
-    return { svg, contentType: 'image/svg+xml', cacheStatus: 'miss', ttlConfig };
+    return { svg, contentType: 'image/svg+xml', cacheStatus: 'miss', ttlConfig, avatarFailed };
   }
 
   // Invalidate all cache entries for a domain name
@@ -232,17 +236,20 @@ export class ImageCacheService {
         }
         // avatar is null → name genuinely has no avatar (avatarFailed stays false)
       } catch (err) {
-        // RPC/fetch error → avatar might exist but we couldn't get it
+        // UpstreamError (RPC, CCIP gateway or media host failure, timeout) →
+        // avatar might exist but we couldn't get it
         avatarFailed = true;
         console.warn(`[image-cache] avatar RPC failed for ${name}:`, err);
       }
     }
 
-    // Generate SVG
+    // Generate SVG. The avatar was looked up above, so the image service must
+    // not look it up again (a second lookup would double the wait on an outage).
     const genOptions: ImageGenerationOptions = {
       ...options,
       avatarBase64,
       avatarMimeType,
+      skipAvatarLookup: true,
     };
 
     const image = await this.imageService.generateDomainImage(genOptions, this.bucket);

@@ -29,6 +29,8 @@
 // whoever controls a record, a redirect or an OffchainLookup revert.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { utils as avatarUtils, type Fetcher, type FetcherResponse } from '@ensdomains/ens-avatar';
+import { UpstreamError } from './errors';
+import { isOutageStatus, reportOutage } from './outage-scope';
 
 /** This service's own public hostnames (see MetadataService's default origin and docs/webhook.md). */
 export const SELF_HOSTNAMES: readonly string[] = [
@@ -241,13 +243,30 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return record;
 }
 
+// Report a failed request to the active lookup's outage scope
+// (outage-scope.ts): the library catches the errors of its image check (HEAD,
+// ranged GET) and reads them as "not an image". A blocked URL, an oversized
+// body and a body that is not JSON are answers about the record, not outages.
+async function reportingOutages<T>(request: () => Promise<FetcherResponse<T>>): Promise<FetcherResponse<T>> {
+  try {
+    const response = await request();
+    if (isOutageStatus(response.status)) reportOutage(new UpstreamError(`media host answered ${response.status}`));
+    return response;
+  } catch (error) {
+    if (!(error instanceof BlockedMediaUrlError) && !(error instanceof SyntaxError)) reportOutage(error);
+    throw error;
+  }
+}
+
 /**
  * A drop-in replacement for the ens-avatar resolver's fetcher. The library's
  * own fetcher checks only URL strings (its deny list compares hostnames
  * verbatim, so `host..` and `localhost.` pass), stops its timeout once headers
  * arrive, and reads JSON bodies with no size limit. This one sends every
  * request through fetchMediaUrl, applies one timeout to headers and body, and
- * caps every body it reads.
+ * caps every body it reads. Network errors, timeouts and failing statuses are
+ * reported to the active lookup's outage scope, and a JSON request to a
+ * failing host throws UpstreamError instead of parsing its error page.
  */
 export function createGuardedFetcher(
   timeoutMs: number,
@@ -256,29 +275,39 @@ export function createGuardedFetcher(
 ): Fetcher {
   return {
     async get<T = unknown>(url: string, opts?: { headers?: Record<string, string> }): Promise<FetcherResponse<T>> {
-      const response = await fetchMediaUrl(url, { method: 'GET', headers: opts?.headers, signal: AbortSignal.timeout(timeoutMs) }, denyList);
-      const body = await readBodyCapped(response, maxBodyBytes);
-      if (!body) throw new BlockedMediaUrlError(`metadata response over ${maxBodyBytes} bytes`);
-      const data = JSON.parse(new TextDecoder().decode(body)) as T;
-      return { status: response.status, headers: headersToRecord(response.headers), data };
+      return reportingOutages(async () => {
+        const response = await fetchMediaUrl(url, { method: 'GET', headers: opts?.headers, signal: AbortSignal.timeout(timeoutMs) }, denyList);
+        if (isOutageStatus(response.status)) {
+          await response.body?.cancel().catch(() => {});
+          throw new UpstreamError(`metadata host answered ${response.status}`);
+        }
+        const body = await readBodyCapped(response, maxBodyBytes);
+        if (!body) throw new BlockedMediaUrlError(`metadata response over ${maxBodyBytes} bytes`);
+        const data = JSON.parse(new TextDecoder().decode(body)) as T;
+        return { status: response.status, headers: headersToRecord(response.headers), data };
+      });
     },
     async head(url: string): Promise<FetcherResponse<void>> {
-      const response = await fetchMediaUrl(url, { method: 'HEAD', signal: AbortSignal.timeout(timeoutMs) }, denyList);
-      await response.body?.cancel().catch(() => {});
-      return { status: response.status, headers: headersToRecord(response.headers), data: undefined };
+      return reportingOutages(async () => {
+        const response = await fetchMediaUrl(url, { method: 'HEAD', signal: AbortSignal.timeout(timeoutMs) }, denyList);
+        await response.body?.cancel().catch(() => {});
+        return { status: response.status, headers: headersToRecord(response.headers), data: undefined };
+      });
     },
     async getArrayBuffer(
       url: string,
       opts?: { headers?: Record<string, string>; signal?: AbortSignal },
     ): Promise<FetcherResponse<ArrayBuffer>> {
-      const response = await fetchMediaUrl(
-        url,
-        { method: 'GET', headers: opts?.headers, signal: opts?.signal ?? AbortSignal.timeout(timeoutMs) },
-        denyList,
-      );
-      // The library only sniffs the first bytes of a body served as octet-stream.
-      const data = await readBodyPrefix(response, 1024);
-      return { status: response.status, headers: headersToRecord(response.headers), data };
+      return reportingOutages(async () => {
+        const response = await fetchMediaUrl(
+          url,
+          { method: 'GET', headers: opts?.headers, signal: opts?.signal ?? AbortSignal.timeout(timeoutMs) },
+          denyList,
+        );
+        // The library only sniffs the first bytes of a body served as octet-stream.
+        const data = await readBodyPrefix(response, 1024);
+        return { status: response.status, headers: headersToRecord(response.headers), data };
+      });
     },
   };
 }
