@@ -50,6 +50,13 @@ export interface Env {
   // D1 Database
   DB: D1Database;
 
+  // Rate Limiting bindings, one per rate-limit bucket (wrangler.toml
+  // [[ratelimits]]). A missing one makes that bucket use the KV counter.
+  RATE_LIMITER_DEFAULT?: RateLimit;
+  RATE_LIMITER_BATCH?: RateLimit;
+  RATE_LIMITER_WEBHOOK?: RateLimit;
+  RATE_LIMITER_RASTERIZE?: RateLimit;
+  RATE_LIMITER_IMAGE?: RateLimit;
 
   // Environment Variables
   ENSNODE_MAINNET_URL: string;
