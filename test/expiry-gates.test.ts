@@ -64,7 +64,7 @@ function stubLapsedV1Row(
     source: 'indexerV1' as const,
     usedFallback: true,
     v2Consulted: opts.v2Consulted,
-    retries: 0,
+    fallthroughs: 0,
   };
   p.fallback = {
     getDomainMetadata: vi.fn().mockResolvedValue(result),

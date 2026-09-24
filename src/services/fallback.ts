@@ -1,4 +1,4 @@
-// Fallback and retry logic for when indexerV2 is down
+// Fallback logic for when indexerV2 is down
 import type { IndexerService, IndexerDomain, IndexerMigrationStatus } from './indexer';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService, NameData } from './resolver';
@@ -13,9 +13,6 @@ import { NotFoundError, RequestDeadlineError, UpstreamError, InvalidNameError } 
 export const HIERARCHY_RESOLVE_CONCURRENCY = 4;
 
 export interface FallbackConfig {
-  maxRetries: number;
-  retryDelayMs: number;
-  exponentialBackoff: boolean;
   indexerV2: {
     enabled: boolean;
     healthCheckIntervalMs: number;
@@ -30,7 +27,13 @@ export interface FallbackResult<T> {
   data: T;
   source: 'indexerV2' | 'indexerV1' | 'blockchain';
   usedFallback: boolean;
-  retries: number;
+  /**
+   * How many tiers were tried before `source` and fell through to the next one
+   * (a clean miss or an upstream failure). 0 when the first tier tried
+   * answered. A tier that did not run (disabled, circuit-breaker open) is not
+   * counted. Not a retry count: each tier runs at most once per call.
+   */
+  fallthroughs: number;
   error?: Error;
   /**
    * True when the primary (v2) indexer tier actually ran to a definitive answer
@@ -66,7 +69,7 @@ export class FallbackService {
     operationName: string
   ): Promise<FallbackResult<T>> {
     let lastError: Error | null = null;
-    let retries = 0;
+    let fallthroughs = 0; // tiers tried before the one that answers (miss or failure)
     let sawUpstream = false; // any tier hit a real upstream failure (vs a clean miss)
     let v2Consulted = false; // v2 tier ran to a definitive answer (result or clean miss)
 
@@ -81,7 +84,7 @@ export class FallbackService {
           data,
           source: 'indexerV2',
           usedFallback: false,
-          retries,
+          fallthroughs,
           v2Consulted: true,
         };
       } catch (error) {
@@ -104,7 +107,7 @@ export class FallbackService {
           if (error instanceof NotFoundError) v2Consulted = true;
           console.log(`IndexerV2 ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
         }
-        retries++;
+        fallthroughs++;
       }
     }
 
@@ -116,7 +119,7 @@ export class FallbackService {
           data,
           source: 'indexerV1',
           usedFallback: true,
-          retries,
+          fallthroughs,
           v2Consulted,
         };
       } catch (error) {
@@ -124,7 +127,7 @@ export class FallbackService {
         if (error instanceof UpstreamError) sawUpstream = true;
         const kind = error instanceof UpstreamError ? 'upstream failure' : 'miss';
         console.log(`v1 ENSNode ${operationName} ${kind}, falling back to blockchain:`, (error as Error)?.message);
-        retries++;
+        fallthroughs++;
       }
     }
 
@@ -137,7 +140,7 @@ export class FallbackService {
           data,
           source: 'blockchain',
           usedFallback: true,
-          retries,
+          fallthroughs,
           v2Consulted,
         };
       } catch (error) {
@@ -147,7 +150,7 @@ export class FallbackService {
         // Without this, a total outage would fall through to a cacheable 404.
         if (!(error instanceof NotFoundError)) sawUpstream = true;
         console.error(`Blockchain ${operationName} fallback failed:`, error);
-        retries++;
+        fallthroughs++;
       }
     }
 
@@ -186,35 +189,6 @@ export class FallbackService {
     this.indexerV2Healthy = false;
     this.lastHealthCheck = Date.now();
     console.warn('Marked indexerV2 as unhealthy, will retry in', this.config.indexerV2.healthCheckIntervalMs, 'ms');
-  }
-
-  // Execute operation with retries
-  private async withRetry<T>(
-    operation: () => Promise<T>,
-    operationName: string
-  ): Promise<T> {
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error as Error;
-
-        if (attempt === this.config.maxRetries) {
-          break; // Max retries exceeded
-        }
-
-        const delay = this.config.exponentialBackoff
-          ? this.config.retryDelayMs * Math.pow(2, attempt)
-          : this.config.retryDelayMs;
-
-        console.warn(`${operationName} attempt ${attempt + 1} failed, retrying in ${delay}ms:`, error);
-        await this.sleep(delay);
-      }
-    }
-
-    throw lastError || new Error(`Max retries exceeded for ${operationName}`);
   }
 
   // Domain metadata fallback
@@ -480,17 +454,10 @@ export class FallbackService {
     this.lastHealthCheck = 0;
     console.log('Fallback service health status reset');
   }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
 }
 
 // Default fallback configuration
 export const DEFAULT_FALLBACK_CONFIG: FallbackConfig = {
-  maxRetries: 3,
-  retryDelayMs: 1000,
-  exponentialBackoff: true,
   indexerV2: {
     enabled: true,
     healthCheckIntervalMs: 60000, // 1 minute

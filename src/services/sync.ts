@@ -8,7 +8,6 @@ import { classifyV2IndexerRecord } from '../utils/migration';
 export interface SyncConfig {
   batchSize: number;
   syncInterval: number; // milliseconds
-  maxRetries: number;
   staleThreshold: number; // milliseconds - how old data can be before re-sync
 }
 
@@ -479,6 +478,5 @@ export class SyncService {
 export const DEFAULT_SYNC_CONFIG: SyncConfig = {
   batchSize: 50,
   syncInterval: 300000, // 5 minutes
-  maxRetries: 3,
   staleThreshold: 3600000, // 1 hour
 };

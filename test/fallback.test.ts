@@ -221,3 +221,19 @@ describe('FallbackService — circuit-breaker only trips on upstream failures (C
     expect(v2.getDomain).toHaveBeenCalledTimes(1); // second request never touched v2
   });
 });
+
+describe('FallbackService — fallthroughs counts tiers tried before the answering one', () => {
+  it('counts each tier that missed before the one that answered', async () => {
+    expect((await makeService({ v2: { name: 'fox.eth' } }).svc.getDomainMetadata('fox.eth')).fallthroughs).toBe(0);
+    expect((await makeService({ v2: null, v1: { name: 'old.eth' } }).svc.getDomainMetadata('old.eth')).fallthroughs).toBe(1);
+    expect((await makeService({ v2: null, v1: null }).svc.getDomainMetadata('chain.eth')).fallthroughs).toBe(2);
+  });
+
+  it('counts an upstream failure, but not a tier skipped by the open breaker', async () => {
+    const v2 = { getDomain: vi.fn(async () => { throw new UpstreamError('zigens down'); }), getMigrationStatus: vi.fn(), getHierarchy: vi.fn() } as any;
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, blockchain, makeResolver(), makeEnsnode({ name: 'fox.eth' }));
+
+    expect((await svc.getDomainMetadata('fox.eth')).fallthroughs).toBe(1); // v2 failed → v1
+    expect((await svc.getDomainMetadata('fox.eth')).fallthroughs).toBe(0); // v2 skipped → v1
+  });
+});
