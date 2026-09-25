@@ -53,10 +53,18 @@ function openSqlite(): SqliteDb {
 
 // Minimal D1Database shim backed by real SQLite, with batch() as one
 // transaction like D1's. Records each top-level run() and batch() call, and can
-// hold every query behind `gate` (to prove what does NOT wait for D1).
+// hold every query behind `gate` (to prove what does NOT wait for D1). Each
+// call also takes a timer turn, like the network round trip a D1 query is: a
+// sync that is neither awaited nor handed to waitUntil is then still running
+// when the waitUntil tasks settle, instead of finishing in the same microtask
+// flush as synchronous SQLite would let it.
 function makeSqliteD1(db: SqliteDb, gate?: Promise<void>) {
   const runs: string[] = [];
   let batches = 0;
+  const io = async () => {
+    await gate;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
   const exec = (sql: string, params: unknown[]) => {
     const r = db.prepare(sql).run(...(params as never[]));
     return { success: true, results: [], meta: { changes: Number(r.changes) } };
@@ -67,23 +75,23 @@ function makeSqliteD1(db: SqliteDb, gate?: Promise<void>) {
     params,
     bind: (...p: unknown[]) => stmt(sql, p),
     run: async () => {
-      await gate;
+      await io();
       runs.push(sql);
       return exec(sql, params);
     },
     first: async () => {
-      await gate;
+      await io();
       return db.prepare(sql).get(...(params as never[])) ?? null;
     },
     all: async () => {
-      await gate;
+      await io();
       return { results: db.prepare(sql).all(...(params as never[])), success: true, meta: {} };
     },
   });
   const d1 = {
     prepare: (sql: string) => stmt(sql),
     batch: async (statements: Stmt[]) => {
-      await gate;
+      await io();
       batches++;
       db.exec('BEGIN');
       try {
@@ -262,7 +270,7 @@ describe.skipIf(!hasSqlite)('metadata request → D1 sync runs after the respons
     const { d1 } = makeSqliteD1(sqlite, gate); // every D1 query waits for the gate
     const ops = stubIndexer();
     const app = await loadApp();
-    const { ctx, tasks, drain } = makeCtx();
+    const { ctx, drain } = makeCtx();
 
     const res = await within(
       Promise.resolve(app.request('/sepolia/registry/sub.fox.eth', undefined, makeEnv({ DB: d1 }), ctx as unknown as ExecutionContext)),
@@ -273,8 +281,9 @@ describe.skipIf(!hasSqlite)('metadata request → D1 sync runs after the respons
     expect(res).not.toBe(TIMED_OUT); // answered while D1 was still blocked
     expect((res as Response).status).toBe(200);
     expect(((await (res as Response).json()) as { name: string }).name).toBe('sub.fox.eth');
-    expect(tasks.length).toBeGreaterThan(0);
 
+    // The runtime only waits for waitUntil tasks: the row is there once they
+    // settle only if the route passed its ctx and the sync was registered.
     await drain();
     expect(ops.filter((op) => op === 'GetDomain')).toHaveLength(1); // no second query
     const row = sqlite.prepare('SELECT name, label_name FROM domains WHERE network = ?1').get('sepolia') as
@@ -308,9 +317,34 @@ describe.skipIf(!hasSqlite)('metadata request → D1 sync runs after the respons
     expect(res).not.toBe(TIMED_OUT);
     expect(((await (res as Response).json()) as { successful: number }).successful).toBe(2);
 
-    await drain();
+    await drain(); // as above: the rows only exist if each sync was registered
     expect(ops.filter((op) => op === 'GetDomain')).toHaveLength(2);
     expect(rowCount(sqlite, 'domains', 'sepolia')).toBe(2);
+  });
+
+  it('getMetadata hands the whole D1 sync to waitUntil', async () => {
+    // A promise that is started but neither awaited nor registered can be
+    // cancelled once the response and the other waitUntil work finish, and D1
+    // would silently stop being filled.
+    const sqlite = openSqlite();
+    const { gate, open } = deferred();
+    stubIndexer(); // the sync's migration/hierarchy follow-up queries
+    const svc = makeService(makeSqliteD1(sqlite, gate).d1);
+    (svc as unknown as { fallback: { getDomainMetadata: unknown } }).fallback = {
+      getDomainMetadata: vi.fn().mockResolvedValue({
+        data: v2Domain('sub.fox.eth'), source: 'indexerV2', usedFallback: false, v2Consulted: true, retries: 0,
+      }),
+    };
+    const { ctx } = makeCtx();
+
+    const res = await within(svc.getMetadata('sepolia', 'registry', 'sub.fox.eth', 'https://meta.test', ctx), 2000);
+    expect(res).not.toBe(TIMED_OUT);
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1);
+    expect(rowCount(sqlite, 'domains')).toBe(0); // D1 still blocked
+
+    open();
+    await ctx.waitUntil.mock.calls[0][0]; // the registered promise covers the store
+    expect(rowCount(sqlite, 'domains', 'sepolia')).toBe(1);
   });
 
   it('a name served from the secondary v1 subgraph is not synced (no re-query of the primary)', async () => {
