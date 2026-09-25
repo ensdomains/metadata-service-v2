@@ -55,9 +55,9 @@ preview_database_id = "ens-metadata-database-preview-id"
 
 # Environment variables
 [vars]
-ENSNODE_MAINNET_URL = "https://api.mainnet.ensnode.io/subgraph"
-ENSNODE_SEPOLIA_V2_URL = "https://graphql.ens.dev"
-ENSNODE_SEPOLIA_V1_URL = "https://api.sepolia.ensnode.io/subgraph"
+ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
+ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
