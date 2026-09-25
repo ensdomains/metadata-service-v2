@@ -47,9 +47,27 @@ export interface FallbackResult<T> {
   v2Consulted: boolean;
 }
 
+// One indexerV2 upstream failure trips the breaker in this isolate only: it may
+// be a transient blip, or one input that makes the indexer error or run past
+// its timeout, and sharing that would switch the v2 tier off for a whole
+// location (and soon every location) for a full cooldown. The trip is shared
+// with the other isolates (breaker-state.ts) only once this many upstream
+// failures come in a row with no success between them, i.e. when the probe
+// after a full cooldown fails too: an outage that outlasts a cooldown.
+// Failures of requests already in flight when the breaker tripped belong to
+// that trip and do not count again.
+export const SHARED_TRIP_AFTER_FAILURES = 2;
+
+// When an isolate adopts another isolate's trip it adds a random delay of up to
+// this much to its own end of the trip, so the isolates do not all probe the
+// indexer at the same instant when it ends. Local only: KV keeps the real end.
+export const SHARED_TRIP_JITTER_MS = 10_000;
+
 export class FallbackService {
   private indexerV2Healthy: boolean = true;
   private lastHealthCheck: number = 0;
+  // indexerV2 upstream failures in a row, counted once per local trip.
+  private consecutiveV2Failures = 0;
 
   constructor(
     private config: FallbackConfig,
@@ -83,6 +101,7 @@ export class FallbackService {
     if (this.config.indexerV2.enabled && await this.isIndexerV2Healthy()) {
       try {
         const data = await operation.indexerV2();
+        this.consecutiveV2Failures = 0;
         return {
           data,
           source: 'indexerV2',
@@ -108,6 +127,8 @@ export class FallbackService {
           // error is not an answer, so the final not-found must not be treated
           // as definitive.
           if (error instanceof NotFoundError) v2Consulted = true;
+          // Not an outage (those are UpstreamErrors), so the failure streak ends.
+          this.consecutiveV2Failures = 0;
           console.log(`IndexerV2 ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
         }
         fallthroughs++;
@@ -174,13 +195,16 @@ export class FallbackService {
   // Check if indexerV2 is healthy based on recent request outcomes (no proactive health check query)
   private async isIndexerV2Healthy(): Promise<boolean> {
     // A trip shared by another isolate that ends later than this isolate's own
-    // cooldown: adopt it, so this isolate skips the indexer until it ends too.
+    // cooldown: adopt it, so this isolate skips the indexer until it ends too,
+    // plus a random jitter so the isolates' next probes are spread out. An
+    // adopted trip is no failure seen here: it does not count toward sharing.
     const sharedUntil = (await this.sharedBreaker?.trippedUntil()) ?? 0;
     const localUntil = this.indexerV2Healthy ? 0 : this.lastHealthCheck + this.config.indexerV2.healthCheckIntervalMs;
     if (sharedUntil > Date.now() && sharedUntil > localUntil) {
+      const until = sharedUntil + Math.random() * SHARED_TRIP_JITTER_MS;
       this.indexerV2Healthy = false;
-      this.lastHealthCheck = sharedUntil - this.config.indexerV2.healthCheckIntervalMs;
-      console.warn('IndexerV2 breaker tripped by another isolate, skipping until', new Date(sharedUntil).toISOString());
+      this.lastHealthCheck = until - this.config.indexerV2.healthCheckIntervalMs;
+      console.warn('IndexerV2 breaker tripped by another isolate, skipping until', new Date(until).toISOString());
     }
 
     // If marked unhealthy, respect the cooldown period before retrying
@@ -197,12 +221,18 @@ export class FallbackService {
     return this.indexerV2Healthy;
   }
 
-  // Mark indexerV2 as unhealthy, here and for the other isolates
+  // Mark indexerV2 as unhealthy here, and for the other isolates once it has
+  // failed SHARED_TRIP_AFTER_FAILURES times in a row
   private async markIndexerV2Unhealthy(): Promise<void> {
+    // With the breaker already open this is a request that was in flight when
+    // it tripped: the same trip, not another failure in a row.
+    if (this.indexerV2Healthy) this.consecutiveV2Failures++;
     this.indexerV2Healthy = false;
     this.lastHealthCheck = Date.now();
     console.warn('Marked indexerV2 as unhealthy, will retry in', this.config.indexerV2.healthCheckIntervalMs, 'ms');
-    await this.sharedBreaker?.trip(this.lastHealthCheck + this.config.indexerV2.healthCheckIntervalMs);
+    if (this.consecutiveV2Failures >= SHARED_TRIP_AFTER_FAILURES) {
+      await this.sharedBreaker?.trip(this.lastHealthCheck + this.config.indexerV2.healthCheckIntervalMs);
+    }
   }
 
   // Domain metadata fallback
@@ -467,6 +497,7 @@ export class FallbackService {
   async resetHealthStatus(): Promise<void> {
     this.indexerV2Healthy = true;
     this.lastHealthCheck = 0;
+    this.consecutiveV2Failures = 0;
     await this.sharedBreaker?.reset();
     console.log('Fallback service health status reset');
   }

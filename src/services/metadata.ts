@@ -176,7 +176,7 @@ export class MetadataService {
       indexerV1,
       // The indexer breaker's trips are shared with the other isolates through
       // KV, per network (each network has its own indexer).
-      new SharedBreakerState(kv, `breaker:indexerV2:${this.network}`),
+      new SharedBreakerState(kv, `breaker:indexerV2:${this.network}`, fallbackConfig.indexerV2.healthCheckIntervalMs),
     );
 
     // Initialize D1 and sync services if enabled

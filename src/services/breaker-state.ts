@@ -2,9 +2,10 @@
 //
 // FallbackService's breaker lives in one isolate's memory, so every other
 // isolate (and each new one) would keep probing an upstream that one of them
-// already found down. When an isolate trips the breaker it records the
-// "tripped until" time (epoch ms) here; other isolates read it and skip the
-// upstream until then.
+// already found down. When an isolate finds the upstream still down after a
+// cooldown (SHARED_TRIP_AFTER_FAILURES in fallback.ts) it records the "tripped
+// until" time (epoch ms) here; other isolates read it and skip the upstream
+// until then.
 //
 // KV is eventually consistent: a trip is visible at once in the location that
 // wrote it, and in other locations once their cached read of the key expires
@@ -21,8 +22,12 @@ const KV_MIN_EXPIRATION_TTL_SECS = 60;
 export class SharedBreakerState {
   private cachedUntil = 0;
   private cachedAt = Number.NEGATIVE_INFINITY;
+  // The last value read from KV and the deadline taken from it (see deadline()).
+  private lastValue: string | null = null;
+  private lastDeadline = 0;
 
-  constructor(private kv: KVNamespace, private key: string) {}
+  // `cooldownMs` is the breaker's cooldown: no trip read from KV lasts longer.
+  constructor(private kv: KVNamespace, private key: string, private cooldownMs: number) {}
 
   // Epoch ms until which the breaker is tripped (in the past or 0 when it is
   // not). Reads KV at most once per SHARED_BREAKER_READ_CACHE_MS; a failed read
@@ -72,13 +77,26 @@ export class SharedBreakerState {
   private async read(): Promise<number> {
     let until = 0;
     try {
-      const parsed = parseInt((await this.kv.get(this.key)) ?? '', 10);
-      if (Number.isFinite(parsed)) until = parsed;
+      until = this.deadline(await this.kv.get(this.key));
     } catch (err) {
       console.warn(`[breaker] could not read ${this.key}, assuming not tripped:`, err);
     }
     this.remember(until);
     return this.cachedUntil;
+  }
+
+  // The deadline a value read from KV stands for, clamped to one cooldown from
+  // when this isolate first read that value, so a bad or far-future value
+  // cannot keep the breaker open for longer. Reading the same value again
+  // keeps its deadline (re-reads of a stuck value must not push it forward);
+  // a new trip writes a new value.
+  private deadline(value: string | null): number {
+    if (value !== this.lastValue) {
+      const parsed = parseInt(value ?? '', 10);
+      this.lastValue = value;
+      this.lastDeadline = Number.isFinite(parsed) ? Math.min(parsed, Date.now() + this.cooldownMs) : 0;
+    }
+    return this.lastDeadline;
   }
 
   // A later deadline always wins, so a read that raced a local trip cannot
