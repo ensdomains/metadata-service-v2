@@ -2,9 +2,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Hono } from 'hono';
 import { createMockEnv } from './mocks/hono-env';
 
-// Every response carries nosniff, and every non-media response a CSP that
-// allows nothing and cannot be framed (WEB-1548). A response that brings its
-// own CSP keeps it.
+// Every response carries nosniff, every non-media response a CSP that allows
+// nothing and cannot be framed, and media a sandboxing CSP that keeps it
+// embeddable (WEB-1548). A response that brings its own CSP keeps it.
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 // The sandboxing CSP the media routes (avatar, header, card) set for themselves.
@@ -133,25 +133,69 @@ describe('security headers on API responses', () => {
 
 describe('media responses', () => {
   it('an edge-cache hit that carries its own CSP keeps it', async () => {
+    const own = "default-src 'none'; sandbox";
     stubEdgeCache(async () => new Response('<svg xmlns="http://www.w3.org/2000/svg"/>', {
-      headers: { 'Content-Type': 'image/svg+xml', 'Content-Security-Policy': MEDIA_CSP },
+      headers: { 'Content-Type': 'image/svg+xml', 'Content-Security-Policy': own },
     }));
     const res = await req('/mainnet/registry/nick.eth/image');
     expect(res.status).toBe(200);
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
-    expect(res.headers.get('Content-Security-Policy')).toBe(MEDIA_CSP);
+    expect(res.headers.get('Content-Security-Policy')).toBe(own);
   });
 
   it.each([
     ['/mainnet/avatar/nick.eth', 'image/png'],
     ['/mainnet/registry/nick.eth/image', 'image/svg+xml'],
-  ])('%s gets nosniff but stays embeddable', async (path, type) => {
+  ])('%s gets nosniff and the sandboxing media CSP, and stays embeddable', async (path, type) => {
     const res = await req(path);
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe(type);
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
-    expect(res.headers.get('Content-Security-Policy') ?? '').not.toContain('frame-ancestors');
+    expect(res.headers.get('Content-Security-Policy')).toBe(MEDIA_CSP);
     expect(res.headers.get('X-Frame-Options')).toBeNull();
+  });
+});
+
+describe('what counts as media', () => {
+  const served = async (contentType: string) => {
+    const mini = new Hono();
+    mini.use('*', securityHeaders);
+    mini.get('/', () => new Response('<html><script>alert(1)</script></html>', { headers: { 'Content-Type': contentType } }));
+    return (await mini.request('/')).headers.get('Content-Security-Policy');
+  };
+
+  it.each([
+    'image/png',
+    'IMAGE/SVG+XML',
+    'image/svg+xml; charset=utf-8',
+    ' image/webp ',
+  ])('a single image type (%j) gets the media CSP', async (type) => {
+    expect(await served(type)).toBe(MEDIA_CSP);
+  });
+
+  it.each([
+    'image/png, text/html',
+    'image/png,text/html;charset=utf-8',
+    'image/svg+xml; charset="a", text/html',
+    'text/html',
+    'image/',
+    'imagefoo/png',
+    '',
+  ])('anything else (%j) gets the API CSP', async (type) => {
+    expect(await served(type)).toBe("default-src 'none'; frame-ancestors 'none'");
+  });
+
+  it('two Content-Type headers (joined with a comma) are not media', async () => {
+    const mini = new Hono();
+    mini.use('*', securityHeaders);
+    mini.get('/', () => {
+      const headers = new Headers();
+      headers.append('Content-Type', 'image/png');
+      headers.append('Content-Type', 'text/html');
+      return new Response('<html></html>', { headers });
+    });
+    const res = await mini.request('/');
+    expect(res.headers.get('Content-Security-Policy')).toBe("default-src 'none'; frame-ancestors 'none'");
   });
 });
 

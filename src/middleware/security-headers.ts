@@ -7,9 +7,12 @@ import type { Context, Next } from 'hono';
 //  - every response is X-Content-Type-Options: nosniff, so a browser never
 //    reinterprets one (say, JSON that echoes a name) as HTML or script;
 //  - a response without a Content-Security-Policy of its own gets one that
-//    allows nothing and cannot be framed. Media (image/*) is left alone: the
-//    NFT card and the avatars are embedded by other sites, and the media routes
-//    set a CSP that fits their content;
+//    allows nothing and cannot be framed. Media (a single image/* type) gets a
+//    sandboxing policy instead, the one the media routes set for themselves:
+//    the NFT card and the avatars are embedded by other sites, so they must
+//    stay frameable, and an SVG opened as a document must not run script;
+//  - a Content-Type that lists several types is not media: browsers use the
+//    last one, so "image/png, text/html" is rendered as HTML;
 //  - no X-Frame-Options: frame-ancestors covers the JSON responses, and media
 //    must stay embeddable.
 //
@@ -23,9 +26,14 @@ import type { Context, Next } from 'hono';
 // (including the timeout's 504) and edge-cache hits.
 
 export const API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'";
+export const MEDIA_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; sandbox";
+
+// One image type, with parameters but no second type after a comma.
+const SINGLE_IMAGE_TYPE = /^\s*image\/[\w!#$&^.+-]+\s*(;[^,]*)?$/i;
 
 function isMediaResponse(headers: Headers): boolean {
-  return /^image\//i.test(headers.get('Content-Type') ?? '');
+  return SINGLE_IMAGE_TYPE.test(headers.get('Content-Type') ?? '');
 }
 
 export const securityHeaders = async (c: Context, next: Next) => {
@@ -42,7 +50,10 @@ export const securityHeaders = async (c: Context, next: Next) => {
     headers.set('X-Content-Type-Options', 'nosniff');
   }
 
-  if (!headers.has('Content-Security-Policy') && !isMediaResponse(headers)) {
-    headers.set('Content-Security-Policy', API_CONTENT_SECURITY_POLICY);
+  if (!headers.has('Content-Security-Policy')) {
+    headers.set(
+      'Content-Security-Policy',
+      isMediaResponse(headers) ? MEDIA_CONTENT_SECURITY_POLICY : API_CONTENT_SECURITY_POLICY,
+    );
   }
 };
