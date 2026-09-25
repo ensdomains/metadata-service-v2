@@ -8,8 +8,9 @@ import { createMockEnv } from './mocks/hono-env';
 // and /header answered 404, and the NFT card was rendered without the avatar,
 // written to KV and R2 and the edge cache, and sent with the full card TTL.
 // Now /avatar, /header and /avatar/:name/meta answer 503 with a short
-// Cache-Control, and a card missing a failed avatar is served briefly and
-// stored nowhere. Genuine misses are unchanged.
+// Cache-Control, and a card missing a failed avatar is kept out of KV and R2
+// and cached for a minute only (by clients and the edge). Genuine misses are
+// unchanged.
 
 // ---- fake caches.default (per-colo L0 edge cache) -----------------------------
 const edgeStore = new Map<string, Response>();
@@ -103,6 +104,7 @@ beforeEach(() => {
   edgeStore.clear();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -155,7 +157,7 @@ describe('NFT card routes', () => {
     expect(await res.text()).toBe('<svg data-avatar="no"/>');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
     expect(cardWrites()).toEqual({ kv: 0, r2: 0 });
-    expect(edgeStore.size).toBe(0);
+    expect(edgeStore.get('http://localhost/mainnet/registry/slow.eth/image')?.headers.get('Cache-Control')).toBe('public, max-age=60');
     // Looked up once: the image service does not repeat the failed lookup.
     expect(getAvatar).toHaveBeenCalledTimes(1);
   });
@@ -181,7 +183,20 @@ describe('NFT card routes', () => {
     expect(res.headers.get('Content-Type')).toBe('image/png');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
     expect(cardWrites()).toEqual({ kv: 0, r2: 0 });
-    expect(edgeStore.size).toBe(0);
+    expect(edgeStore.get('http://localhost/mainnet/registry/down.eth/rasterize')?.headers.get('Cache-Control')).toBe('public, max-age=60');
+  });
+
+  it('/image: during an outage the degraded card is served from the edge, so the failing upstream is not asked again', async () => {
+    getAvatar.mockRejectedValue(rpcDown());
+
+    const first = await send('/mainnet/registry/down.eth/image');
+    const second = await send('/mainnet/registry/down.eth/image');
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe(await first.text());
+    expect(second.headers.get('Cache-Control')).toBe('public, max-age=60');
+    expect(getAvatar).toHaveBeenCalledTimes(1);
   });
 
   it('webhook warming does not persist a card whose avatar lookup failed', async () => {
@@ -196,7 +211,10 @@ describe('NFT card routes', () => {
     expect(res.status).toBe(200);
     // Both networks were warmed (mainnet, and sepolia with its legacy resolver)...
     expect(getAvatar.mock.calls.length).toBeGreaterThanOrEqual(2);
-    // ...and neither stored a card.
+    // ...and neither stored a card, nor claims it did.
     expect(cardWrites()).toEqual({ kv: 0, r2: 0 });
+    const logged = vi.mocked(console.log).mock.calls.map((args) => String(args[0]));
+    expect(logged.filter((line) => line.startsWith('[webhook] warmed image cache'))).toEqual([]);
+    expect(logged.filter((line) => line.includes('avatar lookup failed'))).toHaveLength(2);
   });
 });
