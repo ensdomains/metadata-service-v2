@@ -6,7 +6,6 @@ import {
   ContractFunctionZeroDataError,
   ExecutionRevertedError,
   HttpRequestError,
-  LimitExceededRpcError,
   RawContractError,
   TimeoutError,
 } from 'viem';
@@ -17,7 +16,7 @@ import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEm
 import { RequestDeadlineError, UpstreamError } from './errors';
 import {
   deadlineFetch,
-  endpointFailedInRequest,
+  endpointFailure,
   markEndpointFailed,
   raceRequestDeadline,
   timeLeftForAttempt,
@@ -269,10 +268,12 @@ const OFFCHAIN_LOOKUP_ERRORS = new Set([
 ]);
 
 /**
- * True when `error` says the RPC endpoint itself failed: it timed out, answered
- * with an HTTP error or could not be reached, or rate-limited us. A revert,
- * empty return data or a failed CCIP-read (whose gateway the name's owner
- * chooses) is an answer about the name, not about the endpoint.
+ * True when `error` says the RPC endpoint itself is down: it timed out, or it
+ * could not be reached (an HttpRequestError with no HTTP status: connection
+ * refused or reset). A 429 or 5xx, or a JSON-RPC rate limit, is often one
+ * moment's load, not a reason to drop the endpoint for the rest of the
+ * request. A revert, empty return data or a failed CCIP-read (whose gateway the
+ * name's owner chooses) is an answer about the name, not about the endpoint.
  */
 function isTransportFailure(error: unknown): boolean {
   let transport = false;
@@ -286,7 +287,7 @@ function isTransportFailure(error: unknown): boolean {
     ) {
       return false;
     }
-    if (e instanceof HttpRequestError || e instanceof TimeoutError || e instanceof LimitExceededRpcError) {
+    if (e instanceof TimeoutError || (e instanceof HttpRequestError && e.status === undefined)) {
       transport = true;
     }
   }
@@ -374,21 +375,36 @@ export class BlockchainService {
   // against what is left of it: viem takes no per-call AbortSignal, and an
   // attempt can also wait on CCIP-read gateways. Both end in
   // RequestDeadlineError (an UpstreamError).
+  //
+  // Pass `markEndpointFailures` only for reads that run entirely in ENS's own
+  // contracts (v1 registry, .eth registrar, NameWrapper, v2 root and .eth
+  // registries, the UR's ROOT_REGISTRY). A resolver or a subregistry is chosen
+  // by the name's owner and can burn gas until eth_call times out on a healthy
+  // endpoint; marking it then would fail every other name's reads in the
+  // request.
   async executeWithFallback<T>(
     network: NetworkName,
-    operation: (client: PublicClient) => Promise<T>
+    operation: (client: PublicClient) => Promise<T>,
+    { markEndpointFailures = false }: { markEndpointFailures?: boolean } = {},
   ): Promise<{ result: T; usedFallback: boolean }> {
     const clients = this.getAllClients(network);
     let lastError: Error | null = null;
+    let skippedFailure: Error | undefined;
 
     for (let i = 0; i < clients.length; i++) {
       const client = clients[i];
       const isUsingFallback = i > 0;
-      // An endpoint that already timed out or errored in this request is
-      // skipped, so a hung primary costs one attempt per request, not one per
-      // read.
-      const endpoint = `rpc:${network}:${i}`;
-      if (endpointFailedInRequest(endpoint)) continue;
+      // An endpoint that already timed out or was unreachable in this request
+      // is skipped by every read, so a hung primary costs one attempt per
+      // request, not one per read. Keyed by URL, so a URL configured twice is
+      // one endpoint; the URL may carry an API key, so the key is never logged.
+      const url: unknown = client.transport.url;
+      const endpoint = typeof url === 'string' ? `rpc:${url}` : `rpc:${network}:${i}`;
+      const failure = endpointFailure(endpoint);
+      if (failure) {
+        skippedFailure = failure;
+        continue;
+      }
 
       try {
         const what = `RPC client ${i} for ${network}`;
@@ -398,7 +414,7 @@ export class BlockchainService {
       } catch (error) {
         if (error instanceof RequestDeadlineError) throw error;
         lastError = error as Error;
-        if (isTransportFailure(error)) markEndpointFailed(endpoint);
+        if (markEndpointFailures && isTransportFailure(error)) markEndpointFailed(endpoint, lastError);
         console.warn(`Client ${i} failed for ${network}:`, error);
         
         // If this is not the last client, continue to next
@@ -409,7 +425,9 @@ export class BlockchainService {
     }
 
     if (!lastError) {
-      throw new UpstreamError(`All RPC clients for ${network} already failed in this request`);
+      throw new UpstreamError(`All RPC clients for ${network} already failed in this request`, {
+        cause: skippedFailure,
+      });
     }
 
     // All clients failed — this IS the upstream-unreadable verdict, so type it:
@@ -536,7 +554,7 @@ export class BlockchainService {
           const rootRegistry = getContract({ address: root, abi: REGISTRY_V2_ABI, client });
           const eth = await rootRegistry.read.getSubregistry(['eth']) as `0x${string}`;
           return { root, eth };
-        });
+        }, { markEndpointFailures: true });
         if (!isEmptyAddress(result.eth)) {
           this.v2RegistryCache.set(network, { ...result, fetchedAt: Date.now() });
           const known = v2.ethRegistry.toLowerCase();
@@ -595,7 +613,7 @@ export class BlockchainService {
       const { result: status } = await this.executeWithFallback(network, async (client) => {
         const ethRegistry = getContract({ address: registries.eth, abi: REGISTRY_V2_ABI, client });
         return await ethRegistry.read.getStatus([BigInt(labelhash(label))]) as number;
-      });
+      }, { markEndpointFailures: true });
       // Only REGISTERED(2) is truly on v2; AVAILABLE(0)/RESERVED(1) → unmigrated.
       return Number(status) !== 2;
     } catch (error) {
@@ -632,7 +650,7 @@ export class BlockchainService {
         return await ethRegistry.read.getState([BigInt(labelhash(label))]) as {
           status: number; expiry: bigint; latestOwner: string;
         };
-      });
+      }, { markEndpointFailures: true });
       return { status: Number(state.status), expiry: state.expiry, owner: state.latestOwner };
     } catch (error) {
       throw new UpstreamError(`v2 registration read failed for ${name} on ${network}`, { cause: error });
@@ -659,7 +677,8 @@ export class BlockchainService {
     let owner = registration.owner;
     if (!is2ld) {
       // Subname: the 2LD's registry entry doesn't own it — resolve the actual
-      // owner through the UR's name-level walk.
+      // owner through the UR's name-level walk. The walk runs through
+      // subregistries the name chooses, so it never marks an endpoint.
       const ur = ENS_V2_CONTRACTS[network].universalResolver;
       if (ur.startsWith('0x')) {
         const { result } = await this.executeWithFallback(network, async (client) => {
@@ -691,7 +710,7 @@ export class BlockchainService {
       });
 
       return await registry.read.owner([node as `0x${string}`]) as string;
-    }).then(({ result }) => result);
+    }, { markEndpointFailures: true }).then(({ result }) => result);
   }
 
   // ENS v2: Get resolver with v2-aware routing logic
@@ -718,6 +737,8 @@ export class BlockchainService {
 
   // Resolve a name's resolver address via UniversalResolverV2.findResolver (the
   // canonical on-chain registry traversal; no CCIP-Read). Takes a DNS-encoded name.
+  // The traversal runs through subregistries the name chooses, so it never
+  // marks an endpoint.
   private async findResolverViaUniversalResolver(
     network: NetworkName,
     universalResolver: `0x${string}`,
@@ -738,6 +759,8 @@ export class BlockchainService {
 
   // ENS v2: Hierarchical resolver lookup (for v2 registries). Walks label-by-label
   // from the live root registry (discovered via the UR anchor when available).
+  // Below .eth the registries are the name's choice, so the walk never marks
+  // an endpoint.
   async getResolverHierarchical(network: NetworkName, name: string): Promise<string> {
     const registries = await this.getV2Registries(network);
     // v2 not configured on this network (e.g. mainnet placeholders) — nothing to walk.
@@ -793,7 +816,7 @@ export class BlockchainService {
       });
 
       return await registry.read.resolver([node as `0x${string}`]) as string;
-    }).then(({ result }) => result);
+    }, { markEndpointFailures: true }).then(({ result }) => result);
   }
 
   // Enhanced ENS resolution: get text record from resolver
@@ -875,7 +898,7 @@ export class BlockchainService {
       });
 
       return await registrar.read.nameExpires([BigInt(labelhash)]) as bigint;
-    }).then(({ result }) => result);
+    }, { markEndpointFailures: true }).then(({ result }) => result);
   }
 
   // Get network configuration

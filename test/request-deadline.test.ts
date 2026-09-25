@@ -1,6 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { HttpRequestError, type PublicClient } from 'viem';
-import { BlockchainService } from '../src/services/blockchain';
+import {
+  HttpRequestError,
+  decodeFunctionData,
+  encodeErrorResult,
+  encodeFunctionResult,
+  parseAbi,
+  type Abi,
+  type PublicClient,
+} from 'viem';
+import {
+  BlockchainService,
+  CONTRACTS,
+  ENS_REGISTRY_ABI,
+  ENS_V2_CONTRACTS,
+  NAME_WRAPPER_ABI,
+  REGISTRY_V2_ABI,
+  RESOLVER_ABI,
+  UNIVERSAL_RESOLVER_V2_ABI,
+} from '../src/services/blockchain';
+import { ResolverService } from '../src/services/resolver';
 import { IndexerService } from '../src/services/indexer';
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from '../src/services/fallback';
 import { UpstreamError } from '../src/services/errors';
@@ -65,16 +83,90 @@ const after = (ms: number, respond: Handler): Handler => (init) => new Promise<R
 
 const status = (code: number): Handler => async () => new Response('unavailable', { status: code });
 
+// Connection refused: fetch rejects, as it does for an endpoint that is down.
+const unreachable: Handler = async () => { throw new TypeError('fetch failed'); };
+
 // eth_call reverting, as a node answers a contract revert.
 const rpcRevert: Handler = async (init) => {
   const { id } = JSON.parse(String(init?.body));
   return Response.json({ jsonrpc: '2.0', id, error: { code: 3, message: 'execution reverted', data: '0x' } });
 };
 
+// JSON-RPC rate limit (-32005) in an HTTP 200.
+const rpcLimit: Handler = async (init) => {
+  const { id } = JSON.parse(String(init?.body));
+  return Response.json({ jsonrpc: '2.0', id, error: { code: -32005, message: 'limit exceeded' } });
+};
+
 // eth_call answering an address (registry.owner()).
 const rpcOwner: Handler = async (init) => {
   const { id } = JSON.parse(String(init?.body));
   return Response.json({ jsonrpc: '2.0', id, result: `0x${'00'.repeat(12)}${OWNER.slice(2)}` });
+};
+
+const ZERO = '0x0000000000000000000000000000000000000000';
+const RESOLVER = '0x2222222222222222222222222222222222222222';
+const SUBREGISTRY = '0x3333333333333333333333333333333333333333';
+const { rootRegistry: ROOT, ethRegistry: ETH, universalResolver: UR } = ENS_V2_CONTRACTS.sepolia;
+const ENS_ABI: Abi = [
+  ...ENS_REGISTRY_ABI,
+  ...NAME_WRAPPER_ABI,
+  ...REGISTRY_V2_ABI,
+  ...UNIVERSAL_RESOLVER_V2_ABI,
+  ...RESOLVER_ABI,
+  ...parseAbi(['function nameExpires(uint256 id) view returns (uint256)']),
+];
+
+// Key of one contract function in ensNode's overrides.
+const at = (address: string, fn: string) => `${address.toLowerCase()}.${fn}`;
+
+// eth_call answering `fn` with `result`.
+const answer = (fn: string, result: unknown): Handler => async (init) => {
+  const { id } = JSON.parse(String(init?.body));
+  return Response.json({ jsonrpc: '2.0', id, result: encodeFunctionResult({ abi: ENS_ABI, functionName: fn, result }) });
+};
+
+// A node serving the contracts the reads call: the v1 registry (owner OWNER,
+// resolver RESOLVER), registrar and NameWrapper, the UR, the v2 root and .eth
+// registries (every name REGISTERED, its subregistry SUBREGISTRY) and
+// RESOLVER. `overrides` replaces the answer of one contract function.
+const ensNode = (overrides: Record<string, Handler> = {}): Handler => (init) => {
+  const { params: [{ to, data }] } = JSON.parse(String(init?.body));
+  const { functionName } = decodeFunctionData({ abi: ENS_ABI, data });
+  const override = overrides[at(to, functionName)];
+  if (override) return override(init);
+  const subregistries: Record<string, string> = { [ROOT.toLowerCase()]: ETH, [ETH.toLowerCase()]: SUBREGISTRY };
+  const results: Record<string, unknown> = {
+    owner: OWNER,
+    resolver: RESOLVER,
+    nameExpires: 0n,
+    getData: [OWNER, 0, 0n],
+    ROOT_REGISTRY: ROOT,
+    getSubregistry: subregistries[to.toLowerCase()] ?? ZERO,
+    getResolver: ZERO,
+    getStatus: 2,
+    getState: { status: 2, expiry: 0n, latestOwner: OWNER, tokenId: 0n, resource: 0n },
+    findResolver: [RESOLVER, NODE, 0n],
+    findOwner: OWNER,
+    text: '',
+    addr: OWNER,
+    contenthash: '0x',
+  };
+  return answer(functionName, results[functionName])(init);
+};
+
+const GATEWAY = 'https://gateway.example/ccip';
+
+// eth_call reverting with OffchainLookup (EIP-3668), as RESOLVER does when its
+// records live behind the CCIP-read gateway GATEWAY.
+const offchainLookup: Handler = async (init) => {
+  const { id } = JSON.parse(String(init?.body));
+  const data = encodeErrorResult({
+    abi: parseAbi(['error OffchainLookup(address sender, string[] urls, bytes callData, bytes4 callbackFunction, bytes extraData)']),
+    errorName: 'OffchainLookup',
+    args: [RESOLVER, [GATEWAY], '0x', '0x00000000', '0x'],
+  });
+  return Response.json({ jsonrpc: '2.0', id, error: { code: 3, message: 'execution reverted', data } });
 };
 
 const graphqlDomain: Handler = async () => Response.json({ data: { domain: { id: 'fox.eth', name: 'fox.eth' } } });
@@ -250,8 +342,80 @@ describe('RPC endpoints that failed earlier in the request', () => {
     expect(net.count(FALLBACK_1)).toBe(2);
   });
 
+  it('treats a URL configured twice as one endpoint', async () => {
+    const net = stubFetch({ [PRIMARY]: hang, [FALLBACK_2]: rpcOwner });
+    const svc = new BlockchainService({ ...env, MAINNET_FALLBACK_RPC_1: PRIMARY });
+
+    const out = await settle(inRequest(DEADLINE_MS, () => svc.getOwner('mainnet', NODE)), 60_000);
+
+    expect(out.value).toBe(OWNER);
+    expect(out.elapsed).toBeLessThanOrEqual(5_050); // not a second 5s on the same URL
+    expect(net.count(PRIMARY)).toBe(1);
+    expect(net.count(FALLBACK_2)).toBe(1);
+  });
+
+  it.each([
+    ['HTTP 429', status(429)],
+    ['HTTP 503', status(503)],
+    ['a JSON-RPC rate limit', rpcLimit],
+  ])('keeps an endpoint that answered %s', async (_, busy) => {
+    const net = stubFetch({ [PRIMARY]: busy, [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      await svc.getOwner('mainnet', NODE);
+      await svc.getOwner('mainnet', NODE);
+    }), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(net.count(PRIMARY)).toBe(2); // asked again on the next read
+    expect(net.count(FALLBACK_1)).toBe(2);
+  });
+
+  it('does not mark an endpoint when a name\'s resolver runs past the RPC timeout', async () => {
+    // Every endpoint is healthy: only this resolver's text() burns gas past the
+    // 5s timeout, on every node.
+    const node = ensNode({ [at(RESOLVER, 'text')]: hang });
+    const net = stubFetch({ [PRIMARY]: node, [FALLBACK_1]: node, [FALLBACK_2]: node });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      const text = await svc.getText('mainnet', RESOLVER, NODE, 'avatar').catch((e: unknown) => e);
+      const fetches = net.calls.length;
+      // Another name's read later in the same request, e.g. in a batch.
+      const owner = await svc.getOwner('mainnet', NODE);
+      return { text, owner, urls: net.calls.slice(fetches).map((c) => c.url) };
+    }), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value!.text).toBeInstanceOf(UpstreamError);
+    expect(out.value!.owner).toBe(OWNER);
+    expect(out.value!.urls).toEqual([PRIMARY]);
+  });
+
+  // A wrapped name with no resolver.
+  const wrappedName = {
+    [at(CONTRACTS.mainnet.registry, 'owner')]: answer('owner', CONTRACTS.mainnet.nameWrapper),
+    [at(CONTRACTS.mainnet.registry, 'resolver')]: answer('resolver', ZERO),
+  };
+
+  it.each([
+    ['was marked earlier in the request', hang, 5_050],
+    ['fails the NameWrapper read', ensNode({ ...wrappedName, [at(CONTRACTS.mainnet.nameWrapper, 'getData')]: status(503) }), 50],
+  ])('reads NameWrapper data from a fallback when the primary %s', async (_, primary, maxMs) => {
+    const wrapped = ensNode(wrappedName);
+    stubFetch({ [PRIMARY]: primary, [FALLBACK_1]: wrapped, [FALLBACK_2]: wrapped });
+    const resolver = new ResolverService(new BlockchainService(env));
+
+    const out = await settle(inRequest(DEADLINE_MS, () => resolver.resolveName('wrapped.eth', '1', 'mainnet')), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value!.resolver).toMatchObject({ isWrapped: true, registrant: OWNER, fuses: 0 });
+    expect(out.elapsed).toBeLessThanOrEqual(maxMs);
+  });
+
   it('forgets failed endpoints when the request ends, and remembers none outside a request', async () => {
-    const net = stubFetch({ [PRIMARY]: status(503), [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
+    const net = stubFetch({ [PRIMARY]: unreachable, [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
     const svc = new BlockchainService(env);
 
     await settle(inRequest(DEADLINE_MS, () => svc.getOwner('mainnet', NODE)), 60_000);
@@ -275,8 +439,8 @@ describe('RPC endpoints that failed earlier in the request', () => {
     });
 
     await settle(inRequest(DEADLINE_MS, async () => {
-      await svc.executeWithFallback('mainnet', owner).catch(() => {});
-      await svc.executeWithFallback('mainnet', owner).catch(() => {});
+      await svc.executeWithFallback('mainnet', owner, { markEndpointFailures: true }).catch(() => {});
+      await svc.executeWithFallback('mainnet', owner, { markEndpointFailures: true }).catch(() => {});
     }), 60_000);
 
     expect(net.count(PRIMARY)).toBe(2);
@@ -285,11 +449,12 @@ describe('RPC endpoints that failed earlier in the request', () => {
 
   it('keeps an endpoint when a CCIP-read gateway, not the endpoint, failed', async () => {
     const svc = new BlockchainService(env);
-    // viem's OffchainLookupError, wrapping the gateway's HttpRequestError.
+    // viem's OffchainLookupError, wrapping the HttpRequestError of a gateway it
+    // could not reach.
     const gatewayDown = Object.assign(new Error('Offchain lookup failed', {
-      cause: new HttpRequestError({ url: 'https://gateway.example', status: 502 }),
+      cause: new HttpRequestError({ url: 'https://gateway.example' }),
     }), { name: 'OffchainLookupError' });
-    const endpointDown = new HttpRequestError({ url: PRIMARY, status: 502 });
+    const endpointDown = new HttpRequestError({ url: PRIMARY });
     const clients: PublicClient[] = [];
     const run = (fail: Error) => {
       let first = true;
@@ -297,7 +462,7 @@ describe('RPC endpoints that failed earlier in the request', () => {
         clients.push(client);
         if (first) { first = false; throw fail; }
         return 'ok';
-      });
+      }, { markEndpointFailures: true });
     };
 
     await settle(inRequest(DEADLINE_MS, async () => {
@@ -310,21 +475,121 @@ describe('RPC endpoints that failed earlier in the request', () => {
     expect(clients).toEqual([primary, fallback1, primary, fallback1, fallback1, fallback2]);
   });
 
-  it('fails at once when every endpoint already failed in this request', async () => {
-    const net = stubFetch({ [PRIMARY]: status(503), [FALLBACK_1]: status(503), [FALLBACK_2]: status(503) });
+  it('fails at once when every endpoint already failed in this request, with the error that marked it', async () => {
+    const net = stubFetch({ [PRIMARY]: unreachable, [FALLBACK_1]: unreachable, [FALLBACK_2]: unreachable });
     const svc = new BlockchainService(env);
 
     const out = await settle(inRequest(DEADLINE_MS, async () => {
-      await svc.getOwner('mainnet', NODE).catch(() => {});
+      const first = await svc.getOwner('mainnet', NODE).catch((e: unknown) => e);
       const fetches = net.calls.length;
       const start = Date.now();
       const error = await svc.getOwner('mainnet', NODE).catch((e: unknown) => e);
-      return { error, fetches: net.calls.length - fetches, ms: Date.now() - start };
+      return { first, error, fetches: net.calls.length - fetches, ms: Date.now() - start };
     }), 60_000);
 
     expect(out.value!.error).toBeInstanceOf(UpstreamError);
     expect(out.value!.fetches).toBe(0);
     expect(out.value!.ms).toBe(0);
+    // The last endpoint's own error, as the first read's UpstreamError carries it.
+    expect((out.value!.error as Error).cause).toBeInstanceOf(Error);
+    expect((out.value!.error as Error).cause).toBe((out.value!.first as Error).cause);
+  });
+
+  it('keeps the first error that marked an endpoint', async () => {
+    stubFetch({ [env.SEPOLIA_RPC_URL]: unreachable });
+    const svc = new BlockchainService(env);
+
+    const failure = (read: Promise<unknown>) => read.then(() => undefined, (e: Error) => e);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      // Both reads are in flight on the endpoint when it fails.
+      const [a, b] = await Promise.all([failure(svc.getOwner('sepolia', NODE)), failure(svc.getOwner('sepolia', NODE))]);
+      const c = await failure(svc.getOwner('sepolia', NODE));
+      return { a, b, c };
+    }), 60_000);
+
+    const { a, b, c } = out.value!;
+    expect(a?.cause).toBeInstanceOf(Error);
+    expect(b?.cause).not.toBe(a?.cause);
+    expect(c?.cause).toBe(a?.cause);
+  });
+
+  it.each([
+    ['answers 502', status(502)],
+    ['cannot be reached in time', hang],
+  ])('keeps an endpoint whose CCIP-read gateway %s, through viem\'s OffchainLookup handling', async (_, gateway) => {
+    const lone = env.SEPOLIA_RPC_URL;
+    const net = stubFetch({ [lone]: ensNode({ [at(RESOLVER, 'text')]: offchainLookup }), [GATEWAY]: gateway });
+    const svc = new BlockchainService(env);
+    const text = (client: PublicClient) => client.readContract({
+      address: RESOLVER,
+      abi: RESOLVER_ABI,
+      functionName: 'text',
+      args: [NODE as `0x${string}`, 'avatar'],
+    });
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      // A marking read, so only the OffchainLookup exclusion keeps the endpoint.
+      const lookup = await svc.executeWithFallback('sepolia', text, { markEndpointFailures: true })
+        .catch((e: Error) => e);
+      const owner = await svc.getOwner('sepolia', NODE);
+      return { lookup, owner };
+    }), 60_000);
+
+    expect(net.count(GATEWAY)).toBe(1);
+    expect(out.value!.lookup).toBeInstanceOf(UpstreamError);
+    expect(out.value!.owner).toBe(OWNER);
+  });
+});
+
+describe('which RPC reads mark an endpoint', () => {
+  // sepolia has one endpoint: once it is marked, every later read fails at once.
+  const lone = env.SEPOLIA_RPC_URL;
+
+  // Reads that run only in ENS's own contracts.
+  it.each([
+    ['the v1 registry owner', at(CONTRACTS.sepolia.registry, 'owner'), (svc: BlockchainService) => svc.getOwner('sepolia', NODE)],
+    ['the v1 registry resolver', at(CONTRACTS.sepolia.registry, 'resolver'), (svc: BlockchainService) => svc.getResolver('sepolia', NODE)],
+    ['the .eth registrar expiry', at(CONTRACTS.sepolia.registrar, 'nameExpires'), (svc: BlockchainService) => svc.getExpiry('sepolia', NODE)],
+    ['the UR root registry', at(UR, 'ROOT_REGISTRY'), (svc: BlockchainService) => svc.getV2Registries('sepolia')],
+    ['the root registry\'s .eth entry', at(ROOT, 'getSubregistry'), (svc: BlockchainService) => svc.getV2Registries('sepolia')],
+    ['the .eth registry status', at(ETH, 'getStatus'), (svc: BlockchainService) => svc.isUnmigratedName('sepolia', 'name.eth')],
+    ['the .eth registry state', at(ETH, 'getState'), (svc: BlockchainService) => svc.getV2Registration('sepolia', 'name.eth')],
+  ])('marks it when %s times out', async (_, slow, read) => {
+    const net = stubFetch({ [lone]: ensNode({ [slow]: hang }) });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      await read(svc).catch(() => {});
+      const fetches = net.calls.length;
+      const error = await svc.getOwner('sepolia', NODE).catch((e: unknown) => e);
+      return { error, fetches: net.calls.length - fetches };
+    }), 60_000);
+
+    expect(out.value!.error).toBeInstanceOf(UpstreamError);
+    expect(out.value!.fetches).toBe(0);
+  });
+
+  // Reads through a resolver or subregistries the name chooses.
+  it.each([
+    ['an addr record', at(RESOLVER, 'addr'), (svc: BlockchainService) => svc.getAddr('sepolia', RESOLVER, NODE)],
+    ['a contenthash', at(RESOLVER, 'contenthash'), (svc: BlockchainService) => svc.getContenthash('sepolia', RESOLVER, NODE)],
+    ['the UR resolver walk', at(UR, 'findResolver'), (svc: BlockchainService) => svc.getResolverV2('sepolia', 'sub.name.eth')],
+    ['the registry walk', at(SUBREGISTRY, 'getSubregistry'), (svc: BlockchainService) => svc.getResolverHierarchical('sepolia', 'sub.name.eth')],
+    ['the UR owner walk', at(UR, 'findOwner'), (svc: BlockchainService) => svc.getV2NameRecord('sepolia', 'sub.name.eth')],
+  ])('never marks it when %s times out', async (_, slow, read) => {
+    let slowCalls = 0;
+    stubFetch({ [lone]: ensNode({ [slow]: (init) => { slowCalls++; return hang(init); } }) });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      await read(svc).catch(() => {});
+      return svc.getOwner('sepolia', NODE);
+    }), 60_000);
+
+    expect(slowCalls).toBeGreaterThan(0);
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBe(OWNER);
   });
 });
 

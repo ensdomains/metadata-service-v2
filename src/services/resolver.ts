@@ -1,4 +1,5 @@
-import { BlockchainService } from './blockchain';
+import { getContract } from 'viem';
+import { BlockchainService, CONTRACTS, NAME_WRAPPER_ABI } from './blockchain';
 import { namehash, labelhash, isEmptyAddress } from '../utils/ens';
 import { MIGRATION_STATUS, NetworkName, MigrationStatus } from '../types';
 import { NotFoundError, UpstreamError } from './errors';
@@ -82,8 +83,15 @@ export class ResolverService {
 
         if (isWrapped) {
           try {
-            const nameWrapper = this.blockchain.getContract(network, 'nameWrapper');
-            const [wrappedOwner, wrappedFuses, wrappedExpiry] = await nameWrapper.read.getData([node]);
+            const { result: [wrappedOwner, wrappedFuses, wrappedExpiry] } = await this.blockchain.executeWithFallback(
+              network,
+              (client) => getContract({
+                address: CONTRACTS[network].nameWrapper as `0x${string}`,
+                abi: NAME_WRAPPER_ABI,
+                client,
+              }).read.getData([node]),
+              { markEndpointFailures: true },
+            );
             registrant = wrappedOwner as string;
             fuses = Number(wrappedFuses);
             expiry = wrappedExpiry as bigint;
@@ -211,27 +219,5 @@ export class ResolverService {
     }
 
     return results;
-  }
-
-  // Check if name exists on network (v1 registry record OR live v2 registration)
-  async nameExists(name: string, network: NetworkName): Promise<boolean> {
-    try {
-      const node = namehash(name);
-      const { result } = await this.blockchain.executeWithFallback(network, async () => {
-        const registry = this.blockchain.getContract(network, 'registry');
-        return await registry.read.recordExists([node]);
-      });
-      if (result as boolean) return true;
-
-      // Names born on v2 have no v1 registry record — check the v2 registry too.
-      if (this.blockchain.isV2Configured(network)) {
-        const v2 = await this.blockchain.getV2Registration(network, name);
-        return v2?.status === 2;
-      }
-      return false;
-    } catch (error) {
-      console.error(`Error checking if ${name} exists on ${network}:`, error);
-      return false;
-    }
   }
 }

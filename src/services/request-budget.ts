@@ -49,11 +49,12 @@ interface RequestBudget {
   /** Epoch ms after which no upstream work is started or awaited. */
   deadline: number;
   /**
-   * Upstream endpoints that failed at the transport level (timeout, HTTP error,
-   * rate limit) earlier in this request. Later reads skip them: without this,
-   * every sequential read in a request waited out the same hung primary again.
+   * Upstream endpoints that timed out or could not be reached earlier in this
+   * request, with the first error that marked each. Later reads skip them:
+   * without this, every sequential read in a request waited out the same hung
+   * primary again.
    */
-  failedEndpoints: Set<string>;
+  failedEndpoints: Map<string, Error>;
 }
 
 const storage = new AsyncLocalStorage<RequestBudget>();
@@ -67,20 +68,24 @@ export function withRequestBudget<T>(fn: () => T): T {
       ccipExhausted: false,
       offchainLookups: 0,
       deadline: Date.now() + REQUEST_DEADLINE_MS,
-      failedEndpoints: new Set(),
+      failedEndpoints: new Map(),
     },
     fn,
   );
 }
 
-/** True if `endpoint` failed at the transport level earlier in this request. */
-export function endpointFailedInRequest(endpoint: string): boolean {
-  return storage.getStore()?.failedEndpoints.has(endpoint) ?? false;
+/** The error that marked `endpoint` as failed earlier in this request, if any. */
+export function endpointFailure(endpoint: string): Error | undefined {
+  return storage.getStore()?.failedEndpoints.get(endpoint);
 }
 
-/** Remember for the rest of this request that `endpoint` failed (no-op outside a request). */
-export function markEndpointFailed(endpoint: string): void {
-  storage.getStore()?.failedEndpoints.add(endpoint);
+/**
+ * Remember for the rest of this request that `endpoint` failed with `error`
+ * (no-op outside a request). An endpoint keeps the first error that marked it.
+ */
+export function markEndpointFailed(endpoint: string, error: Error): void {
+  const failed = storage.getStore()?.failedEndpoints;
+  if (failed && !failed.has(endpoint)) failed.set(endpoint, error);
 }
 
 /**
