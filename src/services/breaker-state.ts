@@ -21,7 +21,6 @@ const KV_MIN_EXPIRATION_TTL_SECS = 60;
 export class SharedBreakerState {
   private cachedUntil = 0;
   private cachedAt = Number.NEGATIVE_INFINITY;
-  private pendingRead: Promise<number> | null = null;
 
   constructor(private kv: KVNamespace, private key: string) {}
 
@@ -29,11 +28,15 @@ export class SharedBreakerState {
   // not). Reads KV at most once per SHARED_BREAKER_READ_CACHE_MS; a failed read
   // counts as "not tripped" (fail open: the upstream is simply tried).
   async trippedUntil(): Promise<number> {
-    if (Date.now() - this.cachedAt < SHARED_BREAKER_READ_CACHE_MS) return this.cachedUntil;
-    this.pendingRead ??= this.read().finally(() => {
-      this.pendingRead = null;
-    });
-    return this.pendingRead;
+    const now = Date.now();
+    if (now - this.cachedAt < SHARED_BREAKER_READ_CACHE_MS) return this.cachedUntil;
+    // Claim the refresh before reading, so concurrent callers use the last
+    // known value instead of awaiting this read. The read's promise must not
+    // be shared: in Workers its I/O belongs to the request that started it,
+    // and if that request is cancelled (client disconnect, timeout) it never
+    // settles, which would hang every request awaiting it.
+    this.cachedAt = now;
+    return this.read();
   }
 
   // Records a trip until `until` (epoch ms). The value, not the key's TTL,

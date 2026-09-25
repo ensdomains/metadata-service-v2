@@ -22,6 +22,11 @@ function memoryKv() {
 }
 type MemoryKv = ReturnType<typeof memoryKv>;
 
+// The promise's value, or HUNG if it has not settled within `ms` (real time).
+const HUNG = 'HUNG';
+const within = <T>(p: Promise<T>, ms = 100) =>
+  Promise.race([p, new Promise<typeof HUNG>((resolve) => setTimeout(() => resolve(HUNG), ms))]);
+
 // v2 indexer double: down (UpstreamError) or up (has the name).
 function indexer(down: boolean) {
   return {
@@ -116,12 +121,24 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     expect(kv.get).toHaveBeenCalledTimes(2);
   });
 
-  it('concurrent reads while the cache is stale share one KV read', async () => {
+  it('a request never waits on another request\'s read: one that never settles blocks no one else', async () => {
+    // In Workers a request's I/O never settles once that request is cancelled
+    // (client disconnect, timeout), so its read must not be shared.
     const kv = memoryKv();
+    kv.get.mockReturnValueOnce(new Promise<null>(() => {}));
     const b = isolate(kv, indexer(false));
 
-    await Promise.all(Array.from({ length: 5 }, () => b.getDomainMetadata('fox.eth')));
+    const cancelled = b.getDomainMetadata('fox.eth');
+    // Concurrent requests use the last known state and do not read KV again.
+    const others = await within(Promise.all(Array.from({ length: 5 }, () => b.getDomainMetadata('fox.eth'))));
+    expect(others).not.toBe(HUNG);
     expect(kv.get).toHaveBeenCalledTimes(1);
+
+    // Once the read cache is stale again, the next request reads KV itself.
+    vi.setSystemTime(T0 + SHARED_BREAKER_READ_CACHE_MS);
+    expect(await within(b.getDomainMetadata('fox.eth'))).toMatchObject({ source: 'indexerV2' });
+    expect(kv.get).toHaveBeenCalledTimes(2);
+    expect(await within(cancelled)).toBe(HUNG); // only the request that started the stuck read
   });
 
   it('writes a trip once per outage, not once per concurrently failing request', async () => {
