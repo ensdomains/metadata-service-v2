@@ -10,10 +10,9 @@ import { MetadataService } from '../src/services/metadata';
 import { MetadataCacheService } from '../src/services/metadata-cache';
 import app from '../src/index';
 
-// WEB-1552: POST /batch-metadata resolved every entry at once, invalid and
-// duplicate names included, and accepted 100 of them. Each distinct name can
-// cost ~20 subrequests on the fallback paths, so one request could exhaust the
-// invocation's 1000 during an indexer outage.
+// WEB-1552: POST /batch-metadata resolved every entry at once (up to 100),
+// invalid and duplicate names included, with no time bound: during an indexer
+// outage one request fanned out to every fallback path at once.
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 
@@ -111,7 +110,7 @@ describe('POST /batch-metadata limits', () => {
     ]);
   });
 
-  it('resolves at most 10 names at a time', async () => {
+  it('resolves at most 6 names at a time', async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     checkExpiry.mockImplementation(async () => {
@@ -127,24 +126,32 @@ describe('POST /batch-metadata limits', () => {
     const names = Array.from({ length: 25 }, (_, i) => `name${i}.eth`);
     const body = await (await batch({ names })).json() as BatchBody;
     expect(body.successful).toBe(25);
-    expect(maxInFlight).toBe(10);
+    expect(maxInFlight).toBe(6);
   });
 
-  it('caps a batch at 25 names by default', async () => {
+  it('caps a batch at 100 names by default', async () => {
     const names = (n: number) => Array.from({ length: n }, (_, i) => `name${i}.eth`);
 
-    const over = await batch({ names: names(26) });
+    const over = await batch({ names: names(101) });
     expect(over.status).toBe(400);
-    expect((await over.json() as { error: string }).error).toBe('Cannot process more than 25 names at once');
+    expect((await over.json() as { error: string }).error).toBe('Cannot process more than 100 names at once');
     expect(checkExpiry).not.toHaveBeenCalled();
 
-    const atCap = await batch({ names: names(25) });
+    const atCap = await batch({ names: names(100) });
     expect(atCap.status).toBe(200);
   });
 
   it('counts duplicate and invalid entries against the cap', async () => {
-    const res = await batch({ names: Array.from({ length: 26 }, (_, i) => (i % 2 ? 'nick.eth' : 'bad')) });
+    const res = await batch({ names: Array.from({ length: 101 }, (_, i) => (i % 2 ? 'nick.eth' : 'bad')) });
     expect(res.status).toBe(400);
+  });
+
+  it('rejects an entry whose lowercase form is too long, as given, without resolving it', async () => {
+    // 'İ' lowercases to two code units: 204 characters as sent, 404 as resolved.
+    const long = `${'İ'.repeat(200)}.eth`;
+    const body = await (await batch({ names: [long, 'nick.eth'] })).json() as BatchBody;
+    expect(body.results[0]).toEqual({ name: long, error: 'Invalid ENS name format' });
+    expect(getMetadata).toHaveBeenCalledTimes(1);
   });
 
   it('takes the cap from MAX_BATCH_NAMES, ignoring a value that is not a positive integer', async () => {
@@ -169,14 +176,13 @@ describe('POST /batch-metadata limits', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as BatchBody;
 
-    // The 10 names already in flight complete; the 2 still queued are not started.
-    expect(getMetadata).toHaveBeenCalledTimes(10);
-    expect(body.results.slice(0, 10).every((r) => r.metadata)).toBe(true);
-    expect(body.results.slice(10)).toEqual([
-      { name: 'name10.eth', error: 'Batch time budget exceeded' },
-      { name: 'name11.eth', error: 'Batch time budget exceeded' },
-    ]);
-    expect(body).toMatchObject({ total: 12, successful: 10, failed: 2 });
+    // The 6 names already in flight complete; the 6 still queued are not started.
+    expect(getMetadata).toHaveBeenCalledTimes(6);
+    expect(body.results.slice(0, 6).every((r) => r.metadata)).toBe(true);
+    expect(body.results.slice(6)).toEqual(
+      Array.from({ length: 6 }, (_, i) => ({ name: `name${i + 6}.eth`, error: 'Batch time budget exceeded' })),
+    );
+    expect(body).toMatchObject({ total: 12, successful: 6, failed: 6 });
   });
 
   it('reports a failed resolution per entry, naming the entry as given', async () => {

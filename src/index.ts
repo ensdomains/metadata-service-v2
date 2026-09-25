@@ -64,7 +64,7 @@ export interface Env {
   MAX_AVATAR_BYTES?: string; // max fetched avatar size in bytes (default 25 MB)
   D1_READ_MAX_AGE_SECS?: string; // D1 rows older than this are a miss (default 7 days)
   D1_RETENTION_SECS?: string; // daily cron deletes D1 rows older than this (default 30 days)
-  MAX_BATCH_NAMES?: string; // max names per POST /batch-metadata (default 25)
+  MAX_BATCH_NAMES?: string; // max names per POST /batch-metadata (default 100)
   LOG_LEVEL: string;
 }
 
@@ -639,24 +639,33 @@ app.get(
   }
 );
 
-// POST /batch-metadata limits (WEB-1552). The batch is sized for 1000
-// subrequests per invocation (fetch and KV count; D1 has its own 1000-query
-// cap). One distinct name can cost ~20 of them, counted from the code with each
-// call answering on its first attempt:
+// POST /batch-metadata limits (WEB-1552). Workers Paid allows 10,000
+// subrequests per invocation (fetch and KV count). One distinct name costs,
+// counted from the code with each call answering on its first attempt:
 //  - indexers down (sepolia): KV get + write-back 2, checkExpiry 2 RPC reads,
 //    zigens 2 and v1 subgraph 2 (primary + one retry each), blockchain tier 6
 //    (v2 getState; v1 owner, resolver, isWrapped owner, NameWrapper.getData,
 //    nameExpires), v2 registry discovery (2 reads per lookup) 4 while not
 //    cached = 18;
-//  - indexer up and the name's D1 row stale: the awaited D1 sync adds 3
-//    indexer queries and 11 D1 queries = 21.
-// 100 names was 1800-2100. 25 stays under 1000 even if every RPC read on the
-// indexer-outage path needs one failover attempt (25 x 30 = 750).
-const DEFAULT_MAX_BATCH_NAMES = 25;
-// Distinct names resolved at once. An invocation has 6 connections waiting for
-// response headers; starting the whole batch at once also let every name hit a
-// failing indexer before its circuit breaker opened.
-const BATCH_CONCURRENCY = 10;
+//  - indexer up and the name's D1 row stale: the D1 sync adds 3 indexer
+//    queries = 21;
+//  - worst case, a subname of a v2 name with its own subregistry that no
+//    indexer covers: the owner's contracts can make the Universal Resolver
+//    revert on every RPC client, and the hierarchical resolver then reads 2
+//    values per label, one label after another: ~70 with names capped at 32
+//    labels (fix/name-depth-cap).
+// 100 names stay under 10,000 even then (~7,000), and the time budget below
+// and the request deadline stop the work sooner. D1 allows 1000 queries per
+// invocation; the D1 sync runs in waitUntil, so on a batch of many cold, deep
+// names it is the background sync of the last names that can hit that cap, not
+// a response.
+const DEFAULT_MAX_BATCH_NAMES = 100;
+// Distinct names resolved at once: an invocation has 6 connections waiting for
+// response headers, and a request queued behind them runs down its timeout
+// before it is sent (a false indexer failure trips the circuit breaker).
+// Starting the whole batch at once also let every name hit a failing indexer
+// before its circuit breaker opened.
+const BATCH_CONCURRENCY = 6;
 // A name not started within this budget gets a per-name error, so a slow
 // outage degrades the batch instead of running it into the 30s route timeout
 // (one 504 for every name). In an indexer outage a name already in flight
@@ -741,7 +750,9 @@ app.post("/batch-metadata", async (c) => {
     // resolved once, in its canonical form (the metadata cache key's), and every
     // entry for it shares the result while echoing the name as given.
     const names: string[] = body.names;
-    const distinct = [...new Set(names.filter((name) => validateEnsName(name)).map(canonicalizeName))];
+    // Validated as given and as resolved: lowercasing can lengthen a name.
+    const isValid = (name: string) => validateEnsName(name) && validateEnsName(canonicalizeName(name));
+    const distinct = [...new Set(names.filter(isValid).map(canonicalizeName))];
 
     type Outcome = { metadata: MetadataResponse } | { error?: string };
     const deadline = Date.now() + BATCH_TIME_BUDGET_MS;
@@ -775,7 +786,7 @@ app.post("/batch-metadata", async (c) => {
     const outcomeByName = new Map(distinct.map((name, i) => [name, outcomes[i]]));
 
     const results = names.map((name) => {
-      if (!validateEnsName(name)) return { name, error: 'Invalid ENS name format' };
+      if (!isValid(name)) return { name, error: 'Invalid ENS name format' };
       const outcome = outcomeByName.get(canonicalizeName(name))!;
       return 'metadata' in outcome
         ? { name, metadata: outcome.metadata }
