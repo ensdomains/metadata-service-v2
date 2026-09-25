@@ -417,8 +417,10 @@ app.get(
     try {
       const url = new URL(c.req.url);
       const baseUrl = `${url.protocol}//${url.host}`;
-      // For inline (image_data) avatars, v1 pointed `image` at the avatar image
-      // endpoint; keep that shape using this deployment's own host.
+      // For inline avatars (image_data, a data:image URI or SVG markup in
+      // image/image_url), `image` points at the avatar image endpoint, which
+      // serves those bytes validated (v1 did this for image_data), using this
+      // deployment's own host.
       const avatarImageUrl = `${baseUrl}/${network}/avatar/${encodeURIComponent(name)}`;
 
       const meta = await avatarService.getAvatarMeta(name, avatarImageUrl);
