@@ -286,6 +286,32 @@ describe('webhook protocol→network fan-out (targetNetworks)', () => {
   });
 });
 
+describe('webhook events for names this service never serves', () => {
+  it.each([
+    ['deeper than MAX_NAME_LABELS', `${Array.from({ length: 32 }, (_, i) => `l${i}`).join('.')}.eth`],
+    ['longer than 255 characters', `${'a'.repeat(300)}.eth`],
+  ])('acknowledges a name %s without invalidating or warming anything', async (_label, name) => {
+    warmState.mode = 'record';
+    const app = await loadApp();
+    const env = makeEnv();
+
+    const { res, drain } = await postWebhook(app, webhookEvent({ name, namehash: '0x1234' }), env);
+    await drain();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: 'ignored', processed: false });
+    expect(warmState.classify).toEqual([]);
+    expect(warmState.warm).toEqual([]);
+    expect(vi.mocked(env.METADATA_CACHE.delete)).not.toHaveBeenCalled();
+  });
+
+  it.each([42, 'noTld', 'a..eth'])('still rejects a malformed name (%j) with 400', async (name) => {
+    const app = await loadApp();
+    const { res } = await postWebhook(app, webhookEvent({ name }), makeEnv());
+    expect(res.status).toBe(400);
+  });
+});
+
 describe.skipIf(!hasSqlite)('D1 storeMigrationStatus — partial (webhook-shaped) writes', () => {
   const OWNER = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 

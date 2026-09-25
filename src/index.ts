@@ -13,7 +13,7 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
-import { canonicalizeName, isResolvableEnsName } from "./utils/ens";
+import { canonicalizeName, validateEnsName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
@@ -936,7 +936,8 @@ const handleWebhook = async (c: any) => {
           // Canonicalize like WebhookService does for its purges: the D1 name
           // column and warmed cache keys must never carry a raw-case variant.
           const name = payload?.name ? canonicalizeName(payload.name) : undefined;
-          if (!name) return;
+          // An ignored event (a name this service never serves) has nothing to warm.
+          if (!name || !validateEnsName(name)) return;
 
           // The event carries ENS protocol (v1/v2), not chain — and the chain
           // cannot be derived from the payload (v1 contracts share addresses
