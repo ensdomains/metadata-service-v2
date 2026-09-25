@@ -1,8 +1,13 @@
-import { Context, Next } from 'hono';
+import { Context, MiddlewareHandler, Next } from 'hono';
 import { validateEnsName } from '../utils/ens';
 
+// Route middlewares are typed as MiddlewareHandler (path type `string`), not
+// `(c: Context, next)`: a bare Context has path type `any`, and since hono
+// 4.12.5 that turns c.req.param() in the route handlers after them into
+// `string | undefined`.
+
 // Validate network parameter
-export const validateNetwork = async (c: Context, next: Next) => {
+export const validateNetwork: MiddlewareHandler = async (c, next) => {
   const network = c.req.param('network');
 
   if (network && !['mainnet', 'sepolia'].includes(network)) {
@@ -16,7 +21,7 @@ export const validateNetwork = async (c: Context, next: Next) => {
 };
 
 // Validate ENS name parameter
-export const validateEnsNameParam = async (c: Context, next: Next) => {
+export const validateEnsNameParam: MiddlewareHandler = async (c, next) => {
   const name = c.req.param('name');
 
   if (!name) {
