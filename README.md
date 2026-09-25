@@ -130,9 +130,12 @@ The avatar and header routes answer 404 when the name has no usable record, and
 503 with a short `Cache-Control` when the lookup failed (RPC, CCIP gateway or
 media host error, or the 8 s resolution timeout). An NFT card whose avatar
 lookup failed is served without the avatar with `Cache-Control: public,
-max-age=60`, is kept in the edge cache for the same minute and is not stored in
-KV or R2, so the avatar appears within a minute of the upstream recovering. A
-name whose upstream keeps failing (e.g. a gateway that answers 503 for a
-suspended name) is therefore looked up again once a minute per colo. A CCIP
-gateway's 4xx other than 408/429 is its final answer (EIP-3668) and counts as
-no record, as does a gateway URL the service refuses to fetch.
+max-age=60`, is kept in the edge cache for a minute and is not stored in KV or
+R2. A name whose upstream keeps failing (e.g. a gateway that answers 503 for a
+suspended name) is therefore looked up again once a minute per colo. The edge
+copy is served with a fresh `max-age=60`, so the avatar reappears within about
+two minutes of the upstream recovering. A CCIP gateway's 4xx other than 401,
+403, 408 and 429 is its final answer (EIP-3668) and counts as no record, as does
+a gateway URL the service refuses to fetch; any other gateway status (401 and
+403 included: an expired gateway key or a WAF blocking requests from Workers)
+fails the lookup.

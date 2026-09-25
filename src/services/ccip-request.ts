@@ -25,7 +25,7 @@ import {
   type HttpTransport,
   type HttpTransportConfig,
 } from 'viem';
-import { BlockedMediaUrlError, fetchMediaUrl, readBodyCapped } from './media-fetch';
+import { assertFetchableMediaUrl, fetchMediaUrl, readBodyCapped } from './media-fetch';
 import { takeCcipBytes, takeCcipRequest, takeOffchainLookup } from './request-budget';
 
 export const CCIP_TIMEOUT_MS = 8_000;
@@ -41,18 +41,32 @@ class CcipAllowanceSpentError extends Error {
 
 /**
  * A failed gateway request: the gateway's status, or none when it could not be
- * reached. It keeps viem's HttpRequestError class and name (viem's local batch
+ * reached or its response was unusable (malformed, a redirect the guard
+ * refuses). It keeps viem's HttpRequestError class and name (viem's local batch
  * gateway encodes it as HttpError(status) for the Universal Resolver), and the
  * subclass tells an avatar lookup a gateway's answer apart from an error of the
  * RPC endpoint itself.
  */
 export class CcipGatewayError extends HttpRequestError {}
 
-// The status reported for a gateway URL the guard refuses (a private or own
-// host, a non-default port, another scheme). Such a URL is never fetched, for
-// this request or a later one, so it is reported the way a gateway refusing the
-// request is: an EIP-3668 4xx, a final answer rather than an outage.
-export const REFUSED_GATEWAY_STATUS = 403;
+/**
+ * Whether a gateway status is the gateway's final answer for the request (the
+ * name has no such record) rather than a failure. EIP-3668 makes a 4xx final,
+ * except 401 and 403 (a WAF blocking Workers egress or an expired gateway key:
+ * the gateway's infrastructure, not the name), 408 and 429. A 3xx and every 5xx
+ * (501 included) are failures.
+ */
+export function isFinalGatewayStatus(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 401 && status !== 403 && status !== 408 && status !== 429;
+}
+
+// The status reported for a gateway URL that the guard's rules (media-fetch.ts)
+// refuse. The URL is checked before anything is fetched and would be refused
+// for a later request too, so it is reported the way a gateway rejecting the
+// request is: a final 4xx answer rather than an outage. A redirect hop the
+// guard refuses comes from a gateway that was fetched, so it is a gateway
+// failure instead.
+export const REFUSED_GATEWAY_STATUS = 400;
 
 // Charged before every gateway fetch, redirect hops included: each one is a
 // Worker subrequest.
@@ -61,45 +75,54 @@ function chargeGatewayFetch(): void {
 }
 
 export async function guardedCcipRequest({ data, sender, urls }: CcipRequestParameters): Promise<Hex> {
-  let error: Error | undefined;
+  let answer: Error | undefined;
+  let failure: Error | undefined;
   let refused: Error | undefined;
   for (const url of urls) {
     const method = url.includes('{data}') ? 'GET' : 'POST';
     const body = method === 'POST' ? { data, sender } : undefined;
+    const target = url.replace('{sender}', sender.toLowerCase()).replace('{data}', data);
     try {
-      const response = await fetchMediaUrl(url.replace('{sender}', sender.toLowerCase()).replace('{data}', data), {
+      assertFetchableMediaUrl(new URL(target));
+    } catch (err) {
+      refused ??= new CcipGatewayError({ body, details: (err as Error).message, status: REFUSED_GATEWAY_STATUS, url });
+      continue;
+    }
+    try {
+      const response = await fetchMediaUrl(target, {
         method,
         body: body ? JSON.stringify(body) : undefined,
         headers: body ? { 'Content-Type': 'application/json' } : {},
         signal: AbortSignal.timeout(CCIP_TIMEOUT_MS),
       }, undefined, chargeGatewayFetch);
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        const error = new CcipGatewayError({ body, details: response.statusText, status: response.status, url });
+        if (isFinalGatewayStatus(response.status)) answer = error;
+        else failure = error;
+        continue;
+      }
       const raw = await readBodyCapped(response, MAX_CCIP_RESPONSE_BYTES, takeCcipBytes);
       if (!raw) throw new Error('gateway response over the size cap or this request\'s CCIP allowance');
       const text = new TextDecoder().decode(raw);
       const result: unknown = response.headers.get('Content-Type')?.startsWith('application/json')
         ? (JSON.parse(text) as { data?: unknown }).data
         : text;
-      if (!response.ok) {
-        error = new CcipGatewayError({ body, details: response.statusText, status: response.status, url });
-        continue;
-      }
       if (typeof result !== 'string' || !isHex(result)) {
-        error = new Error(`Offchain gateway response is malformed. URL: ${url}`);
+        failure = new CcipGatewayError({ body, details: 'malformed response', url });
         continue;
       }
       return result;
     } catch (err) {
       // Once this request's allowance is spent, do not try the other gateways.
       if (err instanceof CcipAllowanceSpentError) throw err;
-      if (err instanceof BlockedMediaUrlError) {
-        refused ??= new CcipGatewayError({ body, details: err.message, status: REFUSED_GATEWAY_STATUS, url });
-        continue;
-      }
-      error = new CcipGatewayError({ body, details: (err as Error).message, url });
+      // Unreachable, or a redirect hop the guard refuses (or one too many).
+      failure = new CcipGatewayError({ body, details: (err as Error).message, url });
     }
   }
-  // A gateway that failed outranks one the guard refused: it may answer later.
-  throw error ?? refused ?? new Error('An unknown error occurred.');
+  // A gateway's final answer outranks a gateway that failed (EIP-3668: a 4xx is
+  // final), which outranks a URL the guard refused.
+  throw answer ?? failure ?? refused ?? new Error('An unknown error occurred.');
 }
 
 // The revert data viem inspects to decide whether to follow a lookup (its

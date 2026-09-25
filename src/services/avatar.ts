@@ -15,7 +15,7 @@ import {
   type PublicClient,
 } from 'viem';
 import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
-import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
+import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayStatus } from './ccip-request';
 import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
@@ -83,12 +83,13 @@ function toGatewayUrl(uri: string): string {
 }
 
 // Universal Resolver errors that mean "the name has no such record". A
-// gateway's HttpError counts too unless its status is an outage one (408, 429,
-// 5xx): under EIP-3668 a 4xx is the gateway's final answer for the request, and
-// a gateway URL the guard refuses is reported as 403 (ccip-request.ts). Any
-// other error (an RPC failure, a gateway outage) means the lookup failed. The
-// hardened ens-avatar viem adapter counts only 404/410, but it never sees these
-// errors: observeLookups answers null for them first.
+// gateway's HttpError counts too when its status is the gateway's final answer
+// (isFinalGatewayStatus: a 4xx other than 401, 403, 408 and 429, as EIP-3668
+// makes a 4xx final), and a gateway URL the guard refuses is reported as one
+// (ccip-request.ts). Any other error (an RPC failure, a gateway failure or any
+// other gateway status) means the lookup failed. The hardened ens-avatar viem
+// adapter counts only 404/410, but it never sees these errors: observeLookups
+// answers null for them first.
 const NO_RECORD_ERRORS = new Set([
   'ResolverNotFound',
   'ResolverNotContract',
@@ -103,14 +104,12 @@ function isNoRecordError(error: unknown): boolean {
   const decoded = revert instanceof ContractFunctionRevertedError ? revert.data : undefined;
   if (!decoded) return false;
   if (NO_RECORD_ERRORS.has(decoded.errorName)) return true;
-  if (decoded.errorName !== 'HttpError') return false;
-  const status = Number(decoded.args?.[0]);
-  return status >= 400 && !isOutageStatus(status);
+  return decoded.errorName === 'HttpError' && isFinalGatewayStatus(Number(decoded.args?.[0]));
 }
 
 // A contract read that failed on the way to the contract (RPC endpoint, CCIP
 // gateway) rather than being answered by it with a revert or no data. A
-// gateway that answers with a status other than an outage one has answered
+// gateway whose status is its final answer (isFinalGatewayStatus) has answered
 // too; any HTTP error of the RPC endpoint (a 401 or 403 included) is a failure.
 function isContractReadOutage(error: unknown): boolean {
   if (!(error instanceof BaseError)) return false;
@@ -134,7 +133,7 @@ function isContractReadOutage(error: unknown): boolean {
   );
   if (answered) return false;
   const failed = error.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError || e instanceof RpcRequestError);
-  if (failed instanceof CcipGatewayError && failed.status !== undefined) return isOutageStatus(failed.status);
+  if (failed instanceof CcipGatewayError && failed.status !== undefined) return !isFinalGatewayStatus(failed.status);
   return !!failed;
 }
 

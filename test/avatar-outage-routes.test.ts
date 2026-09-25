@@ -147,7 +147,7 @@ describe('/avatar, /header, /avatar/:name/meta', () => {
 });
 
 describe('NFT card routes', () => {
-  it('/image: an avatar lookup that times out gives a card that is not stored and is cached only briefly', async () => {
+  it('/image: an avatar lookup that times out gives a card kept out of KV/R2 and cached for a minute only, by clients and the edge', async () => {
     vi.useFakeTimers();
     getAvatar.mockImplementation(hang);
 
@@ -174,7 +174,7 @@ describe('NFT card routes', () => {
     expect(getAvatar).toHaveBeenCalledTimes(1);
   });
 
-  it('/rasterize: a card whose avatar lookup failed is not stored and is cached only briefly', async () => {
+  it('/rasterize: a card whose avatar lookup failed is kept out of KV/R2 and cached for a minute only, by clients and the edge', async () => {
     getAvatar.mockRejectedValue(rpcDown());
 
     const res = await send('/mainnet/registry/down.eth/rasterize');

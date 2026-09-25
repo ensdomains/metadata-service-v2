@@ -90,12 +90,15 @@ const EDGE_CACHE_MAX_AGE_SECS = 300;
 
 // How long an NFT card rendered without its avatar because the avatar lookup
 // failed (RPC, CCIP gateway or media host outage, timeout) is cached, by clients
-// and in the edge cache. The card is kept out of KV/R2 (ImageCacheService), so
-// the avatar shows up within this window once the upstream recovers. A name
-// whose upstream fails for good (e.g. a CCIP gateway answering 503 for a
+// and in the edge cache. The card is kept out of KV/R2 (ImageCacheService). A
+// name whose upstream fails for good (e.g. a CCIP gateway answering 503 for a
 // suspended name) is looked up and rendered again once per window per colo,
 // not on every request: the edge entry keeps a failing upstream from being hit
-// (and the card re-rendered) by every client during an outage.
+// (and the card re-rendered) by every client during an outage. The edge copy is
+// served with a fresh max-age of this window, so the avatar shows up within
+// about two windows (two minutes) of the upstream recovering. A gateway's final
+// answer (a 4xx other than 401, 403, 408 and 429) and a gateway URL the guard
+// refuses mean no record, not a failure (avatar.ts), and never degrade a card.
 const DEGRADED_CARD_MAX_AGE_SECS = 60;
 const DEGRADED_CARD_CACHE_CONTROL = `public, max-age=${DEGRADED_CARD_MAX_AGE_SECS}`;
 

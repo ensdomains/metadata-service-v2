@@ -365,7 +365,47 @@ describe('RPC and gateway failures that the library swallows', () => {
     revert: encodeErrorResult({ abi: urAbi, errorName, args } as Parameters<typeof encodeErrorResult>[0]),
   });
 
-  it('the text-record lookup: an RPC or gateway outage fails it; "no resolver" and a gateway 4xx are misses', async () => {
+  // CCIP gateways as the text-record lookup (through the batch gateway) and a
+  // tokenURI() read (direct) meet them: both read them the same way. A final
+  // answer (a 4xx other than 401/403/408/429) or a refused gateway URL is a
+  // miss; any other status, a malformed answer or a refused redirect fails the
+  // lookup, and a final answer outranks a failure.
+  const GW = 'https://gw.example/{sender}/{data}.json';
+  const GW2 = 'https://gw2.example/{sender}/{data}.json';
+  const REFUSED_GW = 'https://127.0.0.1/{sender}/{data}.json';
+  const gatewaySays = (status: number) => () => new Response('gateway says no', { status });
+  const gatewayCases: Array<[string, string[], (url: string) => Response]> = [
+    ['404', [GW], gatewaySays(404)],
+    ['400', [GW], gatewaySays(400)],
+    ['401', [GW], gatewaySays(401)],
+    ['403', [GW], gatewaySays(403)],
+    ['429', [GW], gatewaySays(429)],
+    ['503', [GW], gatewaySays(503)],
+    ['404 with an empty JSON body', [GW], () => new Response('', { status: 404, headers: { 'content-type': 'application/json' } })],
+    ['200 with an HTML page', [GW], () => new Response('<html>domain for sale</html>', { headers: { 'content-type': 'text/html' } })],
+    ['redirect to a refused host', [GW], () => new Response(null, { status: 302, headers: { location: 'https://127.0.0.1/x' } })],
+    ['refused', [REFUSED_GW], gatewaySays(503)],
+    ['[404, 503]', [GW, GW2], (url) => new Response('gateway says no', { status: url.startsWith('https://gw.') ? 404 : 503 })],
+    ['[503, 404]', [GW, GW2], (url) => new Response('gateway says no', { status: url.startsWith('https://gw.') ? 503 : 404 })],
+    ['[refused, 503]', [REFUSED_GW, GW], gatewaySays(503)],
+  ];
+  const gatewayOutcomes = {
+    404: 'miss',
+    400: 'miss',
+    401: 'failure',
+    403: 'failure',
+    429: 'failure',
+    503: 'failure',
+    '404 with an empty JSON body': 'miss',
+    '200 with an HTML page': 'failure',
+    'redirect to a refused host': 'failure',
+    refused: 'miss',
+    '[404, 503]': 'miss',
+    '[503, 404]': 'miss',
+    '[refused, 503]': 'failure',
+  };
+
+  it('the text-record lookup: an RPC or gateway outage fails it; "no resolver" and a final gateway answer are misses', async () => {
     quiet();
     const results: Record<string, string> = {};
     const cases: Array<[string, () => Answer]> = [
@@ -374,10 +414,12 @@ describe('RPC and gateway failures that the library swallows', () => {
       ['gateway HttpError 503', () => urRevert('HttpError', [503, 'suspended'])],
       ['gateway HttpError 429', () => urRevert('HttpError', [429, 'slow down'])],
       ['gateway HttpError 408', () => urRevert('HttpError', [408, 'timeout'])],
+      ['gateway HttpError 401', () => urRevert('HttpError', [401, 'expired key'])],
+      ['gateway HttpError 403', () => urRevert('HttpError', [403, 'blocked by a WAF'])],
       ['no resolver', () => urRevert('ResolverNotFound', ['0x'])],
       ['gateway HttpError 404', () => urRevert('HttpError', [404, 'unknown name'])],
       ['gateway HttpError 400', () => urRevert('HttpError', [400, 'unsupported name'])],
-      ['gateway HttpError 403', () => urRevert('HttpError', [403, 'blocked name'])],
+      ['gateway HttpError 410', () => urRevert('HttpError', [410, 'name gone'])],
     ];
     for (const [label, onText] of cases) {
       stubRpc(onText);
@@ -389,14 +431,16 @@ describe('RPC and gateway failures that the library swallows', () => {
       'gateway HttpError 503': 'failure',
       'gateway HttpError 429': 'failure',
       'gateway HttpError 408': 'failure',
+      'gateway HttpError 401': 'failure',
+      'gateway HttpError 403': 'failure',
       'no resolver': 'miss',
       'gateway HttpError 404': 'miss',
       'gateway HttpError 400': 'miss',
-      'gateway HttpError 403': 'miss',
+      'gateway HttpError 410': 'miss',
     });
   });
 
-  it('the text-record lookup through the batch gateway: a gateway URL the guard refuses is a miss', async () => {
+  it('the text-record lookup through the batch gateway: a final gateway answer or a refused gateway URL is a miss, any other gateway error fails it', async () => {
     quiet();
     const batchAbi = parseAbi([
       'function query((address sender, string[] urls, bytes data)[]) view returns (bool[] failures, bytes[] responses)',
@@ -408,13 +452,13 @@ describe('RPC and gateway failures that the library swallows', () => {
     // A Universal Resolver whose resolver answers the text record with an
     // OffchainLookup through viem's local batch gateway; the callback reverts
     // with the failed query's error, as the Universal Resolver does.
-    const run = async (gateways: string[], gatewayStatus: number) => {
-      const gatewayFetches: string[] = [];
+    const gatewayFetches: string[] = [];
+    const run = async (gateways: string[], gateway: (url: string) => Response) => {
       vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
         if (url !== RPC) {
           gatewayFetches.push(url);
-          return new Response('gateway says no', { status: gatewayStatus });
+          return gateway(url);
         }
         const req = JSON.parse(String(init?.body)) as { id: number; params: [{ to: Hex; data: Hex }] };
         const { to, data } = req.params[0];
@@ -432,17 +476,14 @@ describe('RPC and gateway failures that the library swallows', () => {
         const callData = encodeFunctionData({ abi: batchAbi, functionName: 'query', args: [[{ sender: RESOLVER, urls: gateways, data: '0x1234' }]] });
         return revert(encodeErrorResult({ abi: lookupAbi, errorName: 'OffchainLookup', args: [to, ['x-batch-gateway:true'], callData, CALLBACK, '0x'] }));
       }));
-      const result = await outcome(new AvatarService(RPC, mainnet).getAvatarImage('nick.eth'));
-      return { result, gatewayFetches: gatewayFetches.length };
+      return outcome(new AvatarService(RPC, mainnet).getAvatarImage('nick.eth'));
     };
 
-    // Refused by the guard (private host): never fetched, and a miss.
-    expect(await run(['https://127.0.0.1/{sender}/{data}.json'], 503)).toEqual({ result: 'miss', gatewayFetches: 0 });
-    // A gateway that fails outranks a refused one.
-    expect(await run(['https://127.0.0.1/{sender}/{data}.json', 'https://gw.example/{sender}/{data}.json'], 503))
-      .toEqual({ result: 'failure', gatewayFetches: 1 });
-    expect(await run(['https://gw.example/{sender}/{data}.json'], 400)).toEqual({ result: 'miss', gatewayFetches: 1 });
-    expect(await run(['https://gw.example/{sender}/{data}.json'], 429)).toEqual({ result: 'failure', gatewayFetches: 1 });
+    const results: Record<string, string> = {};
+    for (const [label, gateways, gateway] of gatewayCases) results[label] = await run(gateways, gateway);
+    expect(results).toEqual(gatewayOutcomes);
+    // Neither a refused gateway URL nor a refused redirect hop is fetched.
+    expect(gatewayFetches.filter((url) => url.includes('127.0.0.1'))).toEqual([]);
   });
 
   it('an NFT avatar whose tokenURI() read fails at the RPC fails the lookup; a reverting tokenURI() is a miss', async () => {
@@ -501,23 +542,25 @@ describe('RPC and gateway failures that the library swallows', () => {
     });
   });
 
-  it('an NFT whose tokenURI() is served by a CCIP gateway: a gateway 4xx or a refused gateway is a miss, a gateway 503 or 429 fails the lookup', async () => {
+  it('an NFT whose tokenURI() is served by a CCIP gateway: a final gateway answer or a refused gateway URL is a miss, any other gateway error fails the lookup', async () => {
     quiet();
     const record = `eip155:1/erc721:${NFT}/1`;
-    const offchainLookup = (gateway: string) => encodeErrorResult({
+    const offchainLookup = (gateways: string[]) => encodeErrorResult({
       abi: parseAbi(['error OffchainLookup(address sender, string[] urls, bytes callData, bytes4 callbackFunction, bytes extraData)']),
       errorName: 'OffchainLookup',
-      args: [NFT, [gateway], '0x1234', '0x12345678', '0x'],
+      args: [NFT, gateways, '0x1234', '0x12345678', '0x'],
     });
+    const gatewayFetches: string[] = [];
     const results: Record<string, string> = {};
-    for (const status of [404, 400, 403, 503, 429]) {
-      stubRpc(() => ({ record }), () => ({ revert: offchainLookup('https://gw.example/{sender}/{data}.json') }), () => new Response('gateway says no', { status }));
-      results[status] = await outcome(new AvatarService(RPC, mainnet).getAvatarImage('nick.eth'));
+    for (const [label, gateways, gateway] of gatewayCases) {
+      stubRpc(() => ({ record }), () => ({ revert: offchainLookup(gateways) }), (url) => {
+        gatewayFetches.push(url);
+        return gateway(url);
+      });
+      results[label] = await outcome(new AvatarService(RPC, mainnet).getAvatarImage('nick.eth'));
     }
-    const media = vi.fn(() => new Response('unreachable', { status: 503 }));
-    stubRpc(() => ({ record }), () => ({ revert: offchainLookup('https://127.0.0.1/{sender}/{data}.json') }), media);
-    results.refused = await outcome(new AvatarService(RPC, mainnet).getAvatarImage('nick.eth'));
-    expect(media).not.toHaveBeenCalled();
-    expect(results).toEqual({ 404: 'miss', 400: 'miss', 403: 'miss', 503: 'failure', 429: 'failure', refused: 'miss' });
+    expect(results).toEqual(gatewayOutcomes);
+    // Neither a refused gateway URL nor a refused redirect hop is fetched.
+    expect(gatewayFetches.filter((url) => url.includes('127.0.0.1'))).toEqual([]);
   });
 });
