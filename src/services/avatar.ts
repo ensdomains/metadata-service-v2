@@ -14,7 +14,7 @@ import {
   type PublicClient,
 } from 'viem';
 import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
-import { ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
+import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
 import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
@@ -81,10 +81,13 @@ function toGatewayUrl(uri: string): string {
   return uri;
 }
 
-// Universal Resolver errors that mean "the name has no such record", read the
-// way the hardened ens-avatar viem adapter reads a strict text lookup: a
-// gateway's HttpError counts only for 404/410, and any other error (an RPC
-// failure, a gateway outage) means the lookup failed.
+// Universal Resolver errors that mean "the name has no such record". A
+// gateway's HttpError counts too unless its status is an outage one (408, 429,
+// 5xx): under EIP-3668 a 4xx is the gateway's final answer for the request, and
+// a gateway URL the guard refuses is reported as 403 (ccip-request.ts). Any
+// other error (an RPC failure, a gateway outage) means the lookup failed. The
+// hardened ens-avatar viem adapter counts only 404/410, but it never sees these
+// errors: observeLookups answers null for them first.
 const NO_RECORD_ERRORS = new Set([
   'ResolverNotFound',
   'ResolverNotContract',
@@ -92,7 +95,6 @@ const NO_RECORD_ERRORS = new Set([
   'UnsupportedResolverProfile',
   'ReverseAddressMismatch',
 ]);
-const NO_RECORD_GATEWAY_STATUSES = new Set([404, 410]);
 
 function isNoRecordError(error: unknown): boolean {
   if (!(error instanceof BaseError)) return false;
@@ -100,14 +102,28 @@ function isNoRecordError(error: unknown): boolean {
   const decoded = revert instanceof ContractFunctionRevertedError ? revert.data : undefined;
   if (!decoded) return false;
   if (NO_RECORD_ERRORS.has(decoded.errorName)) return true;
-  return decoded.errorName === 'HttpError' && NO_RECORD_GATEWAY_STATUSES.has(Number(decoded.args?.[0]));
+  if (decoded.errorName !== 'HttpError') return false;
+  const status = Number(decoded.args?.[0]);
+  return status >= 400 && !isOutageStatus(status);
 }
 
 // A contract read that failed on the way to the contract (RPC endpoint, CCIP
 // gateway) rather than being answered by it with a revert or no data. A
-// gateway that answers 404 has answered too.
+// gateway that answers with a status other than an outage one has answered
+// too; any HTTP error of the RPC endpoint (a 401 or 403 included) is a failure.
 function isContractReadOutage(error: unknown): boolean {
   if (!(error instanceof BaseError)) return false;
+  // viem types a JSON-RPC -32603 "Internal error" as a revert with no data (and
+  // drops the RPC error from the chain); a node reports a revert without data
+  // as "execution reverted".
+  const revert = error.walk((e) => e instanceof ContractFunctionRevertedError);
+  if (
+    revert instanceof ContractFunctionRevertedError &&
+    revert.raw === undefined &&
+    !ExecutionRevertedError.nodeMessage.test((revert.reason ?? '').toLowerCase())
+  ) {
+    return true;
+  }
   const answered = error.walk(
     (e) =>
       e instanceof ContractFunctionRevertedError ||
@@ -116,7 +132,7 @@ function isContractReadOutage(error: unknown): boolean {
   );
   if (answered) return false;
   const failed = error.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError || e instanceof RpcRequestError);
-  if (failed instanceof HttpRequestError && failed.status !== undefined) return isOutageStatus(failed.status);
+  if (failed instanceof CcipGatewayError && failed.status !== undefined) return isOutageStatus(failed.status);
   return !!failed;
 }
 
