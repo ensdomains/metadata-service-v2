@@ -13,19 +13,28 @@ const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 // An avatar as the layout composer embeds it in the card (the payload is
 // BASE64_RE-validated, so it cannot contain a quote), and, as a fail-closed
-// backstop, any data: URI in an href (resvg also renders SVG served as
-// data:text/plain or data:;base64).
+// backstop, any data: URI in an href attribute (resvg also renders SVG served
+// as data:text/plain or data:;base64). XML attribute values are quoted, and a
+// match only counts inside a tag, so a name in the card's text cannot match,
+// and the pattern stays linear (one way to match any whitespace run).
 const AVATAR_ELEMENT_RE = /<image href="data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+/]*={0,2})" width="(\d+)" height="(\d+)"\/>/g;
-const DATA_HREF_RE = /\bhref\s*=\s*["']?\s*data:/gi;
+const DATA_HREF_RE = /<[^<>]*\bhref\s*=\s*["']\s*data:/gi;
 
-// Raster formats resvg decodes, and the largest raster avatar the Worker
-// rasterizes, in declared pixels. resvg allocates the whole decoded bitmap in
-// WebAssembly memory, which never shrinks for the life of the isolate: up to
-// 2048x2048 a render adds ~40 MB, 4096x4096 ~100 MB, and a 61 KiB PNG declaring
-// 8000x8000 ~0.4 GB, against a 128 MB isolate limit. The card draws the avatar
-// at 518px, so nothing visible is lost below the cap.
-const RASTERIZABLE_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const MAX_RASTERIZED_AVATAR_PIXELS = 2048 * 2048;
+// Raster formats resvg decodes (this build has no WebP decoder), and the
+// largest raster avatar the Worker rasterizes. resvg allocates the whole
+// decoded image in WebAssembly memory, which never shrinks for the life of the
+// isolate, and decoding needs more than the bitmap: measured with this resvg
+// build at 2048x2048, a PNG adds 17-29 MB, a baseline JPEG 41 MB, a GIF 52 MB
+// and a progressive JPEG (possible in a 24 KB file) 66 MB, on top of ~46 MB for
+// the card itself at the 2000px output size, the fonts' ~20 MB and the JS heap,
+// against a 128 MB isolate. At 1024x1024 the worst case (progressive JPEG) adds
+// ~16 MB. The card draws the avatar at 518px, so a 1024px avatar loses nothing
+// at the default size. The payload itself is bounded too: resvg holds the SVG
+// (with the base64) and the decoded file, whatever size the header declares.
+const RASTERIZABLE_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/gif"]);
+const MAX_RASTERIZED_AVATAR_PIXELS = 1024 * 1024;
+// Base64 characters (~4.5 MB of file): room for an uncompressed 1024x1024 RGBA PNG.
+const MAX_RASTERIZED_AVATAR_BASE64 = 6 * 1024 * 1024;
 
 // Escape user-controlled text before it is interpolated into SVG markup. The
 // layout composer inlines `text` into `<text>...</text>` without escaping, so a
@@ -168,8 +177,9 @@ export class ImageGenerationService {
 
   // The card as it may be rasterized on this service (the /rasterize route runs
   // resvg inside the Worker). An embedded avatar is kept only if it is a PNG,
-  // JPEG, GIF or WebP whose header declares at most MAX_RASTERIZED_AVATAR_PIXELS;
-  // anything else is replaced by the card's no-avatar background:
+  // JPEG or GIF of at most MAX_RASTERIZED_AVATAR_BASE64 whose header declares at
+  // most MAX_RASTERIZED_AVATAR_PIXELS; anything else is replaced by the card's
+  // no-avatar background:
   // - an SVG avatar: rendering owner-chosen SVG costs CPU out of all proportion
   //   to its size (<use> fan-out, per-element filters, masks or group opacity,
   //   plain full-canvas fills at up to 2000px output), from under a KiB to far
@@ -177,7 +187,8 @@ export class ImageGenerationService {
   //   bounds it;
   // - a raster avatar that is too large, or whose size cannot be read: resvg
   //   decodes the full bitmap, so a small file declaring a huge size exhausts
-  //   the isolate's memory.
+  //   the isolate's memory;
+  // - a WebP avatar: resvg cannot decode it and would leave a transparent hole.
   // `name` and `migrationStatus` must be the ones the card was generated with.
   forRasterization(svg: string, name: string, migrationStatus: MigrationStatus = "unmigrated"): string {
     const { background } = this.getColorScheme(migrationStatus, getCharacterSet(name));
@@ -185,7 +196,9 @@ export class ImageGenerationService {
     const out = svg.replace(
       AVATAR_ELEMENT_RE,
       (element, type: string, payload: string, width: string, height: string) => {
-        const size = RASTERIZABLE_AVATAR_TYPES.has(type) ? rasterDimensions(type, payload) : null;
+        const size = RASTERIZABLE_AVATAR_TYPES.has(type) && payload.length <= MAX_RASTERIZED_AVATAR_BASE64
+          ? rasterDimensions(type, payload)
+          : null;
         if (size && size.width * size.height <= MAX_RASTERIZED_AVATAR_PIXELS) {
           kept++;
           return element;

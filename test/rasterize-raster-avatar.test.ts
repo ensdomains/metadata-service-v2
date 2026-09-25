@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ImageGenerationService } from '../src/services/image';
-import { rasterDimensions } from '../src/services/raster-dimensions';
+import { MAX_HEADER_SCAN_BYTES, rasterDimensions } from '../src/services/raster-dimensions';
 
 // resvg (the /rasterize route) decodes a raster avatar to its full declared
 // size in WebAssembly memory, which never shrinks for the life of the isolate:
 // a 61 KiB all-zero PNG declaring 8000x8000 pixels took ~0.4 GB against a
-// 128 MB isolate limit. A raster avatar is rasterized only when its header
-// declares at most 2048x2048 pixels; otherwise, or when the size cannot be
-// read, the card is rasterized on its no-avatar background.
+// 128 MB isolate limit, and decoding needs several times the bitmap (a
+// progressive JPEG at 2048x2048 took 66 MB). A raster avatar is rasterized only
+// when it is a PNG, JPEG or GIF of at most 6 MiB of base64 whose header declares
+// at most 1024x1024 pixels; otherwise, or when the size cannot be read within
+// the scanned window, the card is rasterized on its no-avatar background.
 
 function png(width: number, height: number): Buffer {
   const ihdr = Buffer.alloc(25);
@@ -74,9 +76,7 @@ describe('rasterDimensions reads the declared size from the header', () => {
     ['image/jpeg (progressive, after a 60 KiB APP segment)', jpeg(5000, 4000, 60 * 1024, 0xc2), { width: 5000, height: 4000 }],
     ['image/gif', gif(300, 200), { width: 300, height: 200 }],
     ['image/gif (first frame larger than the screen)', gif(10, 10, 9000, 9000), { width: 9000, height: 9000 }],
-    ['image/webp (VP8)', webp('VP8 ', 800, 600), { width: 800, height: 600 }],
-    ['image/webp (VP8L)', webp('VP8L', 1024, 768), { width: 1024, height: 768 }],
-    ['image/webp (VP8X)', webp('VP8X', 3000, 3000), { width: 3000, height: 3000 }],
+    ['image/jpeg (fill bytes before the frame marker)', Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 0xff), jpeg(640, 480).subarray(2)]), { width: 640, height: 480 }],
   ])('%s', (label, bytes, expected) => {
     const type = label.split(' ')[0];
     expect(rasterDimensions(type, b64(bytes))).toEqual(expected);
@@ -87,8 +87,22 @@ describe('rasterDimensions reads the declared size from the header', () => {
     expect(rasterDimensions('image/png', b64(png(0, 10)))).toBeNull();
     expect(rasterDimensions('image/jpeg', b64(Buffer.from([0xff, 0xd8, 0xff, 0xda, 0, 2])))).toBeNull();
     expect(rasterDimensions('image/gif', b64(Buffer.from('GIF89a')))).toBeNull();
-    expect(rasterDimensions('image/webp', b64(Buffer.from('RIFF\0\0\0\0WEBPVP8Z')))).toBeNull();
+    // resvg cannot decode WebP, so its size is not read.
+    expect(rasterDimensions('image/webp', b64(webp('VP8X', 100, 100)))).toBeNull();
     expect(rasterDimensions('image/avif', b64(png(10, 10)))).toBeNull();
+  });
+
+  it('reads no further than MAX_HEADER_SCAN_BYTES, and a large payload costs no more than a small one', () => {
+    // A JPEG whose frame header sits after a fill-byte run longer than the window.
+    const sof = jpeg(16, 16).subarray(2);
+    const pastWindow = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(MAX_HEADER_SCAN_BYTES, 0xff), sof]);
+    expect(rasterDimensions('image/jpeg', b64(pastWindow))).toBeNull();
+
+    // 25 MB of fill bytes (the default avatar size cap) is scanned in the same window.
+    const huge = b64(Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(25 * 1024 * 1024, 0xff), sof]));
+    const start = performance.now();
+    expect(rasterDimensions('image/jpeg', huge)).toBeNull();
+    expect(performance.now() - start).toBeLessThan(250);
   });
 });
 
@@ -104,21 +118,22 @@ describe('forRasterization keeps only raster avatars within the pixel cap', () =
   });
 
   it.each([
-    ['image/png', png(2048, 2048)],
-    ['image/jpeg', jpeg(1500, 1500)],
+    ['image/png', png(1024, 1024)],
+    ['image/jpeg', jpeg(1024, 1024, 60 * 1024, 0xc2)],
+    ['image/jpeg', jpeg(800, 1300)],
     ['image/gif', gif(500, 500)],
-    ['image/webp', webp('VP8X', 1024, 4096)],
-  ])('keeps a %s avatar at or under 2048x2048 pixels', async (type, bytes) => {
+  ])('keeps a %s avatar at or under 1024x1024 pixels', async (type, bytes) => {
     const withAvatar = await card(bytes, type);
     expect(svc.forRasterization(withAvatar, 'nick.eth')).toBe(withAvatar);
   });
 
   it.each([
     ['image/png', png(8000, 8000)],
-    ['image/png', png(2049, 2048)],
+    ['image/png', png(1025, 1024)],
+    ['image/png', png(2048, 2048)],
+    ['image/jpeg', jpeg(1500, 1500)],
     ['image/jpeg', jpeg(5000, 5000, 1024)],
     ['image/gif', gif(10, 10, 9000, 9000)],
-    ['image/webp', webp('VP8X', 3000, 3000)],
   ])('replaces a %s avatar over the cap with the no-avatar background', async (type, bytes) => {
     const out = svc.forRasterization(await card(bytes, type), 'nick.eth');
     expect(out).not.toContain('data:');
@@ -131,10 +146,18 @@ describe('forRasterization keeps only raster avatars within the pixel cap', () =
       ['image/jpeg', Buffer.from([0xff, 0xd8, 0xff, 0xda, 0, 2])],
       ['image/avif', png(10, 10)],
       ['image/bmp', png(10, 10)],
+      ['image/webp', webp('VP8X', 100, 100)],
     ] as const) {
       const out = svc.forRasterization(await card(Buffer.from(bytes), type), 'nick.eth');
       expect(out).not.toContain('data:');
     }
+  });
+
+  it('replaces a small-declared raster avatar whose payload is over the byte budget', async () => {
+    // 16x16 declared, padded with ~4.6 MB of trailing data: over 6 MiB of base64.
+    const padded = Buffer.concat([png(16, 16), Buffer.alloc(4.6 * 1024 * 1024)]);
+    const out = svc.forRasterization(await card(padded, 'image/png'), 'nick.eth');
+    expect(out).not.toContain('data:');
   });
 
   it('replaces a composer-shaped avatar element of any other type (resvg renders SVG from data:text/plain too)', () => {
@@ -143,6 +166,19 @@ describe('forRasterization keeps only raster avatars within the pixel cap', () =
     const out = svc.forRasterization(odd, 'nick.eth');
     expect(out).not.toContain('data:');
     expect(out).toContain('<rect width="518" height="518"');
+  });
+
+  it('stays linear on long whitespace runs after href= (text or attribute), and ignores text', () => {
+    const run = ' '.repeat(100_000);
+    for (const svg of [
+      `<svg xmlns="http://www.w3.org/2000/svg"><text>href=${run}x.eth</text></svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg"><text aria-label="href=${run}"/></svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg"><text>href="data:x.eth</text></svg>`,
+    ]) {
+      const start = performance.now();
+      expect(svc.forRasterization(svg, 'nick.eth')).toBe(svg);
+      expect(performance.now() - start).toBeLessThan(100);
+    }
   });
 
   it('fails closed on a data: URI in any other markup', () => {
