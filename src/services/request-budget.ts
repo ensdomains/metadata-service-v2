@@ -55,6 +55,8 @@ interface RequestBudget {
    * primary again.
    */
   failedEndpoints: Map<string, Error>;
+  /** The RPC attempts in flight in this request, each with the peak count seen. */
+  rpcAttempts: Set<{ peak: number }>;
 }
 
 const storage = new AsyncLocalStorage<RequestBudget>();
@@ -69,6 +71,7 @@ export function withRequestBudget<T>(fn: () => T): T {
       offchainLookups: 0,
       deadline: Date.now() + REQUEST_DEADLINE_MS,
       failedEndpoints: new Map(),
+      rpcAttempts: new Set(),
     },
     fn,
   );
@@ -86,6 +89,33 @@ export function endpointFailure(endpoint: string): Error | undefined {
 export function markEndpointFailed(endpoint: string, error: Error): void {
   const failed = storage.getStore()?.failedEndpoints;
   if (failed && !failed.has(endpoint)) failed.set(endpoint, error);
+}
+
+// An invocation has 6 open connections and queues further fetches, and viem
+// starts its timeout before the fetch leaves that queue, so an RPC attempt
+// queued behind others (e.g. reads of a resolver a name chose, which it can
+// make hang) can time out on a healthy endpoint. With at most this many RPC
+// attempts in flight, each holding at most two connections (the RPC and a
+// CCIP-read gateway), none of them waits in that queue.
+export const MAX_UNQUEUED_RPC_ATTEMPTS = 3;
+
+/**
+ * Start an RPC attempt. The returned function, called once the attempt has
+ * ended, tells whether it could not have waited in the connection queue: at
+ * most MAX_UNQUEUED_RPC_ATTEMPTS RPC attempts of this request were in flight at
+ * any time while it ran. Only then is its timeout surely the endpoint's own.
+ * Outside a request there is no count, and every attempt qualifies.
+ */
+export function beginRpcAttempt(): () => boolean {
+  const attempts = storage.getStore()?.rpcAttempts;
+  if (!attempts) return () => true;
+  const attempt = { peak: 0 };
+  attempts.add(attempt);
+  for (const a of attempts) a.peak = Math.max(a.peak, attempts.size);
+  return () => {
+    attempts.delete(attempt);
+    return attempt.peak <= MAX_UNQUEUED_RPC_ATTEMPTS;
+  };
 }
 
 /**

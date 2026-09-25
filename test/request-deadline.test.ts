@@ -22,7 +22,7 @@ import { ResolverService } from '../src/services/resolver';
 import { IndexerService } from '../src/services/indexer';
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from '../src/services/fallback';
 import { UpstreamError } from '../src/services/errors';
-import { withRequestBudget } from '../src/services/request-budget';
+import { MAX_UNQUEUED_RPC_ATTEMPTS, withRequestBudget } from '../src/services/request-budget';
 
 // WEB-1552: the retry budget multiplied past the request timeout. The primary
 // RPC transport alone (8s timeout, retryCount 2) could spend ~25s of the 30s
@@ -493,6 +493,40 @@ describe('RPC endpoints that failed earlier in the request', () => {
     // The last endpoint's own error, as the first read's UpstreamError carries it.
     expect((out.value!.error as Error).cause).toBeInstanceOf(Error);
     expect((out.value!.error as Error).cause).toBe((out.value!.first as Error).cause);
+  });
+
+  it('does not mark an endpoint from reads that may have waited for a connection', async () => {
+    const net = stubFetch({ [PRIMARY]: hang, [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      // One read more than can be in flight without queueing: none of their
+      // timeouts is surely the endpoint's own (the reads of a name's resolver
+      // can be made to hang and fill the invocation's connections).
+      await Promise.all(Array.from({ length: MAX_UNQUEUED_RPC_ATTEMPTS + 1 }, () => svc.getOwner('mainnet', NODE)));
+      const concurrent = net.count(PRIMARY);
+      await svc.getOwner('mainnet', NODE); // alone: its timeout is the endpoint's, so it marks
+      await svc.getOwner('mainnet', NODE); // skips the primary
+      return { concurrent, total: net.count(PRIMARY) };
+    }), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toEqual({ concurrent: MAX_UNQUEUED_RPC_ATTEMPTS + 1, total: MAX_UNQUEUED_RPC_ATTEMPTS + 2 });
+  });
+
+  it('marks an endpoint from concurrent reads that cannot have waited for a connection', async () => {
+    const net = stubFetch({ [PRIMARY]: hang, [FALLBACK_1]: rpcOwner, [FALLBACK_2]: rpcOwner });
+    const svc = new BlockchainService(env);
+
+    const out = await settle(inRequest(DEADLINE_MS, async () => {
+      await Promise.all(Array.from({ length: MAX_UNQUEUED_RPC_ATTEMPTS }, () => svc.getOwner('mainnet', NODE)));
+      const start = Date.now();
+      await svc.getOwner('mainnet', NODE);
+      return { primary: net.count(PRIMARY), nextMs: Date.now() - start };
+    }), 60_000);
+
+    expect(out.value).toEqual({ primary: MAX_UNQUEUED_RPC_ATTEMPTS, nextMs: expect.any(Number) });
+    expect(out.value!.nextMs).toBeLessThanOrEqual(50);
   });
 
   it('keeps the first error that marked an endpoint', async () => {

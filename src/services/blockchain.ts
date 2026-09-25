@@ -15,6 +15,7 @@ import type { NetworkConfig } from '../types';
 import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
 import { RequestDeadlineError, UpstreamError } from './errors';
 import {
+  beginRpcAttempt,
   deadlineFetch,
   endpointFailure,
   markEndpointFailed,
@@ -406,15 +407,20 @@ export class BlockchainService {
         continue;
       }
 
+      const endAttempt = beginRpcAttempt();
       try {
         const what = `RPC client ${i} for ${network}`;
         const timeLeft = timeLeftForAttempt(what, lastError ?? undefined);
         const result = await raceRequestDeadline(operation(client), timeLeft, what);
+        endAttempt();
         return { result, usedFallback: isUsingFallback };
       } catch (error) {
+        // Only an attempt that cannot have waited in the connection queue can
+        // blame the endpoint for a timeout (see beginRpcAttempt).
+        const unqueued = endAttempt();
         if (error instanceof RequestDeadlineError) throw error;
         lastError = error as Error;
-        if (markEndpointFailures && isTransportFailure(error)) markEndpointFailed(endpoint, lastError);
+        if (markEndpointFailures && unqueued && isTransportFailure(error)) markEndpointFailed(endpoint, lastError);
         console.warn(`Client ${i} failed for ${network}:`, error);
         
         // If this is not the last client, continue to next
