@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { FallbackService, DEFAULT_FALLBACK_CONFIG, HIERARCHY_RESOLVE_CONCURRENCY } from '../src/services/fallback';
 import { CONTRACTS } from '../src/services/blockchain';
 import { NotFoundError, UpstreamError } from '../src/services/errors';
@@ -51,6 +51,22 @@ function makeService(resolveName: ReturnType<typeof vi.fn>): FallbackService {
   return new FallbackService(DEFAULT_FALLBACK_CONFIG, indexer() as never, {} as never, { resolveName } as never, indexer() as never);
 }
 
+// Settles `work` on the fake clock: the levels' delays then order them the
+// same way on every run (real timers drift under load, e.g. with coverage).
+async function settle<T>(work: Promise<T>): Promise<{ value?: T; error?: unknown }> {
+  const outcome = work.then((value) => ({ value }), (error: unknown) => ({ error }));
+  await vi.runAllTimersAsync();
+  return outcome;
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 type Level = { name: string; ownerId?: string; resolverId?: string; parentId?: string; parent?: Level };
 
 // The hierarchy as a list, the requested name first.
@@ -65,7 +81,8 @@ describe('getRegistryHierarchy blockchain tier resolves levels with bounded conc
     const name = deepName(MAX_NAME_LABELS);
     const { resolveName, state } = makeResolver(() => ({ delayMs: 1 }));
 
-    const result = await makeService(resolveName).getRegistryHierarchy(name);
+    const { value: result, error } = await settle(makeService(resolveName).getRegistryHierarchy(name));
+    if (!result) throw error;
 
     expect(result.source).toBe('blockchain');
     expect(state.started).toEqual(levelsOf(name));
@@ -83,7 +100,8 @@ describe('getRegistryHierarchy blockchain tier resolves levels with bounded conc
       error: domainName === failing ? new Error('no registry record for ancestor') : undefined,
     }));
 
-    const result = await makeService(resolveName).getRegistryHierarchy(name);
+    const { value: result, error } = await settle(makeService(resolveName).getRegistryHierarchy(name));
+    if (!result) throw error;
 
     expect(state.settled[0]).not.toBe('eth'); // precondition: out-of-order settling happened
     const expected = [...levels].reverse().map((level) => {
@@ -111,7 +129,7 @@ describe('getRegistryHierarchy blockchain tier resolves levels with bounded conc
         : { delayMs: 0, error: new NotFoundError(`${domainName} not registered`) },
     );
 
-    const err = await makeService(resolveName).getRegistryHierarchy('foo.eth').catch((e: unknown) => e);
+    const { error: err } = await settle(makeService(resolveName).getRegistryHierarchy('foo.eth'));
 
     expect(state.settled).toEqual(['foo.eth', 'eth']); // precondition: the leaf's miss settled first
     expect(err).toBeInstanceOf(UpstreamError);
@@ -123,7 +141,7 @@ describe('getRegistryHierarchy blockchain tier resolves levels with bounded conc
       domainName === 'eth' ? { delayMs: 0, error: new UpstreamError('all RPC clients failed') } : { delayMs: 10 },
     );
 
-    await expect(makeService(resolveName).getRegistryHierarchy(deepName(10))).rejects.toBeInstanceOf(UpstreamError);
+    expect((await settle(makeService(resolveName).getRegistryHierarchy(deepName(10)))).error).toBeInstanceOf(UpstreamError);
     // Only the levels already in flight when the TLD failed, not all ten.
     expect(resolveName).toHaveBeenCalledTimes(HIERARCHY_RESOLVE_CONCURRENCY);
   });
@@ -136,7 +154,7 @@ describe('getRegistryHierarchy blockchain tier resolves levels with bounded conc
         : { delayMs: 5 },
     );
 
-    await expect(makeService(resolveName).getRegistryHierarchy(name)).rejects.toBeInstanceOf(NotFoundError);
+    expect((await settle(makeService(resolveName).getRegistryHierarchy(name))).error).toBeInstanceOf(NotFoundError);
     expect(state.maxInFlight).toBeGreaterThan(1); // resolved concurrently, not in turn
   });
 });
