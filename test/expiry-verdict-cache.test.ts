@@ -14,6 +14,7 @@ import { ImageCacheService } from '../src/services/image-cache';
 import { UpstreamError } from '../src/services/errors';
 import { EXPIRY_VERDICT_TTL_MS, EXPIRY_VERDICT_MAX_ENTRIES } from '../src/services/expiry-verdict-cache';
 import { MIGRATION_STATUS } from '../src/types';
+import { MAX_ENS_NAME_LENGTH } from '../src/utils/ens';
 
 // WEB-1552: checkExpiry gates every metadata, image and rasterize request (and
 // each batch entry) before any other cache, so it must reuse a cached verdict
@@ -177,6 +178,30 @@ describe('checkExpiry verdict cache', () => {
 
     await svc.checkExpiry(name(1)); // the least recently used: dropped, so re-read
     expect(getV2Registration).toHaveBeenCalledTimes(EXPIRY_VERDICT_MAX_ENTRIES + 2);
+  });
+
+  it(`never stores a key longer than MAX_ENS_NAME_LENGTH (${MAX_ENS_NAME_LENGTH}): the entry bound is also a memory bound`, async () => {
+    // Not every route caps name length before checkExpiry (batch names, the
+    // registry/namewrapper param), so without this a batch of 100 KB names made
+    // up by the caller would each stay in the isolate for the whole TTL.
+    const getExpiry = vi.fn().mockResolvedValue(BigInt(nowSec() - DAY_SEC));
+    const svc = makeService('mainnet', { isV2Configured: vi.fn().mockReturnValue(false), getV2Registration: vi.fn(), getExpiry });
+    const verdicts = (svc as unknown as { expiryVerdicts: { size: number } }).expiryVerdicts;
+    const ofLength = (n: number) => `${'a'.repeat(n - 4)}.eth`;
+
+    for (let i = 0; i < 2; i++) { // the longest valid name: cached
+      await expect(svc.checkExpiry(ofLength(MAX_ENS_NAME_LENGTH))).rejects.toBeInstanceOf(DomainExpiredError);
+    }
+    expect(getExpiry).toHaveBeenCalledTimes(1);
+    expect(verdicts.size).toBe(1);
+
+    for (const name of [ofLength(MAX_ENS_NAME_LENGTH + 1), ofLength(100_000)]) {
+      for (let i = 0; i < 2; i++) { // still gated as before (410), just not cached
+        await expect(svc.checkExpiry(name)).rejects.toBeInstanceOf(DomainExpiredError);
+      }
+    }
+    expect(getExpiry).toHaveBeenCalledTimes(5); // every oversized call reads the chain
+    expect(verdicts.size).toBe(1); // and none of them was kept
   });
 });
 

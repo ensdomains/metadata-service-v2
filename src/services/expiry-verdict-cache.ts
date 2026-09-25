@@ -16,6 +16,15 @@
 // webhook evicts a changed name only in the isolate that handles it; any other
 // isolate picks up a renewal, re-registration or burn within the TTL, the same
 // bound the per-colo L0 edge cache has (EDGE_CACHE_MAX_AGE_SECS in index.ts).
+//
+// Memory: keys are request-supplied names, and not every route caps their
+// length before checkExpiry, so a key longer than MAX_ENS_NAME_LENGTH is never
+// stored (that name reads the chain on every request, as before this cache; the
+// rest of the pipeline rejects it anyway). The cache therefore holds at most
+// EXPIRY_VERDICT_MAX_ENTRIES keys of at most 255 UTF-16 units each, about 7 MB
+// per network in the worst case, however long the names callers send.
+
+import { MAX_ENS_NAME_LENGTH } from "../utils/ens";
 
 /** Longest a verdict is reused without re-reading the chain. */
 export const EXPIRY_VERDICT_TTL_MS = 5 * 60 * 1000;
@@ -46,6 +55,8 @@ export class ExpiryVerdictCache {
   }
 
   set(name: string, verdict: ExpiryVerdict): void {
+    // The entry bound only bounds memory if key size is bounded too (see above).
+    if (name.length > MAX_ENS_NAME_LENGTH) return;
     const now = Date.now();
     const lifetime = !verdict.expired && verdict.expiryMs !== null
       ? Math.min(this.ttlMs, verdict.expiryMs - now)
