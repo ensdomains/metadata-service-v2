@@ -136,6 +136,6 @@ suspended name) is therefore looked up again once a minute per colo. The edge
 copy is served with a fresh `max-age=60`, so the avatar reappears within about
 two minutes of the upstream recovering. A CCIP gateway's 4xx other than 401,
 403, 408 and 429 is its final answer (EIP-3668) and counts as no record, as does
-a gateway URL the service refuses to fetch; any other gateway status (401 and
-403 included: an expired gateway key or a WAF blocking requests from Workers)
-fails the lookup.
+a gateway URL the service refuses; any other gateway status (401 and 403
+included: an expired gateway key or a WAF blocking requests from Workers), and a
+gateway that redirects to a refused host, fails the lookup.

@@ -112,7 +112,9 @@ function isNoRecordError(error: unknown): boolean {
 // gateway whose status is its final answer (isFinalGatewayStatus) has answered
 // too; any HTTP error of the RPC endpoint (a 401 or 403 included) is a failure.
 function isContractReadOutage(error: unknown): boolean {
-  if (!(error instanceof BaseError)) return false;
+  // Not viem's own error: viem crashed on an RPC answer it could not read (a
+  // -32603 whose data is null makes its revert decoding throw a TypeError).
+  if (!(error instanceof BaseError)) return true;
   // viem types a JSON-RPC -32603 "Internal error" as a revert (and drops the
   // RPC error from the chain) whose data is the RPC error's data: none, "0x" or
   // a string that is not hex. A node reports a revert without data as
@@ -134,7 +136,9 @@ function isContractReadOutage(error: unknown): boolean {
   if (answered) return false;
   const failed = error.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError || e instanceof RpcRequestError);
   if (failed instanceof CcipGatewayError && failed.status !== undefined) return !isFinalGatewayStatus(failed.status);
-  return !!failed;
+  if (failed) return true;
+  // The same crash wrapped by viem (e.g. a -32603 whose data is a number).
+  return !!error.walk((e) => !(e instanceof BaseError));
 }
 
 /**
