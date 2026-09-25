@@ -77,7 +77,8 @@ export const NAME_WRAPPER_ABI = [
     type: 'function',
   },
   {
-    inputs: [{ name: 'node', type: 'bytes32' }],
+    // The token id (the node as an integer): getData(bytes32) does not exist.
+    inputs: [{ name: 'id', type: 'uint256' }],
     name: 'getData',
     outputs: [
       { name: 'owner', type: 'address' },

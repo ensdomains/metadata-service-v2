@@ -89,7 +89,7 @@ export class ResolverService {
                 address: CONTRACTS[network].nameWrapper as `0x${string}`,
                 abi: NAME_WRAPPER_ABI,
                 client,
-              }).read.getData([node]),
+              }).read.getData([BigInt(node)]),
               { markEndpointFailures: true },
             );
             registrant = wrappedOwner as string;
