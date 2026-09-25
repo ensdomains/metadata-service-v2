@@ -496,7 +496,9 @@ export class D1Service {
 // deletes the rows not refreshed within the retention period, then logs what
 // was removed and what remains. That log line is the size signal: alert on it
 // in Workers Observability (dbSizeBytes nearing D1's 10 GB limit, remaining
-// counts growing run over run, or complete=false). If a network fails, the run
+// counts growing run over run, or complete=false). It is logged as a JSON
+// string, which stays parseable when the console is wrapped for secret
+// redaction (an object would reach the log as inspected text there). If a network fails, the run
 // throws after the other networks have run, so the cron event shows it too.
 export async function runD1Retention(db: D1Database, retentionMs: number = D1_RETENTION_MS): Promise<void> {
   const failed: NetworkName[] = [];
@@ -507,7 +509,7 @@ export async function runD1Retention(db: D1Database, retentionMs: number = D1_RE
       const { deleted, complete } = await d1.cleanup(retentionMs);
       const { counts, dbSizeBytes } = await d1.tableCounts();
       const total = deleted.domains + deleted.migration_status + deleted.registry_hierarchy;
-      console.log({
+      console.log(JSON.stringify({
         message: `[d1-retention] ${network}: deleted ${total} rows past retention`,
         network,
         retentionDays: retentionMs / DAY_MS,
@@ -515,7 +517,7 @@ export async function runD1Retention(db: D1Database, retentionMs: number = D1_RE
         remaining: counts,
         dbSizeBytes,
         complete,
-      });
+      }));
     } catch (error) {
       failed.push(network);
       console.error(`[d1-retention] ${network}: retention run failed:`, error);

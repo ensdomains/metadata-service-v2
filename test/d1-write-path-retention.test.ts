@@ -622,9 +622,11 @@ describe.skipIf(!hasSqlite)('scheduled D1 retention', () => {
     }
     expect(rowCount(sqlite, 'sync_status')).toBe(1); // not a retained table
 
+    // One JSON line per network, so it stays parseable behind the redacting console.
     const entries = log.mock.calls
-      .map(([entry]) => entry as { message?: string; network?: string })
-      .filter((entry) => typeof entry === 'object' && entry?.message?.startsWith('[d1-retention]'));
+      .map(([entry]) => entry)
+      .filter((entry): entry is string => typeof entry === 'string' && entry.includes('"[d1-retention]'))
+      .map((entry) => JSON.parse(entry) as { message: string; network: string });
     expect(entries).toEqual(['mainnet', 'sepolia'].map((network) => expect.objectContaining({
       network,
       deleted: { domains: 1, migration_status: 1, registry_hierarchy: 1 },
@@ -645,6 +647,24 @@ describe.skipIf(!hasSqlite)('scheduled D1 retention', () => {
 
     expect(names(sqlite, 'domains')).toEqual(['mainnet:fresh.eth', 'sepolia:fresh.eth']);
   });
+
+  it.each(['30d', '1e6', String(60 * 60), '-5'])(
+    'ignores a D1_RETENTION_SECS of %j (not whole seconds, or under a day) and keeps the default',
+    async (value) => {
+      const sqlite = seeded({ old: 10 * DAY, fresh: 2 * DAY });
+      const app = await loadApp();
+
+      await app.scheduled(
+        controller,
+        makeEnv({ DB: makeSqliteD1(sqlite).d1, D1_RETENTION_SECS: value }) as never,
+        makeCtx().ctx as never,
+      );
+
+      // Default 30 days: both rows are kept.
+      expect(names(sqlite, 'domains')).toEqual(['mainnet:fresh.eth', 'mainnet:old.eth', 'sepolia:fresh.eth', 'sepolia:old.eth']);
+      expect(vi.mocked(console.warn)).toHaveBeenCalledWith(expect.stringContaining('ignoring D1_RETENTION_SECS'));
+    },
+  );
 
   it('keeps the default export working as the Hono app', async () => {
     const app = await loadApp();
