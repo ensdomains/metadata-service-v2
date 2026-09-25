@@ -220,8 +220,61 @@ const NFT_RECORD = /^(?:did:nft:)?eip155:/i;
 
 // Link fields of token/URI metadata that consumers follow or embed (ERC-721 /
 // OpenSea metadata, plus OpenSea's older `external_link` that v1 responses
-// carried). `image` and `image_url` are handled separately.
-const LINK_FIELDS = ['animation_url', 'external_url', 'external_link', 'youtube_url'] as const;
+// carried, and the extra media URLs and permalink of OpenSea API responses,
+// which ERC-1155 token URIs may point at). `image` and `image_url` are
+// handled separately.
+const LINK_FIELDS = [
+  'animation_url',
+  'external_url',
+  'external_link',
+  'youtube_url',
+  'animation_original_url',
+  'image_preview_url',
+  'image_thumbnail_url',
+  'image_original_url',
+  'permalink',
+] as const;
+
+// Nesting past which metadata is not echoed (real token metadata nests two or
+// three levels: attributes, properties).
+const MAX_META_DEPTH = 16;
+
+/**
+ * True for a value a consumer may put in a link or embed that runs script
+ * (javascript:, vbscript:) or carries inline content (a data: URL, which has a
+ * comma), which this service never echoes. Like the URL parser, it skips
+ * leading spaces and control characters and ignores tabs and newlines
+ * anywhere, so "java\tscript:" is javascript:.
+ */
+function isScriptOrInlineUrl(value: string): boolean {
+  const url = value.replace(/[\t\n\r]/g, '');
+  let start = 0;
+  while (start < url.length && url.charCodeAt(start) <= 0x20) start++;
+  const scheme = /^[a-z][a-z0-9+.-]*:/i.exec(url.slice(start))?.[0].toLowerCase();
+  return scheme === 'javascript:' || scheme === 'vbscript:' || (scheme === 'data:' && url.includes(',', start));
+}
+
+/**
+ * `value` without the strings that isScriptOrInlineUrl rejects, at any depth
+ * (dropped from objects, filtered out of arrays), without anything nested
+ * deeper than MAX_META_DEPTH, and without `__proto__` keys (which a consumer's
+ * naive deep merge would take for the prototype). undefined when `value`
+ * itself is dropped.
+ */
+function scrubMetaValue(value: unknown, depth: number): unknown {
+  if (typeof value === 'string') return isScriptOrInlineUrl(value) ? undefined : value;
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= MAX_META_DEPTH) return undefined;
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubMetaValue(item, depth + 1)).filter((item) => item !== undefined);
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const clean = scrubMetaValue(item, depth + 1);
+    if (clean !== undefined && key !== '__proto__') out[key] = clean;
+  }
+  return out;
+}
 
 // Longest value handed to ens-avatar's resolveURI in resolveStoragePath. Real
 // CIDs are under 100 characters; alpha.2 runs CID.parse, which is quadratic in
@@ -286,6 +339,9 @@ function toSafeImageRef(value: unknown, avatarImageUrl: string | undefined): str
  *   for an inline image; inline bytes (data: URIs, SVG markup, `image_data`) are
  *   never echoed.
  * - link fields (LINK_FIELDS) keep only http(s) values.
+ * - any other string, at any depth, that is a javascript:, vbscript: or data:
+ *   URL is dropped, as is anything nested deeper than MAX_META_DEPTH. (`uri`
+ *   is the normalized ENS name, which cannot contain a colon.)
  * - `host_meta` / `is_owner` are kept only for an NFT record, where the library
  *   computes them: ens-avatar 2.0.0-alpha.2 lets a URI record's own JSON set them
  *   (e.g. a fake `is_owner: true`).
@@ -333,6 +389,14 @@ function sanitizeAvatarMeta(
   if (!isNftRecord) {
     delete sanitized.host_meta;
     delete sanitized.is_owner;
+  }
+  for (const [key, value] of Object.entries(sanitized)) {
+    const clean = scrubMetaValue(value, 0);
+    if (clean === undefined || key === '__proto__') {
+      delete sanitized[key];
+    } else {
+      sanitized[key] = clean;
+    }
   }
   return sanitized;
 }

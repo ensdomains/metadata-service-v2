@@ -308,6 +308,75 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     });
   });
 
+  it('keeps the other OpenSea URL fields only as http(s) links', async () => {
+    const primary = uriMeta({
+      image: 'https://cdn.test/a.png',
+      image_preview_url: 'javascript:alert(1)',
+      image_thumbnail_url: `ipfs://${CID}/thumb.png`,
+      image_original_url: 'data:image/svg+xml,<svg onload="alert(1)"/>',
+      animation_original_url: 'https://cdn.test/a.mp4',
+      permalink: 'vbscript:msgbox(1)',
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({
+      uri: 'nick.eth',
+      image: 'https://cdn.test/a.png',
+      image_thumbnail_url: `https://ipfs.io/ipfs/${CID}/thumb.png`,
+      animation_original_url: 'https://cdn.test/a.mp4',
+    });
+  });
+
+  it('drops script and data: URLs at any depth, however a browser would spell them', async () => {
+    const primary = uriMeta({
+      image: 'https://cdn.test/a.png',
+      description: 'Mentions javascript: and data: in prose',
+      note: 'Data: 42',
+      properties: {
+        image: 'java\tscript:alert(1)',
+        animation_url: 'data:text/html,<script>alert(1)</script>',
+        files: [{ uri: ' \x01VbScript:msgbox(1)', type: 'image/png' }, { uri: 'https://cdn.test/f.png' }],
+        creator: { url: 'JAVA\nSCRIPT:alert(1)', name: 'ok' },
+      },
+      attributes: [
+        { trait_type: 'link', value: '\x00javascript:alert(1)' },
+        { trait_type: 'n', value: 3 },
+        'data:,inline',
+        'plain',
+      ],
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({
+      uri: 'nick.eth',
+      image: 'https://cdn.test/a.png',
+      description: 'Mentions javascript: and data: in prose',
+      note: 'Data: 42',
+      properties: {
+        files: [{ type: 'image/png' }, { uri: 'https://cdn.test/f.png' }],
+        creator: { name: 'ok' },
+      },
+      attributes: [{ trait_type: 'link' }, { trait_type: 'n', value: 3 }, 'plain'],
+    });
+  });
+
+  it('drops metadata nested past the depth limit and __proto__ keys', async () => {
+    let deep: Record<string, unknown> = { leaf: 'x' };
+    for (let i = 0; i < 40; i++) deep = { next: deep };
+    const primary = uriMeta(JSON.parse(JSON.stringify({
+      image: 'https://cdn.test/a.png',
+      shallow: { a: { b: 'kept' } },
+      deep,
+    }).replace('"shallow":{', '"__proto__":{"polluted":true},"shallow":{"__proto__":{"polluted":true},')));
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toMatchObject({ image: 'https://cdn.test/a.png', shallow: { a: { b: 'kept' } } });
+    expect(Object.keys(result!)).not.toContain('__proto__');
+    expect(Object.keys(result!.shallow as object)).toEqual(['a']);
+    expect(Object.getPrototypeOf(result!.shallow)).toBe(Object.prototype);
+    let depth = 0;
+    for (let node = result!.deep as Record<string, unknown> | undefined; node; node = node.next as Record<string, unknown> | undefined) depth++;
+    expect(depth).toBe(16); // MAX_META_DEPTH levels are kept; the rest is dropped
+    expect(JSON.stringify(result)).not.toContain('leaf');
+  });
+
   it('drops is_owner/host_meta that a non-NFT record supplies itself', async () => {
     const primary = uriMeta({
       image: 'https://cdn.test/a.png',
