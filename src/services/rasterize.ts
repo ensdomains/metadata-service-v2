@@ -46,6 +46,26 @@ const R2_FONT_PREFIX = 'fonts/';
 let _rasterizer: any = null;
 let _initPromise: Promise<any> | null = null;
 
+// The init loads ~29 MB of fonts, so concurrent requests share one in-flight
+// init instead of each starting their own (in a 128 MB isolate). That init runs
+// as part of the request that started it: if it fails, the next request starts
+// a new one (a failure is not cached for the isolate's life), and if that
+// request is cancelled (e.g. its client disconnects) its R2 reads never settle.
+// So another request waits for it at most this long (a healthy init takes a few
+// seconds), then drops it, so that the next request starts a fresh init.
+export const RASTERIZER_INIT_WAIT_MS = 15_000;
+
+function waitForInit(init: Promise<unknown>): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      if (_initPromise === init) _initPromise = null;
+      reject(new Error(`Rasterizer init did not finish within ${RASTERIZER_INIT_WAIT_MS} ms`));
+    }, RASTERIZER_INIT_WAIT_MS);
+  });
+  return Promise.race([init, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function initRasterizer(bucket: R2Bucket): Promise<any> {
   const manifest = FONT_MANIFEST as {
     fonts: Record<string, string>;
@@ -85,12 +105,19 @@ export class RasterizeService {
   async rasterize(svg: string, bucket: R2Bucket): Promise<Uint8Array> {
     if (!_rasterizer) {
       if (!_initPromise) {
-        _initPromise = initRasterizer(bucket).then(r => {
-          _rasterizer = r;
-          return r;
-        });
+        const init = initRasterizer(bucket).then(
+          (r) => {
+            _rasterizer ??= r;
+            return r;
+          },
+          (err) => {
+            if (_initPromise === init) _initPromise = null;
+            throw err;
+          },
+        );
+        _initPromise = init;
       }
-      await _initPromise;
+      await waitForInit(_initPromise);
     }
     const pngBuffer = await _rasterizer.render(svg);
     return new Uint8Array(pngBuffer);

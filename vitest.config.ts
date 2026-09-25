@@ -9,8 +9,10 @@ export default defineConfig({
     exclude: ["refproject/**", "node_modules/**", ".yarn/**"],
   },
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+      // wrangler bundles .wasm imports as compiled modules; Node cannot import them.
+      { find: /^.*\.wasm$/, replacement: path.resolve(__dirname, "./test/mocks/wasm-stub.ts") },
+    ],
   },
 });
