@@ -251,7 +251,8 @@ const MAX_META_DEPTH = 16;
 function isScriptOrInlineUrl(value: string): boolean {
   const url = value.replace(/[\t\n\r]/g, '');
   let start = 0;
-  while (start < url.length && (url.charCodeAt(start) <= 0x20 || /\s/.test(url[start]))) start++;
+  // Also U+0085 (NEL), which \s misses but Python's strip() and Go's TrimSpace remove.
+  while (start < url.length && (url.charCodeAt(start) <= 0x20 || url.charCodeAt(start) === 0x85 || /\s/.test(url[start]))) start++;
   const scheme = /^[a-z][a-z0-9+.-]*:/i.exec(url.slice(start))?.[0].toLowerCase();
   return scheme === 'javascript:' || scheme === 'vbscript:' || (scheme === 'data:' && url.includes(',', start));
 }

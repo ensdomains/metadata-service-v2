@@ -362,6 +362,7 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     '\ufeffjavascript:alert(1)',
     '\u3000\u2028VBSCRIPT:msgbox(1)',
     '\u00a0\x01data:text/html,<script>alert(1)</script>',
+    '\u0085javascript:alert(1)',
   ])('drops a script or data: URL behind leading Unicode whitespace (%j), which a consumer may trim', async (value) => {
     const primary = uriMeta({ image: 'https://cdn.test/a.png', note: value, properties: { link: value, name: 'ok' } });
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
