@@ -32,8 +32,9 @@ export interface AvatarImage {
  * metadata), mirroring the v1 service's AvatarMetadata shape. `host_meta` and
  * `is_owner` are present only for NFT avatars (eip155 records); they're populated
  * by @ensdomains/ens-avatar's erc721/erc1155 specs. Extra token/URI-metadata
- * fields are passed through via the index signature; image and link fields are
- * sanitized first and `image_data` is never served (see sanitizeAvatarMeta).
+ * fields are passed through via the index signature, apart from the scrub of
+ * whole-string script and data: URLs and the depth limit; image and link fields
+ * are sanitized first and `image_data` is never served (see sanitizeAvatarMeta).
  */
 export interface AvatarMetadata {
   uri: string;
@@ -244,12 +245,13 @@ const MAX_META_DEPTH = 16;
  * (javascript:, vbscript:) or carries inline content (a data: URL, which has a
  * comma), which this service never echoes. Like the URL parser, it skips
  * leading spaces and control characters and ignores tabs and newlines
- * anywhere, so "java\tscript:" is javascript:.
+ * anywhere, so "java\tscript:" is javascript:. It also skips leading Unicode
+ * whitespace (NBSP, BOM, U+3000, ...), which a consumer may trim before use.
  */
 function isScriptOrInlineUrl(value: string): boolean {
   const url = value.replace(/[\t\n\r]/g, '');
   let start = 0;
-  while (start < url.length && url.charCodeAt(start) <= 0x20) start++;
+  while (start < url.length && (url.charCodeAt(start) <= 0x20 || /\s/.test(url[start]))) start++;
   const scheme = /^[a-z][a-z0-9+.-]*:/i.exec(url.slice(start))?.[0].toLowerCase();
   return scheme === 'javascript:' || scheme === 'vbscript:' || (scheme === 'data:' && url.includes(',', start));
 }
@@ -322,8 +324,9 @@ function toHttpUrl(value: unknown): string | null {
 /**
  * An image field as something safe to hand a consumer: an http(s) URL, or — for
  * an inline image (a data:image URI or raw SVG markup) — this service's avatar
- * image endpoint, which serves those bytes validated and sanitized. Anything else
- * (javascript:, vbscript:, data:text/html, ...) → undefined.
+ * image endpoint, which serves those bytes itself (sniffed and neutralized once the
+ * WEB-1549 fix is in). Anything else (javascript:, vbscript:, data:text/html, ...)
+ * → undefined.
  */
 function toSafeImageRef(value: unknown, avatarImageUrl: string | undefined): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -341,11 +344,14 @@ function toSafeImageRef(value: unknown, avatarImageUrl: string | undefined): str
  * - link fields (LINK_FIELDS) keep only http(s) values.
  * - any other string, at any depth, that is a javascript:, vbscript: or data:
  *   URL is dropped, as is anything nested deeper than MAX_META_DEPTH. (`uri`
- *   is the normalized ENS name, which cannot contain a colon.)
+ *   is the normalized ENS name, which cannot contain a colon.) Prose that
+ *   parses as a data: URL goes too: "Data: 10,000 avatars" is dropped.
  * - `host_meta` / `is_owner` are kept only for an NFT record, where the library
  *   computes them: ens-avatar 2.0.0-alpha.2 lets a URI record's own JSON set them
  *   (e.g. a fake `is_owner: true`).
- * Other fields pass through unchanged.
+ * Other fields pass through apart from that scrub and depth limit. Only a string
+ * that is a URL as a whole is scrubbed: URLs inside prose, object keys and CSS
+ * values are left as they are.
  *
  * @returns the sanitized copy, or null when there's no usable image (v1 answered
  *          "No results found." for a record without one).

@@ -308,21 +308,20 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     });
   });
 
-  it('keeps the other OpenSea URL fields only as http(s) links', async () => {
-    const primary = uriMeta({
-      image: 'https://cdn.test/a.png',
-      image_preview_url: 'javascript:alert(1)',
-      image_thumbnail_url: `ipfs://${CID}/thumb.png`,
-      image_original_url: 'data:image/svg+xml,<svg onload="alert(1)"/>',
-      animation_original_url: 'https://cdn.test/a.mp4',
-      permalink: 'vbscript:msgbox(1)',
-    });
+  // Values that only the http(s)-only link rule rewrites or drops.
+  it.each([
+    ['permalink', `ipfs://${CID}/p`, `https://ipfs.io/ipfs/${CID}/p`],
+    ['image_preview_url', 'ftp://cdn.test/p.png', undefined],
+    ['image_thumbnail_url', `ipfs://${CID}/thumb.png`, `https://ipfs.io/ipfs/${CID}/thumb.png`],
+    ['image_original_url', 'file:///etc/passwd', undefined],
+    ['animation_original_url', 'HTTPS://CDN.test/a.mp4', 'https://cdn.test/a.mp4'],
+  ])('keeps the OpenSea URL field %s (%j) only as an http(s) link', async (field, value, expected) => {
+    const primary = uriMeta({ image: 'https://cdn.test/a.png', [field]: value });
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
     expect(result).toEqual({
       uri: 'nick.eth',
       image: 'https://cdn.test/a.png',
-      image_thumbnail_url: `https://ipfs.io/ipfs/${CID}/thumb.png`,
-      animation_original_url: 'https://cdn.test/a.mp4',
+      ...(expected === undefined ? {} : { [field]: expected }),
     });
   });
 
@@ -356,6 +355,27 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
       },
       attributes: [{ trait_type: 'link' }, { trait_type: 'n', value: 3 }, 'plain'],
     });
+  });
+
+  it.each([
+    '\u00a0javascript:alert(1)',
+    '\ufeffjavascript:alert(1)',
+    '\u3000\u2028VBSCRIPT:msgbox(1)',
+    '\u00a0\x01data:text/html,<script>alert(1)</script>',
+  ])('drops a script or data: URL behind leading Unicode whitespace (%j), which a consumer may trim', async (value) => {
+    const primary = uriMeta({ image: 'https://cdn.test/a.png', note: value, properties: { link: value, name: 'ok' } });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({ uri: 'nick.eth', image: 'https://cdn.test/a.png', properties: { name: 'ok' } });
+  });
+
+  it('drops prose that parses as a data: URL (the cost of the data: rule) and keeps other prose', async () => {
+    const primary = uriMeta({
+      image: 'https://cdn.test/a.png',
+      description: 'Data: 10,000 hand-drawn avatars',
+      note: 'Data: 42',
+    });
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({ uri: 'nick.eth', image: 'https://cdn.test/a.png', note: 'Data: 42' });
   });
 
   it('drops metadata nested past the depth limit and __proto__ keys', async () => {

@@ -418,9 +418,9 @@ app.get(
       const url = new URL(c.req.url);
       const baseUrl = `${url.protocol}//${url.host}`;
       // For inline avatars (image_data, a data:image URI or SVG markup in
-      // image/image_url), `image` points at the avatar image endpoint, which
-      // serves those bytes validated (v1 did this for image_data), using this
-      // deployment's own host.
+      // image/image_url), `image` points at the avatar image endpoint on this
+      // deployment's own host (v1 did this for image_data), which serves those
+      // bytes itself (sniffed and neutralized once the WEB-1549 fix is in).
       const avatarImageUrl = `${baseUrl}/${network}/avatar/${encodeURIComponent(name)}`;
 
       const meta = await avatarService.getAvatarMeta(name, avatarImageUrl);
