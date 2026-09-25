@@ -20,6 +20,7 @@ import { CacheService } from "./services/cache";
 import { runD1Retention } from "./services/d1";
 import { ImageGenerationService } from "./services/image";
 import { AvatarService } from "./services/avatar";
+import { parseIpfsGateway } from "./services/ipfs-gateway";
 import { ImageCacheService, type ImageCacheResult } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
@@ -70,6 +71,7 @@ export interface Env {
   D1_READ_MAX_AGE_SECS?: string; // D1 rows older than this are a miss (default 7 days)
   D1_RETENTION_SECS?: string; // daily cron deletes D1 rows older than this (default 30 days)
   MAX_BATCH_NAMES?: string; // max names per POST /batch-metadata (default 100)
+  IPFS_GATEWAY?: string; // https origin of the IPFS gateway for avatar media (default ipfs.filebase.io)
   LOG_LEVEL: string;
 }
 
@@ -240,7 +242,13 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
   // v2 universal resolver (when configured for this network) so native-v2 names'
   // avatar/header records resolve; AvatarService ignores the unset placeholder.
   const universalResolverV2 = NETWORKS[network].v2?.universalResolver;
-  const avatarService = new AvatarService(getRpcUrl(env, network), NETWORKS[network].chain, maxAvatarBytes, universalResolverV2);
+  const avatarService = new AvatarService(
+    getRpcUrl(env, network),
+    NETWORKS[network].chain,
+    maxAvatarBytes,
+    universalResolverV2,
+    parseIpfsGateway(env.IPFS_GATEWAY),
+  );
   const imageService = new ImageGenerationService(avatarService);
   const storageManager = new StorageManager(env.ASSET_BUCKET);
   const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService, network, env.ASSET_BUCKET);
