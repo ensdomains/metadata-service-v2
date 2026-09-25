@@ -31,3 +31,6 @@ auditConfig:
     # Node; the Worker uses HTTP transports and its bundle contains neither ws
     # nor isows. Remove once viem is bumped to >= 2.54.2 (pins ws 8.21.0).
     - GHSA-96hv-2xvq-fx4p
+
+minimumReleaseAgeExclude:
+  - '@ensdomains/ens-avatar@2.0.0-alpha.3'
