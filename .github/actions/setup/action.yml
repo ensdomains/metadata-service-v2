@@ -1,5 +1,5 @@
 name: Setup
-description: Set up Node.js + Yarn (berry) with a warm cache and an immutable install.
+description: Set up Node.js + pnpm with a warm store cache and a frozen-lockfile install.
 
 inputs:
   node-version:
@@ -9,31 +9,18 @@ inputs:
 runs:
   using: composite
   steps:
+    # The pnpm version is read from the `packageManager` field in package.json.
+    # Must run before setup-node so its pnpm store cache can be located.
+    # Third-party action, so pinned by commit (the one `v4` resolved to).
+    - name: Set up pnpm
+      uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
     - name: Set up Node.js ${{ inputs.node-version }}
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
-
-    # Yarn 4 (berry) is driven by Corepack per the `packageManager` field in
-    # package.json — no global yarn install needed.
-    - name: Enable Corepack
-      shell: bash
-      run: corepack enable
-
-    - name: Locate Yarn cache
-      id: yarn-cache
-      shell: bash
-      run: echo "dir=$(yarn config get cacheFolder)" >> "$GITHUB_OUTPUT"
-
-    - name: Restore Yarn cache
-      uses: actions/cache@v4
-      with:
-        path: ${{ steps.yarn-cache.outputs.dir }}
-        key: yarn-${{ runner.os }}-node${{ inputs.node-version }}-${{ hashFiles('yarn.lock') }}
-        restore-keys: |
-          yarn-${{ runner.os }}-node${{ inputs.node-version }}-
-          yarn-${{ runner.os }}-
+        cache: pnpm
 
     - name: Install dependencies
       shell: bash
-      run: yarn install --immutable
+      run: pnpm install --frozen-lockfile

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Seed local R2 preview bucket with required assets (fonts).
- * Runs automatically before `yarn dev` via the predev script.
+ * Runs before `pnpm dev` via the `setup:local` script.
  */
 import { execSync } from 'node:child_process';
 import { readdirSync, existsSync } from 'node:fs';

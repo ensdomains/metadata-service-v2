@@ -107,6 +107,14 @@ export function tokenIdToHex(tokenId: string): `0x${string}` {
   return `0x${hex}` as `0x${string}`;
 }
 
+// Canonical form of a v2 ETHRegistry tokenId: the labelhash with its low 32
+// bits (the token-version counter) zeroed. Any version of a token maps to the
+// same canonicalId, which is what the zigens `canonicalId` field stores.
+export function canonicalTokenId(tokenId: string): `0x${string}` {
+  const hex = tokenIdToHex(tokenId).toLowerCase();
+  return `${hex.slice(0, -8)}00000000` as `0x${string}`;
+}
+
 // Determine if token ID represents v1 or v2 name
 export function getTokenIdVersion(tokenId: string, name?: string): "v1" | "v2" {
   if (!name) {

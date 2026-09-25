@@ -8,7 +8,9 @@ The endpoint is **sender-agnostic** — any backend that can produce the signed
 manual admin script). The wire contract originated with the zigens v2 indexer but
 is not tied to it.
 
-> Source of truth: [`src/services/webhook.ts`](../src/services/webhook.ts).
+> Source of truth: [`src/services/webhook.ts`](../src/services/webhook.ts) (validation +
+> cache invalidation) and the `handleWebhook` wrapper in [`src/index.ts`](../src/index.ts)
+> (edge purge, D1 persist, image re-warm).
 
 ## Endpoint
 
@@ -47,7 +49,7 @@ constant time. The `sha256=` prefix is optional on the value but recommended.
 ```jsonc
 {
   "event_type": "NameRegistered",   // string, required, PascalCase
-  "protocol": "v2",                  // "v1" | "v2"  (v2 -> sepolia, v1 -> mainnet)
+  "protocol": "v2",                  // "v1" | "v2"  (ENS version, not the chain — see below)
   "name": "anthropic.eth",           // string|null — include it (see note below)
   "namehash": "0x…",                 // string|null
   "block_number": 12345678,          // number
@@ -70,8 +72,11 @@ Validation enforced by the receiver:
 `namehash` returns `200` but invalidates nothing (a namehash can't be reversed to
 a name).
 
-`protocol` is the **ENS version, not the chain**: `v2` maps to the sepolia
-deployment, `v1` to mainnet.
+`protocol` is the **ENS version, not the chain**, and it picks the networks that get
+re-classified and re-warmed: `v2` events target every network whose indexer speaks
+v2 (sepolia today; mainnet joins automatically once it flips), `v1` events target
+**all** supported networks. A per-network existence check skips chains where the
+name doesn't resolve, so a wrong-chain warm is a no-op.
 
 These `event_type` values additionally flush the expiry-bucketed caches:
 `NameRenewed`, `ExpiryUpdated`, `NameBurned`, `LabelUnregistered`, `NameMigrated`.
@@ -102,8 +107,8 @@ For the canonicalized `name`, across **both** networks:
 - for the expiry-affecting events above, flushes the expiry-bucketed caches
 - purges the CF edge cache for every URL shape that could hold the name
   (both networks × `{registry, namewrapper}` × `{image, rasterize}`)
-- proactively re-warms the default image for the primary network (mapped from
-  `protocol`)
+- re-classifies the name on each target network (chosen by `protocol`, see above),
+  records the result in D1 and proactively re-warms the default image there
 
 ## Example — Node (built-ins only)
 
@@ -173,5 +178,5 @@ curl -X POST https://ens-metadata-v2.ensdomains.workers.dev/webhook \
 - Timestamp in **seconds**, within **±120 s** of server time.
 - HMAC **key is the hex-decoded secret**, not the ASCII string.
 - Include **`name`**, or nothing is invalidated.
-- `protocol` is the **ENS version, not the chain** (`v2`→sepolia, `v1`→mainnet).
+- `protocol` is the **ENS version, not the chain** (`v2` → networks whose indexer speaks v2, `v1` → all networks).
 - Server is **fail-closed**: no `WEBHOOK_SECRET` in prod → every call gets `503`.

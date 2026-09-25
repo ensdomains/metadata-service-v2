@@ -1,0 +1,36 @@
+# Project-level pnpm settings (pnpm >= 10 reads them from this file).
+
+overrides:
+  # rasterize-wasm depends on the same harfbuzzjs fork this project uses
+  # directly (as a `github:` spec). Pin every copy to the exact commit tarball
+  # used in package.json so pnpm's strict layout resolves one instance and
+  # never runs the fork's `prepare: make` step (a git-hosted dependency would;
+  # the fork already commits every built .wasm artifact the code imports).
+  harfbuzzjs: https://github.com/mdtanrikulu/harfbuzzjs/archive/48f2da5ebd3912c9b60188bf39a863e0099e9328.tar.gz
+
+# pnpm 12 refuses git/URL dependencies that appear only in sub-dependencies.
+# rasterize-wasm's dependency on the harfbuzzjs fork is intentional (the same
+# fork is a direct dependency above, pinned by the override), so opt out.
+blockExoticSubdeps: false
+
+# pnpm 12 runs dependency install scripts only for packages listed here.
+# esbuild and workerd (wrangler's bundler and local runtime) and sharp use
+# theirs to fetch/verify the platform binary; everything else installs without
+# scripts.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
+
+# `pnpm audit` (CI "Dependency audit" job) exceptions. Each entry says why the
+# advisory cannot affect the deployed Worker and when to drop it.
+auditConfig:
+  ignoreGhsas:
+    # ws < 8.21.0 memory-exhaustion DoS (high). ws is pinned exactly (8.18.3)
+    # by viem, which only loads it through isows for WebSocket transports on
+    # Node; the Worker uses HTTP transports and its bundle contains neither ws
+    # nor isows. Remove once viem is bumped to >= 2.54.2 (pins ws 8.21.0).
+    - GHSA-96hv-2xvq-fx4p
+
+minimumReleaseAgeExclude:
+  - '@ensdomains/ens-avatar@2.0.0-alpha.3'

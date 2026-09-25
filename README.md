@@ -26,24 +26,24 @@ Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and 
 
 ```bash
 # Install dependencies
-yarn install
+pnpm install
 
 # Start development server (also seeds the local R2 bucket with fonts and
 # applies pending D1 migrations first â€” the `predev` step)
 yarn dev
 
 # Apply D1 migrations manually
-yarn db:migrate:local
-yarn db:migrate:remote
+pnpm db:migrate:local
+pnpm db:migrate:remote
 
-# Run tests (`yarn test` runs vitest: watch mode outside CI; `yarn vitest run` forces a single pass)
-yarn test
+# Run tests
+pnpm test
 
 # Type checking
-yarn typecheck
+pnpm typecheck
 
 # Linting
-yarn lint
+pnpm lint
 ```
 
 `predev` uploads the rasterize font pack from `node_modules/rasterize-wasm/fonts/` and looks
@@ -68,10 +68,10 @@ node scripts/upload-fonts-to-r2.mjs --remote   # rasterize font pack + twemoji â
 wrangler r2 object put ens-metadata-assets/fonts/Satoshi-Bold.ttf --file=/path/to/Satoshi-Bold.ttf --remote
 
 # Apply D1 migrations to the remote database (once per new migration)
-yarn db:migrate:remote
+pnpm db:migrate:remote
 
 # Deploy to Cloudflare Workers
-yarn deploy
+pnpm run deploy
 ```
 
 Non-secret production vars (indexer URLs, fallback RPCs, `LOG_LEVEL`,
