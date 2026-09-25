@@ -7,10 +7,13 @@ import type { Context, Next } from 'hono';
 //  - every response is X-Content-Type-Options: nosniff, so a browser never
 //    reinterprets one (say, JSON that echoes a name) as HTML or script;
 //  - a response without a Content-Security-Policy of its own gets one that
-//    allows nothing and cannot be framed. Media (a single image/* type) gets a
-//    sandboxing policy instead, the one the media routes set for themselves:
-//    the NFT card and the avatars are embedded by other sites, so they must
-//    stay frameable, and an SVG opened as a document must not run script;
+//    allows nothing, cannot be framed and is sandboxed: one a browser renders
+//    as HTML loads nothing, runs no script, cannot use a <base> or submit a
+//    form, and gets an opaque origin (a CSP does not affect fetch() or XHR
+//    readers of the JSON). Media (a single image/* type) gets the sandboxing
+//    media policy instead, supplied here whenever the route has not set its
+//    own: the NFT card and the avatars are embedded by other sites, so they
+//    must stay frameable, and an SVG opened as a document must not run script;
 //  - a Content-Type that lists several types is not media: browsers use the
 //    last one, so "image/png, text/html" is rendered as HTML;
 //  - no X-Frame-Options: frame-ancestors covers the JSON responses, and media
@@ -25,12 +28,15 @@ import type { Context, Next } from 'hono';
 // limit, validation errors, trailing-slash redirects), notFound, onError
 // (including the timeout's 504) and edge-cache hits.
 
-export const API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'";
+export const API_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'; sandbox";
 export const MEDIA_CONTENT_SECURITY_POLICY =
   "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; sandbox";
 
-// One image type, with parameters but no second type after a comma.
-const SINGLE_IMAGE_TYPE = /^\s*image\/[\w!#$&^.+-]+\s*(;[^,]*)?$/i;
+// One image type, with parameters but no second type after a comma. Only HTTP
+// whitespace (tab, space) may surround it, as browsers parse it; \s would also
+// accept \v, NBSP or a BOM before the type.
+const SINGLE_IMAGE_TYPE = /^[\t ]*image\/[\w!#$&^.+-]+[\t ]*(;[^,]*)?$/i;
 
 function isMediaResponse(headers: Headers): boolean {
   return SINGLE_IMAGE_TYPE.test(headers.get('Content-Type') ?? '');

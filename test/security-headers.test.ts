@@ -2,12 +2,15 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Hono } from 'hono';
 import { createMockEnv } from './mocks/hono-env';
 
-// Every response carries nosniff, every non-media response a CSP that allows
-// nothing and cannot be framed, and media a sandboxing CSP that keeps it
-// embeddable (WEB-1548). A response that brings its own CSP keeps it.
+// Every response carries nosniff, every non-media response a sandboxed CSP that
+// allows nothing (no framing, forms or <base>), and media a sandboxing CSP that
+// keeps it embeddable (WEB-1548). A response that brings its own CSP keeps it.
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-// The sandboxing CSP the media routes (avatar, header, card) set for themselves.
+const API_CSP = "default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'; sandbox";
+// The sandboxing CSP the middleware gives media whose route set no CSP of its
+// own (the avatar, header and card routes here; WEB-1549 has those routes set
+// the same one themselves).
 const MEDIA_CSP = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; sandbox";
 
 const avatarMetaMock = vi.fn();
@@ -74,7 +77,7 @@ function stubEdgeCache(match: () => Promise<Response | undefined>) {
 
 function expectApiHeaders(res: Response) {
   expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
-  expect(res.headers.get('Content-Security-Policy')).toBe("default-src 'none'; frame-ancestors 'none'");
+  expect(res.headers.get('Content-Security-Policy')).toBe(API_CSP);
   expect(res.headers.get('X-Frame-Options')).toBeNull();
 }
 
@@ -168,7 +171,6 @@ describe('what counts as media', () => {
     'image/png',
     'IMAGE/SVG+XML',
     'image/svg+xml; charset=utf-8',
-    ' image/webp ',
   ])('a single image type (%j) gets the media CSP', async (type) => {
     expect(await served(type)).toBe(MEDIA_CSP);
   });
@@ -181,8 +183,16 @@ describe('what counts as media', () => {
     'image/',
     'imagefoo/png',
     '',
+    // Headers and browsers strip only HTTP whitespace around a type, not \v or NBSP.
+    '\vimage/png',
+    '\u00a0image/png',
   ])('anything else (%j) gets the API CSP', async (type) => {
-    expect(await served(type)).toBe("default-src 'none'; frame-ancestors 'none'");
+    expect(await served(type)).toBe(API_CSP);
+  });
+
+  it('an HTML response with a comma-listed type cannot submit a form, use a <base> or run unsandboxed', async () => {
+    const directives = (await served('image/png, text/html'))?.split(';').map((d) => d.trim());
+    expect(directives).toEqual(expect.arrayContaining(["form-action 'none'", "base-uri 'none'", 'sandbox']));
   });
 
   it('two Content-Type headers (joined with a comma) are not media', async () => {
@@ -195,7 +205,7 @@ describe('what counts as media', () => {
       return new Response('<html></html>', { headers });
     });
     const res = await mini.request('/');
-    expect(res.headers.get('Content-Security-Policy')).toBe("default-src 'none'; frame-ancestors 'none'");
+    expect(res.headers.get('Content-Security-Policy')).toBe(API_CSP);
   });
 });
 
