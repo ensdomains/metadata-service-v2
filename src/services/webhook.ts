@@ -68,6 +68,12 @@ const EXPIRY_AFFECTING_EVENTS = new Set([
 // captured request is replayable for at most this long. Override via WEBHOOK_TOLERANCE_SECS.
 const DEFAULT_TOLERANCE_SECS = 120;
 
+// Largest webhook body accepted (413 above it). Real events are well under
+// 1 KiB. The body has to be read before its signature can be checked, so this
+// bounds what any caller within the webhook rate limit can make us buffer and
+// hash.
+export const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
+
 export class WebhookService {
   private svgCacheKv?: KVNamespace;
   private metadataCacheKv?: KVNamespace;
@@ -90,8 +96,11 @@ export class WebhookService {
   async handleWebhook(c: Context): Promise<Response> {
     try {
       // Read the raw body a single time — signature is computed over these exact
-      // bytes, so we must not re-read or re-serialize.
-      const rawBody = await c.req.text();
+      // bytes, so we must not re-read or re-serialize. Size-capped as it is read.
+      const rawBody = await readBodyCapped(c.req.raw, MAX_WEBHOOK_BODY_BYTES);
+      if (rawBody === null) {
+        return c.json({ error: 'Payload too large' }, 413);
+      }
 
       const validationResult = await this.validateRequest(c, rawBody);
       if (!validationResult.valid) {
@@ -370,6 +379,35 @@ export class WebhookService {
     const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message) as BufferSource);
     return bytesToHex(new Uint8Array(signature));
   }
+}
+
+// Reads a request body as UTF-8 text, like Request.text(), or returns null once
+// it is known to be larger than maxBytes: at once when Content-Length says so,
+// otherwise (e.g. a chunked body, which has none) as soon as the bytes read
+// pass the cap, without reading the rest.
+async function readBodyCapped(req: Request, maxBytes: number): Promise<string | null> {
+  if (Number(req.headers.get('Content-Length')) > maxBytes) return null;
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 // --- crypto helpers ---

@@ -1147,7 +1147,7 @@ app.get(
 // (see services/webhook.ts) — the indexer is just the current caller.
 const handleWebhook = async (c: AppContext) => {
   // Clone before the service consumes the body, so we can read it for warming
-  // without interfering with signature verification (which reads c.req.text()).
+  // without interfering with signature verification (which reads c.req.raw).
   const bodyClone = c.req.raw.clone();
   const { webhookService } = getServices(c.env, 'mainnet');
 

@@ -78,7 +78,9 @@ simple = { limit = 20, period = 60 }
 [[ratelimits]]
 name = "RATE_LIMITER_WEBHOOK"
 namespace_id = "1003"
-simple = { limit = 60, period = 60 }
+# One transaction can emit a burst of events from the one sender, and a 429
+# drops that event's cache purge and warm-up.
+simple = { limit = 600, period = 60 }
 
 [[ratelimits]]
 name = "RATE_LIMITER_RASTERIZE"

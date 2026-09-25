@@ -11,6 +11,10 @@ import type { Env } from '../src/index';
 
 const IP = '203.0.113.7';
 
+// The deployed config, read with wrangler's own parser.
+const readWranglerConfig = () =>
+  unstable_readConfig({ config: path.resolve(__dirname, '../wrangler.toml') }, { hideWarnings: true });
+
 function makeApp() {
   const app = new Hono();
   app.use('*', rateLimiter);
@@ -191,9 +195,46 @@ describe('rateLimiter — KV fallback for a bucket without a binding', () => {
   });
 });
 
+describe('rateLimiter — webhook bucket', () => {
+  // One transaction (a bulk registration or renewal) or an indexer backfill
+  // emits a burst of events from the one sender; a 429 drops that event's
+  // cache purge and warm-up.
+  const postWebhooks = async (app: Hono, env: Record<string, unknown>, n: number) => {
+    const statuses = [];
+    for (let i = 0; i < n; i++) statuses.push((await send(app, env, '/webhook', { method: 'POST' })).status);
+    return statuses;
+  };
+
+  it('lets one sender post 600 events a minute through the binding, and limits the 601st', async () => {
+    const app = makeApp();
+    // The binding as deployed: its limit comes from wrangler.toml.
+    const declared = readWranglerConfig().ratelimits.find((r) => r.name === 'RATE_LIMITER_WEBHOOK');
+    const binding = fakeBinding(declared!.simple.limit);
+    const env = { RATE_LIMITER_WEBHOOK: binding, METADATA_CACHE: memoryKv() };
+
+    expect(new Set(await postWebhooks(app, env, 600))).toEqual(new Set([200]));
+    const denied = await send(app, env, '/webhook', { method: 'POST' });
+    expect(denied.status).toBe(429);
+    expect(denied.headers.get('X-RateLimit-Limit')).toBe('600');
+    expect(binding.limit).toHaveBeenCalledTimes(601);
+  });
+
+  it('uses the same limit on the KV fallback path', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-24T12:00:15Z'));
+    const app = makeApp();
+    const env = { METADATA_CACHE: memoryKv() };
+
+    expect(new Set(await postWebhooks(app, env, 600))).toEqual(new Set([200]));
+    const denied = await send(app, env, '/webhook', { method: 'POST' });
+    expect(denied.status).toBe(429);
+    expect(denied.headers.get('X-RateLimit-Limit')).toBe('600');
+  });
+});
+
 describe('wrangler.toml [[ratelimits]]', () => {
   it('declares one binding per bucket, with the same limit and a 60 s period', () => {
-    const config = unstable_readConfig({ config: path.resolve(__dirname, '../wrangler.toml') }, { hideWarnings: true });
+    const config = readWranglerConfig();
     const buckets = Object.values(RATE_LIMIT_BUCKETS);
 
     expect(config.ratelimits).toHaveLength(buckets.length);

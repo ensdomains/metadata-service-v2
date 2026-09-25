@@ -312,6 +312,25 @@ describe('webhook events for names this service never serves', () => {
   });
 });
 
+describe('webhook body size cap', () => {
+  it('413s an event over MAX_WEBHOOK_BODY_BYTES and warms nothing', async () => {
+    warmState.mode = 'record';
+    const app = await loadApp();
+    const { MAX_WEBHOOK_BODY_BYTES } = await import('../src/services/webhook');
+
+    const { res, drain } = await postWebhook(
+      app,
+      webhookEvent({ name: 'test123.eth', data: ' '.repeat(MAX_WEBHOOK_BODY_BYTES) }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(413);
+    await drain();
+    expect(warmState.classify).toEqual([]);
+    expect(warmState.persist).toEqual([]);
+    expect(warmState.warm).toEqual([]);
+  });
+});
+
 describe.skipIf(!hasSqlite)('D1 storeMigrationStatus — partial (webhook-shaped) writes', () => {
   const OWNER = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 

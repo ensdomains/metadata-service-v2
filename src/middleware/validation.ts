@@ -59,14 +59,19 @@ export const validateEnsNameParam: MiddlewareHandler<AppEnv> = async (c, next) =
 // Both paths fail open: a limiter outage must not take down the API.
 //
 // Window is 60s. Limits are per route-class so the expensive endpoints
-// (rasterize, batch, webhook) are tighter than plain metadata reads.
+// (rasterize, batch) are tighter than plain metadata reads.
 const RATE_WINDOW_SECS = 60;
 
 // Limit per window and enforcing binding for each bucket. Keep in sync with
 // the [[ratelimits]] entries in wrangler.toml (test/rate-limit.test.ts checks).
 export const RATE_LIMIT_BUCKETS = {
   batch: { limit: 20, binding: 'RATE_LIMITER_BATCH' },
-  webhook: { limit: 60, binding: 'RATE_LIMITER_WEBHOOK' },
+  // Far above the others: the webhook has one sender, and one transaction
+  // (a bulk registration or renewal) or an indexer backfill emits a burst of
+  // events from it; a 429 drops that event's cache purge and warm-up. This
+  // limit applies before the signature is checked, so the body read for that
+  // check is size-capped (MAX_WEBHOOK_BODY_BYTES in services/webhook.ts).
+  webhook: { limit: 600, binding: 'RATE_LIMITER_WEBHOOK' },
   rasterize: { limit: 30, binding: 'RATE_LIMITER_RASTERIZE' },
   image: { limit: 60, binding: 'RATE_LIMITER_IMAGE' },
   default: { limit: 120, binding: 'RATE_LIMITER_DEFAULT' },
