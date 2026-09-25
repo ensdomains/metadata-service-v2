@@ -171,6 +171,8 @@ describe('what counts as media', () => {
     'image/png',
     'IMAGE/SVG+XML',
     'image/svg+xml; charset=utf-8',
+    'image/svg+xml ; charset=utf-8',
+    'image/png\t;q=1',
   ])('a single image type (%j) gets the media CSP', async (type) => {
     expect(await served(type)).toBe(MEDIA_CSP);
   });

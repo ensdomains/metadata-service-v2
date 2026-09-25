@@ -35,7 +35,7 @@ export const MEDIA_CONTENT_SECURITY_POLICY =
 
 // One image type, with parameters but no second type after a comma. Only HTTP
 // whitespace (tab, space) may surround it, as browsers parse it; \s would also
-// accept \v, NBSP or a BOM before the type.
+// accept \v or NBSP before the type.
 const SINGLE_IMAGE_TYPE = /^[\t ]*image\/[\w!#$&^.+-]+[\t ]*(;[^,]*)?$/i;
 
 function isMediaResponse(headers: Headers): boolean {
