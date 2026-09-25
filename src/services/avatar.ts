@@ -10,6 +10,7 @@ import {
   TimeoutError,
   createPublicClient,
   isAddress,
+  isHex,
   type Chain,
   type PublicClient,
 } from 'viem';
@@ -113,13 +114,14 @@ function isNoRecordError(error: unknown): boolean {
 // too; any HTTP error of the RPC endpoint (a 401 or 403 included) is a failure.
 function isContractReadOutage(error: unknown): boolean {
   if (!(error instanceof BaseError)) return false;
-  // viem types a JSON-RPC -32603 "Internal error" as a revert with no data (and
-  // drops the RPC error from the chain); a node reports a revert without data
-  // as "execution reverted".
+  // viem types a JSON-RPC -32603 "Internal error" as a revert (and drops the
+  // RPC error from the chain) whose data is the RPC error's data: none, "0x" or
+  // a string that is not hex. A node reports a revert without data as
+  // "execution reverted".
   const revert = error.walk((e) => e instanceof ContractFunctionRevertedError);
   if (
     revert instanceof ContractFunctionRevertedError &&
-    revert.raw === undefined &&
+    (revert.raw === undefined || revert.raw === '0x' || !isHex(revert.raw)) &&
     !ExecutionRevertedError.nodeMessage.test((revert.reason ?? '').toLowerCase())
   ) {
     return true;

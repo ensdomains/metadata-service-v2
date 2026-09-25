@@ -322,7 +322,7 @@ describe('RPC and gateway failures that the library swallows', () => {
     | { revert: Hex }
     | { status: number }
     | { tokenURI: string }
-    | { rpcError: { code: number; message: string } };
+    | { rpcError: { code: number; message: string; data?: string } };
 
   function stubRpc(onText: () => Answer, onTokenURI: () => Answer = () => ({ status: 500 }), media?: (url: string) => Response) {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -473,11 +473,14 @@ describe('RPC and gateway failures that the library swallows', () => {
     const record = `eip155:1/erc721:${NFT}/1`;
     const results: Record<string, string> = {};
     const cases: Array<[string, () => Answer]> = [
-      // viem types -32603 as a revert with no data.
+      // viem types -32603 as a revert whose data is the RPC error's data.
       ['rpc -32603 internal error', () => ({ rpcError: { code: -32603, message: 'Internal error' } })],
+      ['rpc -32603 internal error with data 0x', () => ({ rpcError: { code: -32603, message: 'Internal error', data: '0x' } })],
+      ['rpc -32603 internal error with text data', () => ({ rpcError: { code: -32603, message: 'Internal error', data: 'request timed out' } })],
       ['rpc 401', () => ({ status: 401 })],
       ['rpc 403', () => ({ status: 403 })],
       ['revert without data', () => ({ rpcError: { code: 3, message: 'execution reverted' } })],
+      ['revert with data 0x', () => ({ rpcError: { code: 3, message: 'execution reverted', data: '0x' } })],
       ['revert without data (-32603)', () => ({ rpcError: { code: -32603, message: 'execution reverted' } })],
       ['revert without data (-32000)', () => ({ rpcError: { code: -32000, message: 'execution reverted' } })],
     ];
@@ -487,9 +490,12 @@ describe('RPC and gateway failures that the library swallows', () => {
     }
     expect(results).toEqual({
       'rpc -32603 internal error': 'failure',
+      'rpc -32603 internal error with data 0x': 'failure',
+      'rpc -32603 internal error with text data': 'failure',
       'rpc 401': 'failure',
       'rpc 403': 'failure',
       'revert without data': 'miss',
+      'revert with data 0x': 'miss',
       'revert without data (-32603)': 'miss',
       'revert without data (-32000)': 'miss',
     });
