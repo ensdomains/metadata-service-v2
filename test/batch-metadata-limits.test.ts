@@ -129,6 +129,31 @@ describe('POST /batch-metadata limits', () => {
     expect(maxInFlight).toBe(6);
   });
 
+  it('bounds the background refreshes of stale entries by the same limit', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let done = 0;
+    getMetadata.mockImplementation(async (_network, _registryType, name) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await tick(5);
+      inFlight--;
+      done++;
+      return metadataFor(name) as never;
+    });
+    // Every entry is stale: served at once and refreshed in the background.
+    cacheGet.mockImplementation(async (_network, _registryType, name, _ctx, fetchMetadata) => {
+      void fetchMetadata();
+      return { metadata: metadataFor(name), cacheStatus: 'stale' } as never;
+    });
+
+    const names = Array.from({ length: 30 }, (_, i) => `name${i}.eth`);
+    const body = await (await batch({ names })).json() as BatchBody;
+    expect(body.successful).toBe(30);
+    while (done < 30) await tick(5);
+    expect(maxInFlight).toBe(6);
+  });
+
   it('caps a batch at 100 names by default', async () => {
     const names = (n: number) => Array.from({ length: n }, (_, i) => `name${i}.eth`);
 

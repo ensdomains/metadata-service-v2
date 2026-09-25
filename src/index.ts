@@ -664,7 +664,8 @@ const DEFAULT_MAX_BATCH_NAMES = 100;
 // response headers, and a request queued behind them runs down its timeout
 // before it is sent (a false indexer failure trips the circuit breaker).
 // Starting the whole batch at once also let every name hit a failing indexer
-// before its circuit breaker opened.
+// before its circuit breaker opened. The bound covers the background refreshes
+// of stale cache entries too, which the cache starts in waitUntil.
 const BATCH_CONCURRENCY = 6;
 // A name not started within this budget gets a per-name error, so a slow
 // outage degrades the batch instead of running it into the 30s route timeout
@@ -676,6 +677,24 @@ function getMaxBatchNames(env: Env): number {
   // Invalid/garbage value → the default.
   const parsed = parseInt(env.MAX_BATCH_NAMES ?? '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BATCH_NAMES;
+}
+
+// A wrapper that runs at most `limit` calls at once; the others wait their turn.
+// A finished call hands its slot straight to the next waiting one.
+function concurrencyLimit(limit: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <R>(fn: () => Promise<R>): Promise<R> => {
+    if (active < limit) active++;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await fn();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
 }
 
 // Calls fn on every item with at most `limit` calls in flight; results keep the
@@ -756,6 +775,10 @@ app.post("/batch-metadata", async (c) => {
 
     type Outcome = { metadata: MetadataResponse } | { error?: string };
     const deadline = Date.now() + BATCH_TIME_BUDGET_MS;
+    // Every resolution this batch starts, a cache miss's or the background
+    // refresh of a stale entry, goes through one bound. (The per-name flow has
+    // its own bound below and never waits on this one while holding it.)
+    const resolveLimit = concurrencyLimit(BATCH_CONCURRENCY);
     const outcomes = await mapWithConcurrency(distinct, BATCH_CONCURRENCY, async (name): Promise<Outcome> => {
       if (Date.now() >= deadline) return { error: 'Batch time budget exceeded' };
       try {
@@ -768,13 +791,13 @@ app.post("/batch-metadata", async (c) => {
           registryType,
           name,
           c.executionCtx,
-          () => metadataService.getMetadata(
+          () => resolveLimit(() => metadataService.getMetadata(
             network,
             registryType as 'registry' | 'namewrapper',
             name,
             baseUrl,
             c.executionCtx,
-          ),
+          )),
         );
         return { metadata };
       } catch (err) {
