@@ -174,9 +174,18 @@ export class D1Service {
     ).run();
   }
 
+  // By id, the row's key: rows written before names were canonicalized here
+  // kept the request's spelling in `name` (`Fox.eth`), but their id was always
+  // the namehash, which normalizes case, so it finds them for any spelling.
   async getMigrationStatus(name: string): Promise<D1MigrationRecord | null> {
-    const stmt = this.db.prepare('SELECT * FROM migration_status WHERE network = ?1 AND name = ?2');
-    return await stmt.bind(this.network, canonicalizeName(name)).first<D1MigrationRecord>();
+    let id: string;
+    try {
+      id = namehash(canonicalizeName(name));
+    } catch {
+      return null; // the namehash rejects the name, so no row was ever written for it
+    }
+    const stmt = this.db.prepare('SELECT * FROM migration_status WHERE network = ?1 AND id = ?2');
+    return await stmt.bind(this.network, id).first<D1MigrationRecord>();
   }
 
   // Registry hierarchy operations
