@@ -99,6 +99,7 @@ the on-chain tier):
 - `SEPOLIA_FALLBACK_RPC_1..2`: fallback RPC endpoints — sepolia has **no** built-in defaults, so without these every sepolia on-chain read depends on the single `SEPOLIA_RPC_URL`
 - `MAX_AVATAR_BYTES`: cap on fetched avatar size in bytes (default 25 MB)
 - `MAX_BATCH_NAMES`: max names per `POST /batch-metadata` request (default 100)
+- `IPFS_GATEWAY`: https origin (default port) of the IPFS gateway for avatar and header media (`ipfs://`/`ipns://` records, and links to the retired ipfs.io, dweb.link, w3s.link and nftstorage.link gateways). Default `https://ipfs.filebase.io`, a public gateway limited to 200 requests a minute: set a dedicated gateway for production
 - `RATE_LIMIT_DISABLED`: set to `true` to disable the per-IP rate limiter (local dev). Limits are per IP per 60s window: 120 default, 60 for `/image` and `/webhook`, 30 for `/rasterize`, 20 for `/batch-metadata`; `/` and `/health` are exempt
 - `LOG_LEVEL`: declared in the Worker env and set in `wrangler.toml`, but not currently read by the code
 

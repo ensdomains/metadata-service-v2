@@ -1,4 +1,4 @@
-import { AvatarResolver, utils as avatarUtils, type ChainClient, type AvatarResolverOpts } from '@ensdomains/ens-avatar';
+import { AvatarResolver, utils as avatarUtils, type ChainClient, type AvatarResolverOpts, type Fetcher } from '@ensdomains/ens-avatar';
 import { fromViem, type ViemClientLike } from '@ensdomains/ens-avatar/viem';
 import {
   BaseError,
@@ -20,6 +20,7 @@ import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
 import { toSafeImage } from './media-safety';
+import { DEFAULT_IPFS_GATEWAY, toLiveGatewayUrl } from './ipfs-gateway';
 
 export interface AvatarImage {
   buffer: Buffer;
@@ -73,16 +74,18 @@ const MAX_METADATA_JSON_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_AVATAR_BYTES = 25 * 1024 * 1024; // 25 MB
 
 /**
- * Rewrite decentralized-storage URIs (ipfs://, ipns://, ar://) to public HTTPS
- * gateways so the metadata's media links are directly fetchable by consumers — the
- * v1 service did the same for IPFS. http(s)/data URIs pass through untouched.
+ * Rewrite decentralized-storage URIs (ipfs://, ipns://, ar://) to HTTPS gateways
+ * so the metadata's media links are directly fetchable by consumers — the v1
+ * service did the same for IPFS — and links on a retired public IPFS gateway to
+ * `ipfsGateway` (see ipfs-gateway.ts). Other http(s) and data URIs pass through
+ * untouched.
  */
-function toGatewayUrl(uri: string): string {
-  if (uri.startsWith('ipfs://ipfs/')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://ipfs/'.length)}`;
-  if (uri.startsWith('ipfs://')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://'.length)}`;
-  if (uri.startsWith('ipns://')) return `https://ipfs.io/ipns/${uri.slice('ipns://'.length)}`;
+function toGatewayUrl(uri: string, ipfsGateway: string): string {
+  if (uri.startsWith('ipfs://ipfs/')) return `${ipfsGateway}/ipfs/${uri.slice('ipfs://ipfs/'.length)}`;
+  if (uri.startsWith('ipfs://')) return `${ipfsGateway}/ipfs/${uri.slice('ipfs://'.length)}`;
+  if (uri.startsWith('ipns://')) return `${ipfsGateway}/ipns/${uri.slice('ipns://'.length)}`;
   if (uri.startsWith('ar://')) return `https://arweave.net/${uri.slice('ar://'.length)}`;
-  return uri;
+  return toLiveGatewayUrl(uri, ipfsGateway);
 }
 
 // Universal Resolver errors that mean "the name has no such record". A
@@ -287,14 +290,14 @@ const MAX_STORAGE_PATH_LENGTH = 512;
 /**
  * The storage forms the library's image resolution also accepts — a bare CID,
  * `ipfs/<cid>/…`, `/ipfs/<cid>/…`, `ipns/<name>` — as the gateway URL the avatar
- * endpoint resolves them to (ens-avatar's resolveURI, default gateways, as the
+ * endpoint resolves them to (ens-avatar's resolveURI, with the IPFS gateway the
  * service's resolvers use). Only its gateway rewrites count (isOnChain false):
  * its fallback strips a data: prefix, turning e.g. `data:,https://…` into a URL.
  */
-function resolveStoragePath(value: string): string | null {
+function resolveStoragePath(value: string, ipfsGateway: string): string | null {
   if (value.length > MAX_STORAGE_PATH_LENGTH) return null;
   try {
-    const { uri, isOnChain } = avatarUtils.resolveURI(value);
+    const { uri, isOnChain } = avatarUtils.resolveURI(value, { ipfs: ipfsGateway });
     return isOnChain ? null : uri;
   } catch {
     return null;
@@ -316,10 +319,10 @@ function parseHttpUrl(value: string | null): string | null {
  * `value` as a canonical http(s) URL (ipfs/ipns/ar URIs and CID paths rewritten
  * to gateways first), else null.
  */
-function toHttpUrl(value: unknown): string | null {
+function toHttpUrl(value: unknown, ipfsGateway: string): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  return parseHttpUrl(toGatewayUrl(trimmed)) ?? parseHttpUrl(resolveStoragePath(trimmed));
+  return parseHttpUrl(toGatewayUrl(trimmed, ipfsGateway)) ?? parseHttpUrl(resolveStoragePath(trimmed, ipfsGateway));
 }
 
 /**
@@ -377,6 +380,7 @@ function sanitizeAvatarMeta(
   isNftRecord: boolean,
   avatarImageUrl: string | undefined,
   imageOptions: AvatarResolverOpts | undefined,
+  ipfsGateway: string,
 ): AvatarMetadata | null {
   // The field the endpoint serves: the first non-empty string of image →
   // image_url → image_data (v1's order, and the library's), so an unusable
@@ -385,21 +389,24 @@ function sanitizeAvatarMeta(
     (key) => typeof metadata[key] === 'string' && metadata[key] !== '',
   );
   const served = servedImage(metadata, imageOptions);
-  const image = served?.startsWith('data:') ? avatarImageUrl : parseHttpUrl(served);
+  // An http(s) image on a retired gateway is fetched from the configured one.
+  const image = served?.startsWith('data:')
+    ? avatarImageUrl
+    : parseHttpUrl(served === null ? null : toLiveGatewayUrl(served, ipfsGateway));
   if (!image) {
     return null;
   }
 
   const sanitized: AvatarMetadata = { ...metadata, image };
   delete sanitized.image_data;
-  const imageUrl = source && metadata.image_url === metadata[source] ? image : toHttpUrl(metadata.image_url);
+  const imageUrl = source && metadata.image_url === metadata[source] ? image : toHttpUrl(metadata.image_url, ipfsGateway);
   if (imageUrl) {
     sanitized.image_url = imageUrl;
   } else {
     delete sanitized.image_url;
   }
   for (const key of LINK_FIELDS) {
-    const url = toHttpUrl(metadata[key]);
+    const url = toHttpUrl(metadata[key], ipfsGateway);
     if (url) {
       sanitized[key] = url;
     } else {
@@ -421,20 +428,33 @@ function sanitizeAvatarMeta(
   return sanitized;
 }
 
+// The library's own fetches (NFT metadata, the image check) may name a retired
+// public IPFS gateway too: ens-avatar moves only ipfs.io links.
+function withLiveGateway(fetcher: Fetcher, ipfsGateway: string): Fetcher {
+  return {
+    get: (url, opts) => fetcher.get(toLiveGatewayUrl(url, ipfsGateway), opts),
+    head: (url) => fetcher.head(toLiveGatewayUrl(url, ipfsGateway)),
+    getArrayBuffer: (url, opts) => fetcher.getArrayBuffer(toLiveGatewayUrl(url, ipfsGateway), opts),
+  };
+}
+
 export class AvatarService {
   private resolver: AvatarResolver;
   // Fallback resolver using the chain's default (legacy) universal resolver, set
   // only when `resolver` was pointed at a v2 universal resolver (see constructor).
   private legacyResolver?: AvatarResolver;
   private maxAvatarBytes: number;
+  private ipfsGateway: string;
 
   constructor(
     rpcUrl: string,
     chain: Chain,
     maxAvatarBytes: number = DEFAULT_MAX_AVATAR_BYTES,
     universalResolver?: string,
+    ipfsGateway: string = DEFAULT_IPFS_GATEWAY,
   ) {
     this.maxAvatarBytes = maxAvatarBytes;
+    this.ipfsGateway = ipfsGateway;
     // ens-avatar 2.x takes a ChainClient (ethers-free core). We adapt a viem
     // PublicClient via `fromViem` — viem is already this project's chain library
     // and one of ens-avatar's optional peers, so no extra dependency (the old
@@ -464,9 +484,19 @@ export class AvatarService {
     // through the same guard, timeout and size cap as the media fetch; the
     // options still feed the library's URL-level deny checks. The library timer
     // matches the 8s media budget, so it never cuts a request that would finish
-    // inside it.
-    const resolverOptions = { urlDenyList: resolverDenyList(), timeout: MEDIA_RESOLVE_TIMEOUT_MS };
-    const guardedFetcher = createGuardedFetcher(MEDIA_RESOLVE_TIMEOUT_MS, MAX_METADATA_JSON_BYTES);
+    // inside it. ens-avatar resolves ipfs:// and ipns:// (and rewrites ipfs.io
+    // links) to the configured gateway, not its ipfs.io default, and the
+    // fetcher moves links on the other retired public gateways (see
+    // ipfs-gateway.ts).
+    const resolverOptions = {
+      urlDenyList: resolverDenyList(),
+      timeout: MEDIA_RESOLVE_TIMEOUT_MS,
+      ipfs: ipfsGateway,
+    };
+    const guardedFetcher = withLiveGateway(
+      createGuardedFetcher(MEDIA_RESOLVE_TIMEOUT_MS, MAX_METADATA_JSON_BYTES),
+      ipfsGateway,
+    );
     this.resolver = new AvatarResolver(
       fromViem(lookupClient, v2UR ? { universalResolverAddress: v2UR } : undefined),
       resolverOptions,
@@ -538,7 +568,13 @@ export class AvatarService {
     // (for inline on-chain images) this service's avatar image endpoint, and drop
     // what isn't safe to serve. A record with no usable image is treated as "no
     // results", matching v1's 404.
-    const metadata = sanitizeAvatarMeta(resolved.metadata, resolved.isNftRecord, avatarImageUrl, resolved.options);
+    const metadata = sanitizeAvatarMeta(
+      resolved.metadata,
+      resolved.isNftRecord,
+      avatarImageUrl,
+      resolved.options,
+      this.ipfsGateway,
+    );
     if (!metadata) {
       return null;
     }
@@ -740,11 +776,12 @@ export class AvatarService {
       return safe;
     }
 
-    // Handle HTTP/HTTPS URLs (ens-avatar resolves IPFS and NFTs to HTTP URLs)
+    // Handle HTTP/HTTPS URLs (ens-avatar resolves IPFS and NFTs to HTTP URLs; an
+    // NFT's image may still name a retired public IPFS gateway)
     if (uri.startsWith('http')) {
       // Validates the URL and every redirect hop (scheme, private hosts, this
       // service's own hostnames); a blocked URL throws and degrades to "none".
-      const response = await fetchMediaUrl(uri, {
+      const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
         signal: AbortSignal.timeout(7000),
         headers: {
           'user-agent': 'ENS-Metadata-V2/1.0.0',

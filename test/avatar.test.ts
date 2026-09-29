@@ -93,22 +93,28 @@ describe('AvatarService.getAvatarMeta', () => {
     expect(primary.getMetadata).toHaveBeenCalledWith('nick.eth');
   });
 
-  it('rewrites an ipfs:// image to a public gateway URL', async () => {
+  it('rewrites an ipfs:// image to the IPFS gateway URL', async () => {
     const primary = { getMetadata: vi.fn().mockResolvedValue({ uri: 'nick.eth', image: `ipfs://${CID}/pic.png` }) };
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
-    expect(result?.image).toBe(`https://ipfs.io/ipfs/${CID}/pic.png`);
+    expect(result?.image).toBe(`https://ipfs.filebase.io/ipfs/${CID}/pic.png`);
   });
 
   it('rewrites the ipfs://ipfs/ prefix form', async () => {
     const primary = { getMetadata: vi.fn().mockResolvedValue({ image: `ipfs://ipfs/${CID}` }) };
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
-    expect(result?.image).toBe(`https://ipfs.io/ipfs/${CID}`);
+    expect(result?.image).toBe(`https://ipfs.filebase.io/ipfs/${CID}`);
   });
 
   it('has no image for an ipfs:// URI that is not a CID, which the avatar endpoint does not serve either', async () => {
     const primary = { getMetadata: vi.fn().mockResolvedValue({ image: 'ipfs://QmHash/pic.png' }) };
     expect(await makeService(primary).getAvatarMeta('nick.eth', IMG_URL)).toBeNull();
     expect(utils.getImageURI({ metadata: { image: 'ipfs://QmHash/pic.png' } })).toBeNull();
+  });
+
+  it('moves an image on a retired public IPFS gateway to the IPFS gateway', async () => {
+    const primary = { getMetadata: vi.fn().mockResolvedValue({ image: `https://ipfs.io/ipfs/${CID}/pic.png` }) };
+    const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result?.image).toBe(`https://ipfs.filebase.io/ipfs/${CID}/pic.png`);
   });
 
   it('rewrites an ar:// image to the Arweave gateway', async () => {
@@ -275,22 +281,22 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     });
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
     expect(result).toMatchObject({
-      image: 'https://ipfs.io/ipns/k51qzi5uqu5dlvj2/pic.png',
-      image_url: 'https://ipfs.io/ipfs/QmHash/pic.png',
+      image: 'https://ipfs.filebase.io/ipns/k51qzi5uqu5dlvj2/pic.png',
+      image_url: 'https://ipfs.filebase.io/ipfs/QmHash/pic.png',
       animation_url: 'https://arweave.net/TXID',
-      external_url: 'https://ipfs.io/ipfs/QmSite',
+      external_url: 'https://ipfs.filebase.io/ipfs/QmSite',
     });
   });
 
   it.each([
-    [CID, `https://ipfs.io/ipfs/${CID}`],
-    [`ipfs/${CID}/1.png`, `https://ipfs.io/ipfs/${CID}/1.png`],
-    [`/ipfs/${CID}/1.png`, `https://ipfs.io/ipfs/${CID}/1.png`],
+    [CID, `https://ipfs.filebase.io/ipfs/${CID}`],
+    [`ipfs/${CID}/1.png`, `https://ipfs.filebase.io/ipfs/${CID}/1.png`],
+    [`/ipfs/${CID}/1.png`, `https://ipfs.filebase.io/ipfs/${CID}/1.png`],
     [
       'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi',
-      'https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi',
+      'https://ipfs.filebase.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi',
     ],
-    ['/ipns/example.eth/pic.png', 'https://ipfs.io/ipns/example.eth/pic.png'],
+    ['/ipns/example.eth/pic.png', 'https://ipfs.filebase.io/ipns/example.eth/pic.png'],
   ])('resolves a CID-path image (%s) as the avatar endpoint does, keeping the NFT response', async (image, expected) => {
     const host_meta = { chain_id: 1, namespace: 'erc721', contract_address: '0xabc', token_id: '1' };
     const primary = readingResolver(NFT_RECORD, { image, is_owner: true, host_meta });
@@ -311,8 +317,8 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
     expect(result).toEqual({
       uri: 'nick.eth',
-      image: `https://ipfs.io/ipfs/${CID}/1.png`,
-      animation_url: `https://ipfs.io/${withinCap}`,
+      image: `https://ipfs.filebase.io/ipfs/${CID}/1.png`,
+      animation_url: `https://ipfs.filebase.io/${withinCap}`,
     });
   });
 
@@ -342,9 +348,9 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
 
   // Values that only the http(s)-only link rule rewrites or drops.
   it.each([
-    ['permalink', `ipfs://${CID}/p`, `https://ipfs.io/ipfs/${CID}/p`],
+    ['permalink', `ipfs://${CID}/p`, `https://ipfs.filebase.io/ipfs/${CID}/p`],
     ['image_preview_url', 'ftp://cdn.test/p.png', undefined],
-    ['image_thumbnail_url', `ipfs://${CID}/thumb.png`, `https://ipfs.io/ipfs/${CID}/thumb.png`],
+    ['image_thumbnail_url', `ipfs://${CID}/thumb.png`, `https://ipfs.filebase.io/ipfs/${CID}/thumb.png`],
     ['image_original_url', 'file:///etc/passwd', undefined],
     ['animation_original_url', 'HTTPS://CDN.test/a.mp4', 'https://cdn.test/a.mp4'],
   ])('keeps the OpenSea URL field %s (%j) only as an http(s) link', async (field, value, expected) => {
@@ -574,8 +580,8 @@ describe('AvatarService.getAvatarMeta with the real ens-avatar resolver', () => 
       const svc = realService({ records: { 'nick.eth': `eip155:1/erc721:${CONTRACT}/7` }, tokenMeta: { image } });
       const result = await svc.getAvatarMeta('nick.eth', IMG_URL);
       // The library's own image resolution (what getAvatar serves) for the same token.
-      const avatarImage = utils.getImageURI({ metadata: { image } });
-      expect(avatarImage).toMatch(/^https:\/\/ipfs\.io\/ipfs\//);
+      const avatarImage = utils.getImageURI({ metadata: { image }, gateways: { ipfs: 'https://ipfs.filebase.io' } });
+      expect(avatarImage).toMatch(/^https:\/\/ipfs\.filebase\.io\/ipfs\//);
       expect(result).toMatchObject({ image: avatarImage, is_owner: true, host_meta: { token_id: '7' } });
     },
   );
