@@ -124,4 +124,18 @@ the on-chain tier):
 - `POST /webhook` - Indexer webhook (HMAC-authenticated): purges the KV and R2 caches for the name on both networks (edge entries for its `/image` and `/rasterize` URLs are evicted on the receiving colo only; everything else at the edge expires within 300s), records the name's migration status in D1 and re-warms the default card image (see `docs/webhook.md`)
 - `GET /health` - Service health check
 
-Error responses: `400` bad input, `404` unknown name, `410` expired name, `429` rate limited, `503` when the name cannot be resolved because an indexer or RPC tier was unreachable, and `504` after the 30s request timeout. On the metadata, image, rasterize and migration-status routes an outage is never reported as a `404`; the avatar, header and avatar-meta routes answer `404` whenever the record cannot be resolved, outage included.
+Error responses: `400` bad input, `404` unknown name, `410` expired name, `429` rate limited, `503` when the name cannot be resolved because an indexer or RPC tier was unreachable, and `504` after the 30s request timeout. An outage is never reported as a `404`: not on the metadata, image, rasterize and migration-status routes, nor on the avatar, header and avatar-meta routes (see below).
+
+The avatar and header routes answer 404 when the name has no usable record, and
+503 with a short `Cache-Control` when the lookup failed (RPC, CCIP gateway or
+media host error, or the 8 s resolution timeout). An NFT card whose avatar
+lookup failed is served without the avatar with `Cache-Control: public,
+max-age=60`, is kept in the edge cache for a minute and is not stored in KV or
+R2. A name whose upstream keeps failing (e.g. a gateway that answers 503 for a
+suspended name) is therefore looked up again once a minute per colo. The edge
+copy is served with a fresh `max-age=60`, so the avatar reappears within about
+two minutes of the upstream recovering. A CCIP gateway's 4xx other than 401,
+403, 408 and 429 is its final answer (EIP-3668) and counts as no record, as does
+a gateway URL the service refuses; any other gateway status (401 and 403
+included: an expired gateway key or a WAF blocking requests from Workers), and a
+gateway that redirects to a refused host, fails the lookup.

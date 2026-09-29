@@ -1,4 +1,5 @@
-import { createPublicClient, http, PublicClient, getContract } from 'viem';
+import { createPublicClient, PublicClient, getContract } from 'viem';
+import { ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
 import { NETWORKS, SUPPORTED_NETWORKS, type NetworkName, type V1Contracts, type V2Contracts } from '../config/networks';
 import type { NetworkConfig } from '../types';
 import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
@@ -260,10 +261,13 @@ export class BlockchainService {
 
       this.clients.set(network, createPublicClient({
         chain: def.chain,
+        // CCIP-read gateway URLs come from resolver contracts anyone can deploy,
+        // and the transport bounds how many lookups they can chain.
+        ccipRead: { request: guardedCcipRequest },
         // Per-call timeout must stay well under the 30s global request budget —
         // a slow RPC otherwise consumes the whole budget and the request 500s at
         // the global timeout instead of failing fast / using a fallback.
-        transport: http(this.env[def.rpcUrlEnvKey], {
+        transport: ccipBudgetedHttp(this.env[def.rpcUrlEnvKey], {
           timeout: 8_000,
           retryCount: 2,
           retryDelay: 500,
@@ -279,7 +283,8 @@ export class BlockchainService {
       this.fallbackClients.set(network, fallbackUrls.map((url) =>
         createPublicClient({
           chain: def.chain,
-          transport: http(url, { timeout: 8_000, retryCount: 1 }),
+          ccipRead: { request: guardedCcipRequest },
+          transport: ccipBudgetedHttp(url, { timeout: 8_000, retryCount: 1 }),
         })
       ));
     }
