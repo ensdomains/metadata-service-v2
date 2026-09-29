@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { AvatarResolver } from '@ensdomains/ens-avatar';
 import { AvatarService } from '../src/services/avatar';
 import { NETWORKS } from '../src/config/networks';
 import {
@@ -9,7 +10,16 @@ import {
   MAX_MEDIA_REDIRECTS,
   normalizeHostname,
   resolverDenyList,
+  withServingHost,
 } from '../src/services/media-fetch';
+import { createMockEnv } from './mocks/hono-env';
+
+// The app is loaded for the route test; its rasterizer needs WASM.
+vi.mock('../src/services/rasterize', () => ({
+  RasterizeService: class {
+    async rasterize() { return new Uint8Array([0x89, 0x50, 0x4e, 0x47]); }
+  },
+}));
 
 // SSRF regression suite for avatar/header media fetches (WEB-1550, v1 cluster B).
 //
@@ -258,5 +268,72 @@ describe('media body size cap applies while streaming', () => {
     (svc as unknown as { legacyResolver?: unknown }).legacyResolver = undefined;
     const img = await svc.getAvatarImage('ok.eth');
     expect(img?.buffer.byteLength).toBe(PNG.byteLength);
+  });
+});
+
+// The worker is also reachable on hosts other than SELF_HOSTNAMES: a preview
+// URL per version or alias, another custom domain, a route. A record or gateway
+// URL naming one of them would make the worker fetch its own endpoints, and the
+// redirect limit does not bound recursion across separate requests.
+describe("the worker's other hostnames", () => {
+  it.each([
+    'https://1a2b3c4d-ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/loop.eth',
+    'https://staging-ens-metadata-v2.ensdomains.workers.dev./mainnet/avatar/loop.eth',
+    'https://STAGING-ENS-METADATA-V2.ensdomains.workers.dev/x',
+  ])('blocks its preview URL %s', (url) => {
+    expect(blocked(url)).toBe(true);
+  });
+
+  it('does not block other workers on the same workers.dev subdomain', () => {
+    expect(blocked('https://other-worker.ensdomains.workers.dev/a.png')).toBe(false);
+  });
+
+  it('blocks the host the current request is served on, and its subdomains', async () => {
+    await withServingHost('Custom.Example', async () => {
+      await Promise.resolve(); // still inside the request after an await
+      for (const url of ['https://custom.example/mainnet/avatar/loop.eth', 'https://CUSTOM.example./x', 'https://img.custom.example/a.png']) {
+        expect(blocked(url)).toBe(true);
+      }
+      for (const url of ['https://cdn.example/a.png', 'https://notcustom.example/a.png']) {
+        expect(blocked(url)).toBe(false);
+      }
+    });
+    // Only for that request.
+    expect(blocked('https://custom.example/a.png')).toBe(false);
+  });
+
+  it('blocks a redirect to the serving host without requesting it', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      requested.push(url);
+      return new Response(null, { status: 302, headers: { Location: 'https://custom.example/mainnet/avatar/loop.eth' } });
+    }));
+    await withServingHost('custom.example', async () => {
+      await expect(fetchMediaUrl('https://attacker.example/r')).rejects.toBeInstanceOf(BlockedMediaUrlError);
+    });
+    expect(requested).toEqual(['https://attacker.example/r']);
+  });
+
+  it('through the app: an avatar record naming the host the request came in on is never fetched', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const HOST = 'https://custom.example';
+    vi.spyOn(AvatarResolver.prototype, 'getAvatar').mockResolvedValue(`${HOST}/mainnet/avatar/loop.eth`);
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      requested.push(String(input instanceof Request ? input.url : input));
+      return new Response(PNG, { status: 200, headers: { 'Content-Type': 'image/png' } });
+    }));
+    const { default: app } = await import('../src/index');
+    const env = { ...createMockEnv(), RATE_LIMIT_DISABLED: 'true' } as unknown as Record<string, unknown>;
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+
+    const loop = await app.request(`${HOST}/mainnet/avatar/loop.eth`, undefined, env, ctx);
+    expect(loop.status).toBe(404);
+    expect(requested).toEqual([]);
+
+    // The same record, requested on another host, is an ordinary public URL.
+    const other = await app.request('https://metadata.test/mainnet/avatar/loop.eth', undefined, env, ctx);
+    expect(other.status).toBe(200);
+    expect(requested).toEqual([`${HOST}/mainnet/avatar/loop.eth`]);
   });
 });

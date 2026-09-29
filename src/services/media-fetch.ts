@@ -11,7 +11,9 @@
 //  - the host must not be a private/local target (the library's own
 //    isPrivateHostname, applied after normalizing the hostname);
 //  - the host must not be this service itself or a subdomain of it, so a record
-//    cannot make the worker fetch its own endpoints recursively;
+//    cannot make the worker fetch its own endpoints recursively: its public
+//    hostnames, its preview URLs, and whatever host the current request is
+//    being served on (see withServingHost);
 //  - redirects are followed manually, up to MAX_MEDIA_REDIRECTS.
 //
 // The ens-avatar resolvers' own requests (record JSON, NFT metadata, HEAD
@@ -25,6 +27,7 @@
 // longer than DNS allows is refused before anything else looks at it: the URL
 // parser accepts hosts of any length, and every one checked here is chosen by
 // whoever controls a record, a redirect or an OffchainLookup revert.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { utils as avatarUtils, type Fetcher, type FetcherResponse } from '@ensdomains/ens-avatar';
 
 /** This service's own public hostnames (see MetadataService's default origin and docs/webhook.md). */
@@ -32,6 +35,30 @@ export const SELF_HOSTNAMES: readonly string[] = [
   'metadata.ens.domains',
   'ens-metadata-v2.ensdomains.workers.dev',
 ];
+
+// Cloudflare serves each version and alias of the worker on a preview URL,
+// `<version or alias>-ens-metadata-v2.ensdomains.workers.dev`, which is not a
+// subdomain of its workers.dev host.
+export const SELF_PREVIEW_HOST_SUFFIX = '-ens-metadata-v2.ensdomains.workers.dev';
+
+// The host the current request is being served on. The worker can be reached
+// on hosts outside the ones above (another custom domain, a route), and every
+// URL it builds for itself uses the request's own host; a record or gateway URL
+// naming that host would make it fetch its own endpoints. Set per incoming
+// request by withServingHost (a middleware in index.ts), and carried into the
+// request's waitUntil work, like the request budget.
+const servingHost = new AsyncLocalStorage<string>();
+
+/** Run `fn` with `hostname` denied to the outbound fetches it makes. */
+export function withServingHost<T>(hostname: string, fn: () => T): T {
+  return servingHost.run(normalizeHostname(hostname), fn);
+}
+
+function isSelf(host: string): boolean {
+  const serving = servingHost.getStore();
+  return host.endsWith(SELF_PREVIEW_HOST_SUFFIX)
+    || (!!serving && (host === serving || host.endsWith(`.${serving}`)));
+}
 
 // Same limit as the ens-avatar resolver, so any URL it accepts is also fetchable.
 export const MAX_MEDIA_REDIRECTS = 10;
@@ -84,7 +111,7 @@ export function assertFetchableMediaUrl(url: URL, denyList: readonly string[] = 
   if (!host || avatarUtils.isPrivateHostname(host)) {
     throw new BlockedMediaUrlError(`blocked private media host: ${url.hostname}`);
   }
-  if (isDenied(host, denyList)) {
+  if (isDenied(host, denyList) || isSelf(host)) {
     throw new BlockedMediaUrlError(`blocked media host: ${url.hostname}`);
   }
 }
@@ -174,23 +201,26 @@ export async function readBodyCapped(
   return concat(chunks, total);
 }
 
-// Read at most the first `bytes` bytes of a body and cancel the rest.
+// Read at most the first `bytes` bytes of a body and cancel the rest. Only
+// those bytes are copied, and no chunk is kept, however large the chunks the
+// body arrives in.
 async function readBodyPrefix(response: Response, bytes: number): Promise<ArrayBuffer> {
   if (!response.body) return new ArrayBuffer(0);
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+  const prefix = new Uint8Array(bytes);
+  let filled = 0;
   try {
-    while (total < bytes) {
+    while (filled < bytes) {
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(value);
-      total += value.byteLength;
+      const take = Math.min(value.byteLength, bytes - filled);
+      prefix.set(value.subarray(0, take), filled);
+      filled += take;
     }
   } finally {
     await reader.cancel().catch(() => {});
   }
-  return concat(chunks, total).slice(0, bytes);
+  return prefix.buffer.slice(0, filled);
 }
 
 function concat(chunks: Uint8Array[], total: number): ArrayBuffer {

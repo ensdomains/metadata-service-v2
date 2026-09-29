@@ -23,6 +23,7 @@ import { ImageCacheService } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
 import { withRequestBudget } from "./services/request-budget";
+import { withServingHost } from "./services/media-fetch";
 import { RasterizeService } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
@@ -313,6 +314,9 @@ app.use("*", async (c, next) => {
 app.use("*", rateLimiter);
 // Per-request allowance for CCIP-read gateway responses (see request-budget.ts).
 app.use("*", (_c, next) => withRequestBudget(next));
+// Outbound fetches made for this request never target the host it is served on
+// (see media-fetch.ts).
+app.use("*", (c, next) => withServingHost(new URL(c.req.url).hostname, next));
 
 // NOTE: the previous Hono `cache()` middlewares were removed. They (a) targeted
 // `/*/metadata/*`, which never matches the real metadata routes

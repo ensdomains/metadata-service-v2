@@ -134,6 +134,41 @@ describe('createGuardedFetcher', () => {
     const res = await createGuardedFetcher(8_000, 1024).getArrayBuffer('https://cdn.example/a');
     expect(res.data.byteLength).toBe(1024);
   });
+
+  // The body as `chunks`, each filled with its index, counting the chunks pulled.
+  function chunkedBody(chunks: number[]) {
+    const counter = { pulled: 0 };
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const size = chunks[counter.pulled];
+        if (size === undefined) return controller.close();
+        controller.enqueue(new Uint8Array(size).fill(counter.pulled + 1));
+        counter.pulled++;
+      },
+    });
+    return { body, counter };
+  }
+
+  it.each([
+    ['one chunk far larger than the prefix', [4 * 1024 * 1024], 1024],
+    ['chunks that straddle the prefix end', [300, 300, 300, 300, 300], 1024],
+    ['a body shorter than the prefix', [100, 200], 300],
+  ])('getArrayBuffer() copies exactly the prefix from %s', async (_, chunks, expected) => {
+    const { body, counter } = chunkedBody(chunks);
+    recordingFetch(() => new Response(body));
+    const res = await createGuardedFetcher(8_000, 1024).getArrayBuffer('https://cdn.example/a');
+
+    const bytes = new Uint8Array(res.data);
+    expect(bytes.byteLength).toBe(expected);
+    // Byte i comes from the chunk that held it.
+    let offset = 0;
+    chunks.forEach((size, index) => {
+      for (let i = offset; i < Math.min(offset + size, expected); i++) expect(bytes[i]).toBe(index + 1);
+      offset += size;
+    });
+    // Nothing is pulled once the prefix is full.
+    expect(counter.pulled).toBeLessThanOrEqual(Math.ceil(1024 / Math.min(...chunks)) + 1);
+  });
 });
 
 describe('fetchMediaUrl redirect method semantics', () => {
