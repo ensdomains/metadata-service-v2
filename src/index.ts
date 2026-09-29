@@ -1,5 +1,5 @@
 import "./shims";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { trimTrailingSlash } from "hono/trailing-slash";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -13,7 +13,7 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
-import { canonicalizeName } from "./utils/ens";
+import { canonicalizeName, validateEnsName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
@@ -29,7 +29,7 @@ import type {
   ErrorResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
-import { NotFoundError, UpstreamError } from "./services/errors";
+import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
@@ -110,6 +110,12 @@ function httpError(c: any, error: unknown, fallbackMessage: string): Response {
   const timestamp = new Date().toISOString();
   if (error instanceof DomainExpiredError) {
     return c.json({ message: error.message, timestamp }, 410 as any);
+  }
+  if (error instanceof InvalidNameError) {
+    return c.json({ error: 'Invalid ENS name format', timestamp }, 400);
+  }
+  if (error instanceof InvalidTokenIdError) {
+    return c.json({ error: 'Invalid token id', timestamp }, 400);
   }
   if (error instanceof NotFoundError) {
     return c.json({ error: 'Not found', timestamp }, 404);
@@ -466,11 +472,25 @@ function isContractAddress(value: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
+// The 400 for a name route (`registry` / `namewrapper`) whose name this service
+// can never look up (see isResolvableEnsName), answered before any other work,
+// the edge cache included. A contract-address route names a token id instead.
+function invalidNameResponse(c: Context): Response | null {
+  const param2 = c.req.param("param2");
+  if ((param2 === 'registry' || param2 === 'namewrapper') && !isResolvableEnsName(c.req.param("param3") ?? '')) {
+    return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
+  }
+  return null;
+}
+
 // Unified metadata endpoint: handles both v1 (contractAddress/tokenId) and v2 (registryType/name)
 app.get(
   "/:network/:param2/:param3",
   validateNetwork,
   async (c) => {
+    const invalidName = invalidNameResponse(c);
+    if (invalidName) return invalidName;
+
     // L0 edge: short-circuit before any RPC/indexer work.
     const edgeHit = await edgeCacheMatch(c);
     if (edgeHit) return edgeHit;
@@ -494,9 +514,6 @@ app.get(
 
       // v2 route: param2 is registryType
       if (param2 === 'registry' || param2 === 'namewrapper') {
-        if (!param3 || param3.trim().length === 0) {
-          return c.json({ error: "Identifier cannot be empty", timestamp: new Date().toISOString() }, 400);
-        }
         return await handleMetadata(c, network, param2, param3);
       }
 
@@ -751,6 +768,9 @@ app.get(
   "/:network/:param2/:param3/image",
   validateNetwork,
   async (c) => {
+    const invalidName = invalidNameResponse(c);
+    if (invalidName) return invalidName;
+
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
     const param2 = c.req.param("param2");
@@ -796,6 +816,9 @@ app.get(
   "/:network/:param2/:param3/rasterize",
   validateNetwork,
   async (c) => {
+    const invalidName = invalidNameResponse(c);
+    if (invalidName) return invalidName;
+
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
     const param2 = c.req.param("param2");
@@ -913,7 +936,8 @@ const handleWebhook = async (c: any) => {
           // Canonicalize like WebhookService does for its purges: the D1 name
           // column and warmed cache keys must never carry a raw-case variant.
           const name = payload?.name ? canonicalizeName(payload.name) : undefined;
-          if (!name) return;
+          // An ignored event (a name this service never serves) has nothing to warm.
+          if (!name || !validateEnsName(name)) return;
 
           // The event carries ENS protocol (v1/v2), not chain — and the chain
           // cannot be derived from the payload (v1 contracts share addresses

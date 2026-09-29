@@ -30,3 +30,31 @@ export function isNotFoundError(e: unknown): e is NotFoundError {
 export function isUpstreamError(e: unknown): e is UpstreamError {
   return e instanceof UpstreamError;
 }
+
+/**
+ * The request named something that is not a well-formed ENS name. A client
+ * error (→ 400), never a 5xx: without this type the service-level validation
+ * threw a plain Error, which the route mapper flattened to a generic 500.
+ */
+export class InvalidNameError extends Error {
+  constructor(message = 'Invalid ENS name format') {
+    super(message);
+    this.name = 'InvalidNameError';
+  }
+}
+
+export function isInvalidNameError(e: unknown): e is InvalidNameError {
+  return e instanceof InvalidNameError;
+}
+
+/**
+ * A v1/v2 NFT token id that is neither a decimal integer nor 0x-prefixed hex.
+ * A client error (→ 400): it used to reach BigInt(), whose SyntaxError the route
+ * mapper reported as a generic 500.
+ */
+export class InvalidTokenIdError extends Error {
+  constructor(message = 'Invalid token id') {
+    super(message);
+    this.name = 'InvalidTokenIdError';
+  }
+}

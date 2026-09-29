@@ -182,6 +182,12 @@ export function isEmptyHash(hash: string): boolean {
 // cache-flooding via arbitrarily long names.
 export const MAX_ENS_NAME_LENGTH = 255;
 
+// Max accepted number of labels in a name. Real names are a few levels deep, so
+// 32 is far above any legitimate use. Caps the per-label work of the name-taking
+// routes (the registry-hierarchy blockchain tier resolves every ancestor level),
+// which MAX_ENS_NAME_LENGTH alone leaves at up to 128 one-character labels.
+export const MAX_NAME_LABELS = 32;
+
 /**
  * Canonical form for cache keys, indexer queries, and invalidation matching.
  * ENS labels are case-insensitive (the namehash lowercases ASCII), so two
@@ -219,6 +225,10 @@ export function validateEnsName(name: string): boolean {
     return false;
   }
 
+  if (parts.length > MAX_NAME_LABELS) {
+    return false;
+  }
+
   // Check for empty labels
   for (const part of parts) {
     if (!part || part.length === 0) {
@@ -227,6 +237,27 @@ export function validateEnsName(name: string): boolean {
   }
 
   return true;
+}
+
+/**
+ * Whether this service can look `name` up at all: validateEnsName's checks, and
+ * a canonical form the lookups' namehash can hash. That namehash (ensjs) runs
+ * each label through ENSIP-15 normalization and throws on one it rejects: a
+ * disallowed character such as ':', '/', a space, a control character or '_'
+ * after the start of a label, or an illegal mixture. Such a name has no node the
+ * indexers or the chain can be asked about, so it is a client error (400); it
+ * used to fail inside the lookup and be reported as an outage (503). Names that
+ * normalize to another form (upper case, say) and encoded labelhashes (`[…]`)
+ * still pass.
+ */
+export function isResolvableEnsName(name: string): boolean {
+  if (!validateEnsName(name)) return false;
+  try {
+    namehash(canonicalizeName(name));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Character set analysis

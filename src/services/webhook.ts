@@ -18,7 +18,12 @@
 //       contract_address, name|null, namehash|null, data, timestamp }
 import type { Context } from 'hono';
 import { CacheService, CacheKeys } from './cache';
-import { validateEnsName, canonicalizeName } from '../utils/ens';
+import { validateEnsName, canonicalizeName, MAX_ENS_NAME_LENGTH, MAX_NAME_LABELS } from '../utils/ens';
+
+// A name the service never serves because of its size, however well-formed.
+function isOverNameLimits(name: string): boolean {
+  return name.length > MAX_ENS_NAME_LENGTH || name.split('.').length > MAX_NAME_LABELS;
+}
 import type { StorageManager } from '../utils/storage';
 import { SUPPORTED_NETWORKS } from '../config/networks';
 
@@ -103,6 +108,21 @@ export class WebhookService {
       const payloadValidation = this.validatePayload(payload);
       if (!payloadValidation.valid) {
         return c.json({ error: payloadValidation.error }, 400);
+      }
+
+      // An event for a name over the service's limits (MAX_ENS_NAME_LENGTH,
+      // MAX_NAME_LABELS), which anyone can create on-chain, has nothing cached
+      // to invalidate: every route refuses such a name. Acknowledge it, so the
+      // sender neither retries it nor takes this endpoint for a failing one.
+      if (payload.name && isOverNameLimits(payload.name)) {
+        console.log(`[webhook] ${payload.event_type}: ignoring a name this service does not serve (${String(payload.name).length} chars)`);
+        return c.json({
+          status: 'ignored',
+          processed: false,
+          event: payload.event_type,
+          reason: 'Name not served by this service',
+          timestamp: new Date().toISOString(),
+        });
       }
 
       await this.processWebhookEvent(payload);
@@ -200,8 +220,12 @@ export class WebhookService {
       return { valid: false, error: 'Event must include a name or namehash' };
     }
 
-    // When a name is present, it must be a well-formed ENS name.
-    if (payload.name && !validateEnsName(payload.name)) {
+    // When a name is present, it must be a well-formed ENS name (one over the
+    // service's length or depth limits is acknowledged in handleWebhook).
+    if (payload.name != null && typeof payload.name !== 'string') {
+      return { valid: false, error: 'Invalid domain name format' };
+    }
+    if (payload.name && !isOverNameLimits(payload.name) && !validateEnsName(payload.name)) {
       return { valid: false, error: 'Invalid domain name format' };
     }
 
