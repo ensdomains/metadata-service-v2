@@ -98,6 +98,7 @@ the on-chain tier):
 - `MAINNET_FALLBACK_RPC_1..3`: fallback RPC endpoints (if none is set, mainnet uses built-in public RPCs; setting any one replaces that built-in list entirely)
 - `SEPOLIA_FALLBACK_RPC_1..2`: fallback RPC endpoints — sepolia has **no** built-in defaults, so without these every sepolia on-chain read depends on the single `SEPOLIA_RPC_URL`
 - `MAX_AVATAR_BYTES`: cap on fetched avatar size in bytes (default 25 MB)
+- `MAX_BATCH_NAMES`: max names per `POST /batch-metadata` request (default 100)
 - `RATE_LIMIT_DISABLED`: set to `true` to disable the per-IP rate limiter (local dev). Limits are per IP per 60s window: 120 default, 60 for `/image` and `/webhook`, 30 for `/rasterize`, 20 for `/batch-metadata`; `/` and `/health` are exempt
 - `LOG_LEVEL`: declared in the Worker env and set in `wrangler.toml`, but not currently read by the code
 
@@ -119,7 +120,7 @@ the on-chain tier):
 - `GET /{network}/header/{name}` - Header/banner image bytes (the `header` text record)
 - `GET /migration-status/{name}?network=` - Check migration status (network from the query param, default `mainnet`)
 - `GET /registry-hierarchy/{name}?network=` - Get registry hierarchy (network from the query param, default `mainnet`). This route never answers `404` or `503`: when no indexer, chain or D1 source can resolve the name it returns a `200` placeholder hierarchy with zero-address owners (cached briefly)
-- `POST /batch-metadata` - Batch metadata. JSON body `{ names: string[] (1–100), network?: "mainnet" | "sepolia" (default `mainnet`), registryType?: "registry" | "namewrapper" (default `registry`) }`; returns `{ results, total, successful, failed }`
+- `POST /batch-metadata` - Batch metadata. JSON body `{ names: string[] (1–100 by default, `MAX_BATCH_NAMES`), network?: "mainnet" | "sepolia" (default `mainnet`), registryType?: "registry" | "namewrapper" (default `registry`) }`; names that differ only in case are resolved once; returns `{ results, total, successful, failed }`
 - `POST /webhook` - Indexer webhook (HMAC-authenticated): purges the KV and R2 caches for the name on both networks (edge entries for its `/image` and `/rasterize` URLs are evicted on the receiving colo only; everything else at the edge expires within 300s), records the name's migration status in D1 and re-warms the default card image (see `docs/webhook.md`)
 - `GET /health` - Service health check
 

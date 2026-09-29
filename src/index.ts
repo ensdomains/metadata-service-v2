@@ -28,6 +28,7 @@ import { CachePresets } from "./utils/cache-headers";
 import type {
   HealthResponse,
   ErrorResponse,
+  MetadataResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
 import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
@@ -63,6 +64,7 @@ export interface Env {
   MAX_AVATAR_BYTES?: string; // max fetched avatar size in bytes (default 25 MB)
   D1_READ_MAX_AGE_SECS?: string; // D1 rows older than this are a miss (default 7 days)
   D1_RETENTION_SECS?: string; // daily cron deletes D1 rows older than this (default 30 days)
+  MAX_BATCH_NAMES?: string; // max names per POST /batch-metadata (default 100)
   LOG_LEVEL: string;
 }
 
@@ -270,7 +272,15 @@ app.use(
 
 app.use("*", requestLogger);
 app.use("*", logger());
-app.use("*", prettyJSON());
+// ?pretty re-indents JSON responses, and indentation grows with nesting depth:
+// a small, deeply nested document becomes a huge string (8 KB of nested arrays
+// re-indents to 32 MB). The avatar and header routes serve content the name's
+// owner controls (the avatar metadata JSON as-is, and the avatar and header
+// media), so they are never re-indented. Every other JSON response is built by
+// this service from fixed shapes.
+const pretty = prettyJSON();
+const USER_SHAPED_JSON_ROUTE = /^\/[^/]+\/(avatar\/[^/]+(\/meta)?|header\/[^/]+)$/;
+app.use("*", (c, next) => (USER_SHAPED_JSON_ROUTE.test(c.req.path) ? next() : pretty(c, next)));
 // 30s timeout for all routes except /health (health has its own graceful handling)
 app.use("*", async (c, next) => {
   if (c.req.path === '/health' || c.req.path === '/') return next();
@@ -629,12 +639,86 @@ app.get(
   }
 );
 
+// POST /batch-metadata limits (WEB-1552). Workers Paid allows 10,000
+// subrequests per invocation (fetch and KV count). One distinct name costs,
+// counted from the code with each call answering on its first attempt:
+//  - indexers down (sepolia): KV get + write-back 2, checkExpiry 2 RPC reads,
+//    zigens 2 and v1 subgraph 2 (primary + one retry each), blockchain tier 6
+//    (v2 getState; v1 owner, resolver, isWrapped owner, NameWrapper.getData,
+//    nameExpires), v2 registry discovery (2 reads per lookup) 4 while not
+//    cached = 18;
+//  - indexer up and the name's D1 row stale: the D1 sync adds 3 indexer
+//    queries = 21;
+//  - worst case, a subname of a v2 name with its own subregistry that no
+//    indexer covers: the owner's contracts can make the Universal Resolver
+//    revert on every RPC client, and the hierarchical resolver then reads 2
+//    values per label, one label after another: ~70 with names capped at 32
+//    labels (fix/name-depth-cap).
+// 100 names stay under 10,000 even then (~7,000), and the time budget below
+// and the request deadline stop the work sooner. D1 allows 1000 queries per
+// invocation; the D1 sync runs in waitUntil, so on a batch of many cold, deep
+// names it is the background sync of the last names that can hit that cap, not
+// a response.
+const DEFAULT_MAX_BATCH_NAMES = 100;
+// Distinct names resolved at once: an invocation has 6 connections waiting for
+// response headers, and a request queued behind them runs down its timeout
+// before it is sent (a false indexer failure trips the circuit breaker).
+// Starting the whole batch at once also let every name hit a failing indexer
+// before its circuit breaker opened. The bound covers the background refreshes
+// of stale cache entries too, which the cache starts in waitUntil.
+const BATCH_CONCURRENCY = 6;
+// A name not started within this budget gets a per-name error, so a slow
+// outage degrades the batch instead of running it into the 30s route timeout
+// (one 504 for every name). In an indexer outage a name already in flight
+// needs ~10s more at most (two 2s attempts per indexer tier, then chain reads).
+const BATCH_TIME_BUDGET_MS = 15_000;
+
+function getMaxBatchNames(env: Env): number {
+  // Invalid/garbage value → the default.
+  const parsed = parseInt(env.MAX_BATCH_NAMES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BATCH_NAMES;
+}
+
+// A wrapper that runs at most `limit` calls at once; the others wait their turn.
+// A finished call hands its slot straight to the next waiting one.
+function concurrencyLimit(limit: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <R>(fn: () => Promise<R>): Promise<R> => {
+    if (active < limit) active++;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await fn();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
+// Calls fn on every item with at most `limit` calls in flight; results keep the
+// input order.
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // Batch metadata endpoint
 app.post("/batch-metadata", async (c) => {
   try {
-    const body = await c.req.json();
+    // A body that is not JSON (or is JSON null) is a client error, not a 500.
+    const body = await c.req.json().catch(() => null);
 
-    if (!body.names || !Array.isArray(body.names)) {
+    if (!body?.names || !Array.isArray(body.names)) {
       const errorResponse: ErrorResponse = {
         error: "Request body must contain 'names' array",
         timestamp: new Date().toISOString(),
@@ -650,9 +734,20 @@ app.post("/batch-metadata", async (c) => {
       return c.json(errorResponse, 400);
     }
 
-    if (body.names.length > 100) {
+    const maxNames = getMaxBatchNames(c.env);
+    if (body.names.length > maxNames) {
       const errorResponse: ErrorResponse = {
-        error: "Cannot process more than 100 names at once",
+        error: `Cannot process more than ${maxNames} names at once`,
+        timestamp: new Date().toISOString(),
+      };
+      return c.json(errorResponse, 400);
+    }
+
+    // Each name is echoed back in its result, so it must be a string: any other
+    // JSON value would give the response a shape (and depth) the client chose.
+    if (!body.names.every((name: unknown) => typeof name === 'string')) {
+      const errorResponse: ErrorResponse = {
+        error: "Every entry in 'names' must be a string",
         timestamp: new Date().toISOString(),
       };
       return c.json(errorResponse, 400);
@@ -670,46 +765,62 @@ app.post("/batch-metadata", async (c) => {
     const url = new URL(c.req.url);
     const baseUrl = `${url.protocol}//${url.host}`;
 
-    // Resolve each name through the metadata cache (KV + SWR)
-    const results = await Promise.allSettled(
-      body.names.map(async (name: string) => {
-        try {
-          // Same expiry gate as the single-name route (before the cache): an
-          // expired name's KV entry must not be served until hardTtl. checkExpiry
-          // is v2-aware and fails open on outages.
-          await metadataService.checkExpiry(name);
-          const { metadata } = await metadataCacheService.get(
+    // Invalid names are answered without resolving them. Each distinct name is
+    // resolved once, in its canonical form (the metadata cache key's), and every
+    // entry for it shares the result while echoing the name as given.
+    const names: string[] = body.names;
+    // Validated as given and as resolved: lowercasing can lengthen a name.
+    const isValid = (name: string) => validateEnsName(name) && validateEnsName(canonicalizeName(name));
+    const distinct = [...new Set(names.filter(isValid).map(canonicalizeName))];
+
+    type Outcome = { metadata: MetadataResponse } | { error?: string };
+    const deadline = Date.now() + BATCH_TIME_BUDGET_MS;
+    // Every resolution this batch starts, a cache miss's or the background
+    // refresh of a stale entry, goes through one bound. (The per-name flow has
+    // its own bound below and never waits on this one while holding it.)
+    const resolveLimit = concurrencyLimit(BATCH_CONCURRENCY);
+    const outcomes = await mapWithConcurrency(distinct, BATCH_CONCURRENCY, async (name): Promise<Outcome> => {
+      if (Date.now() >= deadline) return { error: 'Batch time budget exceeded' };
+      try {
+        // Same expiry gate as the single-name route (before the cache): an
+        // expired name's KV entry must not be served until hardTtl. checkExpiry
+        // is v2-aware and fails open on outages.
+        await metadataService.checkExpiry(name);
+        const { metadata } = await metadataCacheService.get(
+          network,
+          registryType,
+          name,
+          c.executionCtx,
+          () => resolveLimit(() => metadataService.getMetadata(
             network,
-            registryType,
+            registryType as 'registry' | 'namewrapper',
             name,
+            baseUrl,
             c.executionCtx,
-            () => metadataService.getMetadata(
-              network,
-              registryType as 'registry' | 'namewrapper',
-              name,
-              baseUrl,
-              c.executionCtx,
-            ),
-          );
-          return { name, metadata };
-        } catch (err) {
-          if (err instanceof DomainExpiredError) {
-            return { name, error: err.message };
-          }
-          return { name, error: `Failed to resolve ${name}` };
-        }
-      }),
-    );
+          )),
+        );
+        return { metadata };
+      } catch (err) {
+        // An expiry verdict keeps its message; any other failure is reported per
+        // entry below, as "Failed to resolve <entry>".
+        return { error: err instanceof DomainExpiredError ? err.message : undefined };
+      }
+    });
+    const outcomeByName = new Map(distinct.map((name, i) => [name, outcomes[i]]));
+
+    const results = names.map((name) => {
+      if (!isValid(name)) return { name, error: 'Invalid ENS name format' };
+      const outcome = outcomeByName.get(canonicalizeName(name))!;
+      return 'metadata' in outcome
+        ? { name, metadata: outcome.metadata }
+        : { name, error: outcome.error ?? `Failed to resolve ${name}` };
+    });
 
     const batchResponse = {
-      results: results.map((r, i) =>
-        r.status === 'fulfilled'
-          ? r.value
-          : { name: body.names[i], error: 'Processing failed' },
-      ),
-      total: body.names.length,
-      successful: results.filter(r => r.status === 'fulfilled' && !('error' in r.value)).length,
-      failed: results.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && 'error' in r.value)).length,
+      results,
+      total: names.length,
+      successful: results.filter(r => !('error' in r)).length,
+      failed: results.filter(r => 'error' in r).length,
     };
 
     return c.json(batchResponse);
