@@ -110,6 +110,18 @@ function edgeCachePut(c: any, response: Response): void {
   }
 }
 
+// A media response served from the edge cache, with MEDIA_SECURITY_HEADERS
+// whatever it was stored with. An entry stored before those headers existed
+// can be up to EDGE_CACHE_MAX_AGE_SECS old when a deploy adds them (and the
+// KV/R2 card version bump does not reach this URL-keyed cache); the headers
+// are what keeps its bytes inert on this origin.
+function withMediaSecurityHeaders(response: Response): Response {
+  for (const [header, value] of Object.entries(MEDIA_SECURITY_HEADERS)) {
+    response.headers.set(header, value);
+  }
+  return response;
+}
+
 // Central error → HTTP response mapper. Maps the resolution-layer error taxonomy
 // to status codes and returns GENERIC client messages (internal detail is logged,
 // never leaked). Replaces per-route `error.message.includes(...)` string-sniffing.
@@ -929,7 +941,7 @@ app.get(
     try {
       // L0 edge: short-circuit before any tokenId resolution, expiry RPC, or render.
       const edgeHit = await edgeCacheMatch(c);
-      if (edgeHit) return edgeHit;
+      if (edgeHit) return withMediaSecurityHeaders(edgeHit);
 
       let name: string;
 
@@ -995,7 +1007,7 @@ app.get(
       const cfCache = getCfCache();
       if (cfCache) {
         const cached = await cfCache.match(c.req.url);
-        if (cached) return new Response(cached.body, cached);
+        if (cached) return withMediaSecurityHeaders(new Response(cached.body, cached));
       }
 
       // Don't render an NFT for an expired name (existence is enforced below via
