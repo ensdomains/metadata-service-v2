@@ -7,14 +7,28 @@
 // until" time (epoch ms) here; other isolates read it and skip the upstream
 // until then.
 //
-// KV is eventually consistent: a trip is visible at once in the location that
-// wrote it, and in other locations once their cached read of the key expires
-// (up to about a minute). Good enough for a breaker whose cooldown is a
-// minute; it is not a coordinated, exact state.
+// KV caches every read in the location that made it, a missing key included,
+// for its cacheTtl (60 s by default, 30 s at the least), and a write made in
+// another location does not refresh that copy. With a single key, a location
+// that read it just before another location wrote a trip would not see the
+// trip for about the whole one-minute cooldown. So the state is kept under one
+// key per SHARED_BREAKER_SLICE_MS of time: a trip is written to the key of
+// every slice it covers, and a reader reads the key of the slice it is in. A
+// slice's key is first read once that slice has begun, after the trip was
+// written to it, so a stale copy lasts only until the end of the slice being
+// read: other locations see a trip within about one slice (plus the isolate's
+// read cache), and the location that wrote it sees it at once. It is still not
+// a coordinated, exact state.
 
 // How long an isolate reuses its last read of the shared state before reading
 // KV again, so the hot path does not read KV on every request.
 export const SHARED_BREAKER_READ_CACHE_MS = 5_000;
+
+// The length of the time slices the state is keyed by (see above): how long a
+// location can keep missing a trip because of a copy it read just before.
+export const SHARED_BREAKER_SLICE_MS = 10_000;
+
+const sliceOf = (ms: number) => Math.floor(ms / SHARED_BREAKER_SLICE_MS);
 
 // KV rejects an expirationTtl below 60 seconds.
 const KV_MIN_EXPIRATION_TTL_SECS = 60;
@@ -44,40 +58,56 @@ export class SharedBreakerState {
     return this.read();
   }
 
-  // Records a trip until `until` (epoch ms). The value, not the key's TTL,
-  // decides when the trip ends: the TTL is only floored to KV's minimum so the
-  // key cleans itself up. Skips the write when a trip this isolate already
-  // knows of is still active (e.g. concurrent failures of the same outage).
-  // A failed write is logged and ignored: the local breaker still applies.
+  // Records a trip until `until` (epoch ms), in the key of every slice from now
+  // to its end (at most one cooldown ahead). The value, not a key's TTL, decides
+  // when the trip ends: a TTL only keeps its key past the end of its slice,
+  // floored to KV's minimum, so the keys clean themselves up. Skips the write
+  // when a trip this isolate already knows of is still active (e.g. concurrent
+  // failures of the same outage). A failed write is logged and ignored: the
+  // local breaker still applies.
   async trip(until: number): Promise<void> {
     const now = Date.now();
     const alreadyTripped = this.cachedUntil > now;
     this.remember(until);
     if (alreadyTripped) return;
-    try {
-      await this.kv.put(this.key, String(until), {
-        expirationTtl: Math.max(KV_MIN_EXPIRATION_TTL_SECS, Math.ceil((until - now) / 1000)),
-      });
-    } catch (err) {
-      console.warn(`[breaker] could not share trip of ${this.key}:`, err);
+    const writes: Promise<void>[] = [];
+    for (let slice = sliceOf(now); slice <= sliceOf(Math.min(until, now + this.cooldownMs)); slice++) {
+      const sliceEndsIn = (slice + 1) * SHARED_BREAKER_SLICE_MS - now;
+      writes.push(this.kv.put(this.sliceKey(slice), String(until), {
+        expirationTtl: Math.max(KV_MIN_EXPIRATION_TTL_SECS, Math.ceil(sliceEndsIn / 1000)),
+      }));
     }
+    await this.settle(writes, 'share trip of');
   }
 
-  // Clears the shared trip (manual recovery).
+  // Clears the shared trip (manual recovery): the slices a trip written up to
+  // now can cover.
   async reset(): Promise<void> {
+    const now = Date.now();
     this.cachedUntil = 0;
-    this.cachedAt = Date.now();
-    try {
-      await this.kv.delete(this.key);
-    } catch (err) {
-      console.warn(`[breaker] could not clear ${this.key}:`, err);
+    this.cachedAt = now;
+    const deletes: Promise<void>[] = [];
+    for (let slice = sliceOf(now); slice <= sliceOf(now + this.cooldownMs); slice++) {
+      deletes.push(this.kv.delete(this.sliceKey(slice)));
+    }
+    await this.settle(deletes, 'clear');
+  }
+
+  private sliceKey(slice: number): string {
+    return `${this.key}:${slice}`;
+  }
+
+  private async settle(ops: Promise<void>[], action: string): Promise<void> {
+    const failed = (await Promise.allSettled(ops)).filter((r) => r.status === 'rejected');
+    if (failed.length > 0) {
+      console.warn(`[breaker] could not ${action} ${this.key} (${failed.length} of ${ops.length} keys):`, failed[0].reason);
     }
   }
 
   private async read(): Promise<number> {
     let until = 0;
     try {
-      until = this.deadline(await this.kv.get(this.key));
+      until = this.deadline(await this.kv.get(this.sliceKey(sliceOf(Date.now()))));
     } catch (err) {
       console.warn(`[breaker] could not read ${this.key}, assuming not tripped:`, err);
     }

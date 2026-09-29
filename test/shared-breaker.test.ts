@@ -6,7 +6,7 @@ import {
   SHARED_TRIP_JITTER_MS,
   type FallbackConfig,
 } from '../src/services/fallback';
-import { SharedBreakerState, SHARED_BREAKER_READ_CACHE_MS } from '../src/services/breaker-state';
+import { SharedBreakerState, SHARED_BREAKER_READ_CACHE_MS, SHARED_BREAKER_SLICE_MS } from '../src/services/breaker-state';
 import { MetadataService } from '../src/services/metadata';
 import { UpstreamError } from '../src/services/errors';
 
@@ -28,6 +28,39 @@ function memoryKv() {
   };
 }
 type MemoryKv = ReturnType<typeof memoryKv>;
+
+// The state is keyed by time slice (breaker-state.ts): the key read at `ms`.
+const sliceKey = (ms: number, key = KEY) => `${key}:${Math.floor(ms / SHARED_BREAKER_SLICE_MS)}`;
+
+// The KV writes of one trip until `until`, made at `at`: the key of every slice
+// from `at` to `until`, each kept at least until its slice ends (never below
+// KV's 60 s minimum TTL).
+function tripWrites(until: number, at = T0, key = KEY) {
+  const writes: Array<[string, string, { expirationTtl: number }]> = [];
+  for (let ms = at; Math.floor(ms / SHARED_BREAKER_SLICE_MS) <= Math.floor(until / SHARED_BREAKER_SLICE_MS); ms += SHARED_BREAKER_SLICE_MS) {
+    const sliceEnd = (Math.floor(ms / SHARED_BREAKER_SLICE_MS) + 1) * SHARED_BREAKER_SLICE_MS;
+    writes.push([sliceKey(ms, key), String(until), { expirationTtl: Math.max(60, Math.ceil((sliceEnd - at) / 1000)) }]);
+  }
+  return writes;
+}
+
+// KV as one location sees it: every read, a missing key included, is cached in
+// that location for cacheTtl (60 s by default), and a write made in another
+// location does not refresh the copy (developers.cloudflare.com/kv/concepts/how-kv-works).
+function locationView(kv: MemoryKv, cacheTtlMs = 60_000) {
+  const copies = new Map<string, { value: string | null; readAt: number }>();
+  return {
+    get: vi.fn(async (key: string) => {
+      const copy = copies.get(key);
+      if (copy && Date.now() - copy.readAt < cacheTtlMs) return copy.value;
+      const value = kv.store.get(key) ?? null;
+      copies.set(key, { value, readAt: Date.now() });
+      return value;
+    }),
+    put: kv.put,
+    delete: kv.delete,
+  };
+}
 
 // The promise's value, or HUNG if it has not settled within `ms` (real time).
 const HUNG = 'HUNG';
@@ -91,9 +124,20 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const b = isolate(kv, bV2);
 
     expect((await shareTrip(a)).source).toBe('indexerV1');
-    // The trip is written once, as the time it ends, with KV's minimum TTL.
-    expect(kv.put).toHaveBeenCalledTimes(1);
-    expect(kv.put).toHaveBeenCalledWith(KEY, String(T0 + 60_000), { expirationTtl: 60 });
+    // The trip is written once, as the time it ends, to the key of each 10 s
+    // slice it covers; each key outlives its slice and KV's minimum TTL.
+    const slice = (i: number) => sliceKey(T0 + i * SHARED_BREAKER_SLICE_MS);
+    const until = String(T0 + 60_000);
+    expect(kv.put.mock.calls).toEqual([
+      [slice(0), until, { expirationTtl: 60 }],
+      [slice(1), until, { expirationTtl: 60 }],
+      [slice(2), until, { expirationTtl: 60 }],
+      [slice(3), until, { expirationTtl: 60 }],
+      [slice(4), until, { expirationTtl: 60 }],
+      [slice(5), until, { expirationTtl: 60 }],
+      [slice(6), until, { expirationTtl: 70 }],
+    ]);
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
 
     const res = await b.getDomainMetadata('fox.eth');
     expect(res.source).toBe('indexerV1');
@@ -137,8 +181,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
 
     vi.setSystemTime(T0);
     await a.getDomainMetadata('fox.eth');
-    expect(kv.put).toHaveBeenCalledTimes(1);
-    expect(kv.put).toHaveBeenCalledWith(KEY, String(T0 + 60_000), { expirationTtl: 60 });
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
   });
 
   it.each([
@@ -165,14 +208,13 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
 
     vi.setSystemTime(T0);
     await a.getDomainMetadata('fox.eth'); // the second in a row
-    expect(kv.put).toHaveBeenCalledTimes(1);
-    expect(kv.put).toHaveBeenCalledWith(KEY, String(T0 + 60_000), { expirationTtl: 60 });
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
   });
 
   it('adopting another isolate\'s trip does not count as a failure toward sharing', async () => {
     const kv = memoryKv();
     await shareTrip(isolate(kv, indexer(true)));
-    expect(kv.put).toHaveBeenCalledTimes(1);
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
 
     const bV2 = indexer(true);
     const b = isolate(kv, bV2);
@@ -184,13 +226,12 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     await b.getDomainMetadata('fox.eth');
     await b.getDomainMetadata('fox.eth');
     expect(bV2.getDomain).toHaveBeenCalledTimes(1);
-    expect(kv.put).toHaveBeenCalledTimes(1);
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
 
     // Its next probe, a cooldown later, is its second failure in a row.
     vi.setSystemTime(T0 + 120_000);
     await b.getDomainMetadata('fox.eth');
-    expect(kv.put).toHaveBeenCalledTimes(2);
-    expect(kv.put).toHaveBeenLastCalledWith(KEY, String(T0 + 180_000), { expirationTtl: 60 });
+    expect(kv.put.mock.calls).toEqual([...tripWrites(T0 + 60_000), ...tripWrites(T0 + 180_000, T0 + 120_000)]);
   });
 
   it('an adopted trip ends after a random jitter of up to SHARED_TRIP_JITTER_MS, which is not written to KV', async () => {
@@ -209,13 +250,54 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV2');
 
     // KV holds the trip's real end; the adopting isolate wrote nothing.
-    expect(kv.put).toHaveBeenCalledTimes(1);
-    expect(kv.store.get(KEY)).toBe(String(T0 + 60_000));
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
+    expect(kv.store.get(sliceKey(T0 + 60_000))).toBe(String(T0 + 60_000));
+  });
+
+  it('another location sees a trip within about one slice, though it read the state just before the trip was written', async () => {
+    // KV keeps each location's copy of a read, a missing key included, for up
+    // to a minute. With one key, a location that read it just before the trip
+    // was written would keep missing the trip for about the whole cooldown.
+    const kv = memoryKv();
+    const a = isolate(kv, indexer(true));
+    const bV2 = indexer(false);
+    const b = isolate(locationView(kv) as unknown as MemoryKv, bV2); // another location
+
+    vi.setSystemTime(T0 + 2_000 - 60_000);
+    await a.getDomainMetadata('fox.eth'); // a's first failure: a local trip only
+    vi.setSystemTime(T0 + 1_000);
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV2'); // b reads: nothing tripped
+    vi.setSystemTime(T0 + 2_000);
+    await a.getDomainMetadata('fox.eth'); // a's probe fails too: the trip is shared, until T0 + 62 s
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 62_000, T0 + 2_000));
+
+    // In the slice b already read, its copy still says nothing is tripped.
+    vi.setSystemTime(T0 + 1_000 + SHARED_BREAKER_READ_CACHE_MS);
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV2');
+    expect(bV2.getDomain).toHaveBeenCalledTimes(2);
+
+    // The next slice's key is new to b, so b reads the trip and skips the
+    // indexer for the rest of it, 50 s before the cooldown ends.
+    vi.setSystemTime(T0 + SHARED_BREAKER_SLICE_MS + 1_000);
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    vi.setSystemTime(T0 + 61_999);
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect(bV2.getDomain).toHaveBeenCalledTimes(2);
+
+    vi.setSystemTime(T0 + 62_000);
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV2');
+  });
+
+  it('writes a trip at most one cooldown ahead, whatever end it is given', async () => {
+    const kv = memoryKv();
+    await new SharedBreakerState(kv as unknown as KVNamespace, KEY, 60_000).trip(T0 + 3600_000);
+    expect(kv.put.mock.calls.map(([key]) => key)).toEqual(tripWrites(T0 + 60_000).map(([key]) => key));
   });
 
   it('a far-future value in KV holds the breaker open for one cooldown at most, however often it is re-read', async () => {
     const kv = memoryKv();
-    kv.store.set(KEY, String(T0 + 365 * 24 * 3600_000));
+    // Every slice the reads below fall in holds the far-future value.
+    for (let ms = T0; ms <= T0 + 60_000; ms += SHARED_BREAKER_SLICE_MS) kv.store.set(sliceKey(ms), String(T0 + 365 * 24 * 3600_000));
     const bV2 = indexer(false);
     const b = isolate(kv, bV2);
 
@@ -240,14 +322,13 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const b = isolate(kv, bV2, config);
 
     await shareTrip(a, 10_000);
-    expect(kv.put).toHaveBeenCalledTimes(1);
-    expect(kv.put).toHaveBeenCalledWith(KEY, String(T0 + 10_000), { expirationTtl: 60 });
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 10_000));
 
     await b.getDomainMetadata('fox.eth');
     expect(bV2.getDomain).not.toHaveBeenCalled();
 
     vi.setSystemTime(T0 + 10_001); // the key is still in KV, the trip is over
-    expect(kv.store.has(KEY)).toBe(true);
+    expect(kv.store.has(sliceKey(T0 + 10_001))).toBe(true);
     expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV2');
   });
 
@@ -260,7 +341,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     vi.setSystemTime(T0 + SHARED_BREAKER_READ_CACHE_MS - 1);
     await b.getDomainMetadata('fox.eth');
     expect(kv.get).toHaveBeenCalledTimes(1);
-    expect(kv.get).toHaveBeenCalledWith(KEY);
+    expect(kv.get).toHaveBeenCalledWith(sliceKey(T0));
 
     vi.setSystemTime(T0 + SHARED_BREAKER_READ_CACHE_MS);
     await b.getDomainMetadata('fox.eth');
@@ -295,7 +376,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     await a.getDomainMetadata('fox.eth');
     vi.setSystemTime(T0);
     await Promise.all(Array.from({ length: 5 }, () => a.getDomainMetadata('fox.eth')));
-    expect(kv.put).toHaveBeenCalledTimes(1);
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
   });
 
   it('fails open when the KV read errors: the indexer is still tried, and the failure is cached', async () => {
@@ -318,7 +399,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const a = isolate(kv, aV2);
 
     expect((await shareTrip(a)).source).toBe('indexerV1');
-    expect(kv.put).toHaveBeenCalledTimes(1);
+    expect(kv.put).toHaveBeenCalledTimes(tripWrites(T0 + 60_000).length); // tried, and all failed
     expect((await a.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
     expect(aV2.getDomain).toHaveBeenCalledTimes(2);
   });
@@ -327,16 +408,16 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const kv = memoryKv();
     const a = isolate(kv, indexer(true));
     await shareTrip(a);
-    expect(kv.store.has(KEY)).toBe(true);
+    expect(kv.store.size).toBe(tripWrites(T0 + 60_000).length);
 
     await a.resetHealthStatus();
-    expect(kv.delete).toHaveBeenCalledWith(KEY);
+    expect(kv.store.size).toBe(0); // every slice the trip covered
     const cV2 = indexer(false);
     expect((await isolate(kv, cV2).getDomainMetadata('fox.eth')).source).toBe('indexerV2');
 
     // The count of failures in a row starts again: a's next failure is local only.
     await a.getDomainMetadata('fox.eth');
-    expect(kv.put).toHaveBeenCalledTimes(1);
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
   });
 });
 
@@ -366,8 +447,7 @@ describe('MetadataService — breaker state wiring', () => {
     await expect(a.getMetadata('sepolia', 'registry', 'fox.eth')).rejects.toBeInstanceOf(UpstreamError);
     vi.setSystemTime(T0);
     await expect(a.getMetadata('sepolia', 'registry', 'fox.eth')).rejects.toBeInstanceOf(UpstreamError);
-    expect(kv.put).toHaveBeenCalledTimes(1);
-    expect(kv.put).toHaveBeenCalledWith('breaker:indexerV2:sepolia', String(T0 + 60_000), { expirationTtl: 60 });
+    expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000, T0, 'breaker:indexerV2:sepolia'));
 
     // Another sepolia isolate skips its indexer; a mainnet one does not.
     const b = service(kv, 'sepolia');
