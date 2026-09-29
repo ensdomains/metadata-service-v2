@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
+import { namehash } from 'viem/ens';
 
 // Mock rasterize service to avoid WASM import issues in Vite (same as index.test.ts)
 vi.mock('../src/services/rasterize', () => ({
@@ -14,14 +15,15 @@ import { ImageCacheService } from '../src/services/image-cache';
 import { UpstreamError } from '../src/services/errors';
 import { EXPIRY_VERDICT_TTL_MS, EXPIRY_VERDICT_MAX_ENTRIES } from '../src/services/expiry-verdict-cache';
 import { MIGRATION_STATUS } from '../src/types';
-import { MAX_ENS_NAME_LENGTH } from '../src/utils/ens';
 
 // WEB-1552: checkExpiry gates every metadata, image and rasterize request (and
-// each batch entry) before any other cache, so it must reuse a cached verdict
-// instead of reading the chain on every request, without ever serving a live
-// verdict past the name's expiry instant or caching the fail-open path.
+// each batch entry) before any other cache, so it must reuse a cached live
+// verdict instead of reading the chain on every request, without ever serving a
+// live verdict past the name's expiry instant, caching the fail-open path, or
+// caching a 410 that a renewal could undo in an isolate the webhook never reaches.
 
 const OWNER = '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809';
+const ZERO = '0x0000000000000000000000000000000000000000';
 const DAY_SEC = 86400;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -48,7 +50,12 @@ function makeService(network: 'mainnet' | 'sepolia', blockchain: Chain): Metadat
 function v2Chain(getV2Registration: ReturnType<typeof vi.fn>): Chain {
   return { isV2Configured: vi.fn().mockReturnValue(true), getV2Registration, getExpiry: vi.fn() };
 }
+// Mainnet-style chain: no v2, the v1 registrar is authoritative.
+function v1Chain(getExpiry: ReturnType<typeof vi.fn>): Chain {
+  return { isV2Configured: vi.fn().mockReturnValue(false), getV2Registration: vi.fn(), getExpiry };
+}
 const registeredUntil = (expirySec: number) => ({ status: 2, expiry: BigInt(expirySec), owner: OWNER });
+const notRegistered = { status: 0, expiry: 0n, owner: ZERO };
 
 describe('checkExpiry verdict cache', () => {
   afterEach(() => { vi.useRealTimers(); });
@@ -65,23 +72,40 @@ describe('checkExpiry verdict cache', () => {
 
   it('caches the v1 registrar verdict too (network without v2)', async () => {
     const getExpiry = vi.fn().mockResolvedValue(BigInt(nowSec() + 365 * DAY_SEC));
-    const svc = makeService('mainnet', { isV2Configured: vi.fn().mockReturnValue(false), getV2Registration: vi.fn(), getExpiry });
+    const svc = makeService('mainnet', v1Chain(getExpiry));
 
     await svc.checkExpiry('vitalik.eth');
     await svc.checkExpiry('vitalik.eth');
     expect(getExpiry).toHaveBeenCalledTimes(1);
   });
 
-  it('caches an expired verdict: the 410 repeats without an RPC', async () => {
+  // The webhook evicts only in the isolate that handles it, so a cached 410
+  // would outlive a renewal in the grace period, or a re-registration, in every
+  // other isolate for up to the TTL.
+  it('never caches an expired verdict: a renewal on v2 is seen on the next request, with no webhook', async () => {
     const getV2Registration = vi.fn().mockResolvedValue(registeredUntil(nowSec() - 10 * DAY_SEC));
     const svc = makeService('sepolia', v2Chain(getV2Registration));
 
-    const first = await svc.checkExpiry('gone.eth').catch((e: unknown) => e);
-    const second = await svc.checkExpiry('gone.eth').catch((e: unknown) => e);
-    expect(first).toBeInstanceOf(DomainExpiredError);
-    expect(second).toBeInstanceOf(DomainExpiredError);
-    expect((second as Error).message).toBe((first as Error).message);
-    expect(getV2Registration).toHaveBeenCalledTimes(1);
+    await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
+    await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
+    expect(getV2Registration).toHaveBeenCalledTimes(2);
+
+    getV2Registration.mockResolvedValue(registeredUntil(nowSec() + 365 * DAY_SEC)); // renewed on chain
+    await expect(svc.checkExpiry('gone.eth')).resolves.toBeUndefined();
+    expect(getV2Registration).toHaveBeenCalledTimes(3);
+  });
+
+  it('never caches an expired verdict: a v1 re-registration is seen on the next request, with no webhook', async () => {
+    const getExpiry = vi.fn().mockResolvedValue(BigInt(nowSec() - 120 * DAY_SEC));
+    const svc = makeService('mainnet', v1Chain(getExpiry));
+
+    await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
+    await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
+    expect(getExpiry).toHaveBeenCalledTimes(2);
+
+    getExpiry.mockResolvedValue(BigInt(nowSec() + 365 * DAY_SEC)); // registered again
+    await expect(svc.checkExpiry('gone.eth')).resolves.toBeUndefined();
+    expect(getExpiry).toHaveBeenCalledTimes(3);
   });
 
   it('re-reads the chain once the TTL has passed', async () => {
@@ -121,7 +145,7 @@ describe('checkExpiry verdict cache', () => {
   });
 
   it('never caches the fail-open path (v2 registry unreadable)', async () => {
-    // A cached fail-open would hide a real 410 for the whole TTL.
+    // A fail-open cached as live would hide a real 410 for the whole TTL.
     const getV2Registration = vi.fn()
       .mockRejectedValueOnce(new UpstreamError('all RPCs failed'))
       .mockResolvedValue(registeredUntil(nowSec() - DAY_SEC));
@@ -129,33 +153,49 @@ describe('checkExpiry verdict cache', () => {
 
     await expect(svc.checkExpiry('gone.eth')).resolves.toBeUndefined(); // fails open
     await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
-    await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
-    expect(getV2Registration).toHaveBeenCalledTimes(2); // outage not cached; the verdict is
+    expect(getV2Registration).toHaveBeenCalledTimes(2);
   });
 
   it('never caches the fail-open path (v1 registrar unreadable)', async () => {
     const getExpiry = vi.fn()
       .mockRejectedValueOnce(new UpstreamError('all RPCs failed'))
       .mockResolvedValue(BigInt(nowSec() - DAY_SEC));
-    const svc = makeService('mainnet', { isV2Configured: vi.fn().mockReturnValue(false), getV2Registration: vi.fn(), getExpiry });
+    const svc = makeService('mainnet', v1Chain(getExpiry));
 
     await expect(svc.checkExpiry('gone.eth')).resolves.toBeUndefined(); // fails open
-    await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
     await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
     expect(getExpiry).toHaveBeenCalledTimes(2);
   });
 
-  it('evictExpiryVerdict drops the cached verdict (any casing)', async () => {
-    const getV2Registration = vi.fn().mockResolvedValue(registeredUntil(nowSec() - DAY_SEC));
-    const svc = makeService('sepolia', v2Chain(getV2Registration));
+  it.each([
+    ['the name, in any casing', { name: 'Unregistered.ETH' }],
+    ['its namehash, in any casing', { namehash: `0x${namehash('unregistered.eth').slice(2).toUpperCase()}` }],
+    ['both', { name: 'unregistered.eth', namehash: namehash('unregistered.eth') }],
+  ])('evictExpiryVerdict drops a cached live verdict given %s', async (_, identifiers) => {
+    const getV2Registration = vi.fn().mockResolvedValue(registeredUntil(nowSec() + 365 * DAY_SEC));
+    const chain = v2Chain(getV2Registration);
+    chain.getExpiry.mockResolvedValue(BigInt(nowSec() - DAY_SEC)); // its v1 registration has lapsed
+    const svc = makeService('sepolia', chain);
 
-    await expect(svc.checkExpiry('renewed.eth')).rejects.toBeInstanceOf(DomainExpiredError);
-    getV2Registration.mockResolvedValue(registeredUntil(nowSec() + 365 * DAY_SEC)); // renewed on chain
-    await expect(svc.checkExpiry('renewed.eth')).rejects.toBeInstanceOf(DomainExpiredError); // cached
+    await expect(svc.checkExpiry('unregistered.eth')).resolves.toBeUndefined();
+    getV2Registration.mockResolvedValue(notRegistered); // unregistered on v2 before its expiry
+    await expect(svc.checkExpiry('unregistered.eth')).resolves.toBeUndefined(); // cached
 
-    svc.evictExpiryVerdict('Renewed.ETH');
-    await expect(svc.checkExpiry('renewed.eth')).resolves.toBeUndefined();
+    svc.evictExpiryVerdict(identifiers);
+    await expect(svc.checkExpiry('unregistered.eth')).rejects.toBeInstanceOf(DomainExpiredError);
     expect(getV2Registration).toHaveBeenCalledTimes(2);
+  });
+
+  it('evictExpiryVerdict ignores a namehash that is not 32 bytes of hex', async () => {
+    const getV2Registration = vi.fn().mockResolvedValue(registeredUntil(nowSec() + 365 * DAY_SEC));
+    const svc = makeService('sepolia', v2Chain(getV2Registration));
+    await svc.checkExpiry('fox.eth');
+
+    for (const junk of [42, 'fox.eth', '0x1234', `${namehash('fox.eth')}00`]) {
+      expect(() => svc.evictExpiryVerdict({ namehash: junk })).not.toThrow();
+    }
+    await svc.checkExpiry('fox.eth');
+    expect(getV2Registration).toHaveBeenCalledTimes(1);
   });
 
   it(`keeps at most EXPIRY_VERDICT_MAX_ENTRIES (${EXPIRY_VERDICT_MAX_ENTRIES}) verdicts, dropping the least recently used`, async () => {
@@ -180,33 +220,39 @@ describe('checkExpiry verdict cache', () => {
     expect(getV2Registration).toHaveBeenCalledTimes(EXPIRY_VERDICT_MAX_ENTRIES + 2);
   });
 
-  it(`never stores a key longer than MAX_ENS_NAME_LENGTH (${MAX_ENS_NAME_LENGTH}): the entry bound is also a memory bound`, async () => {
+  it('keys each verdict by namehash: the entry bound is also a memory bound, however long the names', async () => {
     // Not every route caps name length before checkExpiry (batch names, the
-    // registry/namewrapper param), so without this a batch of 100 KB names made
-    // up by the caller would each stay in the isolate for the whole TTL.
-    const getExpiry = vi.fn().mockResolvedValue(BigInt(nowSec() - DAY_SEC));
-    const svc = makeService('mainnet', { isV2Configured: vi.fn().mockReturnValue(false), getV2Registration: vi.fn(), getExpiry });
-    const verdicts = (svc as unknown as { expiryVerdicts: { size: number } }).expiryVerdicts;
-    const ofLength = (n: number) => `${'a'.repeat(n - 4)}.eth`;
+    // registry/namewrapper param), so a name-keyed cache would keep each 100 KB
+    // name a caller made up for the whole TTL.
+    const getExpiry = vi.fn().mockResolvedValue(0n); // made up: never registered, so live
+    const svc = makeService('mainnet', v1Chain(getExpiry));
+    const entries = (svc as unknown as { expiryVerdicts: { entries: Map<string, number> } }).expiryVerdicts.entries;
+    const long = `${'a'.repeat(100_000)}.eth`;
 
-    for (let i = 0; i < 2; i++) { // the longest valid name: cached
-      await expect(svc.checkExpiry(ofLength(MAX_ENS_NAME_LENGTH))).rejects.toBeInstanceOf(DomainExpiredError);
-    }
+    await svc.checkExpiry(long);
+    await svc.checkExpiry(long);
     expect(getExpiry).toHaveBeenCalledTimes(1);
-    expect(verdicts.size).toBe(1);
+    expect([...entries.keys()]).toEqual([namehash(long)]);
+    expect(namehash(long)).toMatch(/^0x[0-9a-f]{64}$/);
+  });
 
-    for (const name of [ofLength(MAX_ENS_NAME_LENGTH + 1), ofLength(100_000)]) {
-      for (let i = 0; i < 2; i++) { // still gated as before (410), just not cached
-        await expect(svc.checkExpiry(name)).rejects.toBeInstanceOf(DomainExpiredError);
-      }
-    }
-    expect(getExpiry).toHaveBeenCalledTimes(5); // every oversized call reads the chain
-    expect(verdicts.size).toBe(1); // and none of them was kept
+  it('still gates a name that ENSIP-15 normalization rejects, instead of throwing on its cache key', async () => {
+    // ens_normalize throws on "a_b" (an underscore is allowed only at the start
+    // of a label); the key must hash the label the gate reads, as given.
+    const getExpiry = vi.fn().mockResolvedValue(BigInt(nowSec() - DAY_SEC));
+    const svc = makeService('mainnet', v1Chain(getExpiry));
+
+    await expect(svc.checkExpiry('a_b.eth')).rejects.toBeInstanceOf(DomainExpiredError);
+    getExpiry.mockResolvedValue(BigInt(nowSec() + 365 * DAY_SEC));
+    await expect(svc.checkExpiry('a_b.eth')).resolves.toBeUndefined();
+    await expect(svc.checkExpiry('a_b.eth')).resolves.toBeUndefined();
+    expect(getExpiry).toHaveBeenCalledTimes(2);
   });
 });
 
 // ---------------------------------------------------------------------------
-// POST /webhook evicts the verdict in the isolate that handles it
+// Through the app: the gate sees a renewal on the next request, and POST
+// /webhook evicts a live verdict in the isolate that handles it
 // (app-level, through the Hono app and the real WebhookService)
 // ---------------------------------------------------------------------------
 
@@ -260,18 +306,33 @@ async function request(path: string, init?: RequestInit) {
   return res;
 }
 
-describe('POST /webhook evicts the cached expiry verdict', () => {
-  let expirySec = nowSec() - 10 * DAY_SEC; // lapsed
+function webhook(identifiers: { name: string | null; namehash: string | null }) {
+  return request('/webhook', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_type: 'NameUnregistered', protocol: 'v2', block_number: 1, tx_hash: '0x01', log_index: 0,
+      contract_address: '0x0000000000000000000000000000000000000001',
+      ...identifiers, data: '{}', timestamp: nowSec(),
+    }),
+  });
+}
+
+describe('the expiry gate through the app', () => {
+  // v2 registrations by name; a name missing here is not registered on v2.
+  // Every v1 registration has lapsed.
+  const registrations = new Map<string, ReturnType<typeof registeredUntil>>();
   const spies: Array<{ mockRestore(): void }> = [];
 
   beforeAll(() => {
-    // Only the chain read under test and the leaf rendering are stubbed; the
+    // Only the chain reads under test and the leaf rendering are stubbed; the
     // routes, checkExpiry, the verdict cache and the webhook handler are real.
     spies.push(
       vi.spyOn(BlockchainService.prototype, 'isV2Configured').mockReturnValue(true),
       vi.spyOn(BlockchainService.prototype, 'getV2Registration').mockImplementation(
-        async () => registeredUntil(expirySec),
+        async (_network, name) => registrations.get(name) ?? notRegistered,
       ),
+      vi.spyOn(BlockchainService.prototype, 'getExpiry').mockImplementation(async () => BigInt(nowSec() - DAY_SEC)),
       vi.spyOn(MetadataService.prototype, 'resolveStatusForImage').mockResolvedValue(MIGRATION_STATUS.MIGRATED),
       vi.spyOn(ImageCacheService.prototype, 'getImage').mockImplementation(async function (this: ImageCacheService) {
         return {
@@ -285,30 +346,27 @@ describe('POST /webhook evicts the cached expiry verdict', () => {
   });
   afterAll(() => { spies.forEach((s) => s.mockRestore()); });
 
-  it('a renewal reaches the gate right after its webhook, not only after the TTL', async () => {
-    const getV2Registration = vi.mocked(BlockchainService.prototype.getV2Registration);
-
+  it('a renewal reaches the gate on the next request, with no webhook to this isolate', async () => {
+    registrations.set('renewed.eth', registeredUntil(nowSec() - 10 * DAY_SEC)); // lapsed
     expect((await request('/sepolia/registry/renewed.eth/image')).status).toBe(410);
-    expect(getV2Registration).toHaveBeenCalledTimes(1);
 
-    expirySec = nowSec() + 365 * DAY_SEC; // renewed on chain
-    expect((await request('/sepolia/registry/renewed.eth/image')).status).toBe(410); // cached verdict
-    expect(getV2Registration).toHaveBeenCalledTimes(1);
-
-    // The webhook is handled on the mainnet services; the verdict lives in the
-    // sepolia MetadataService of the same isolate.
-    const hook = await request('/webhook', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event_type: 'NameRenewed', protocol: 'v2', block_number: 1, tx_hash: '0x01', log_index: 0,
-        contract_address: '0x0000000000000000000000000000000000000001',
-        name: 'Renewed.eth', namehash: null, data: '{}', timestamp: nowSec(),
-      }),
-    });
-    expect(hook.status).toBe(200);
-
+    registrations.set('renewed.eth', registeredUntil(nowSec() + 365 * DAY_SEC)); // renewed on chain
     expect((await request('/sepolia/registry/renewed.eth/image')).status).toBe(200);
-    expect(getV2Registration).toHaveBeenCalledTimes(2);
+  });
+
+  // The webhook is handled on the mainnet services; the verdict lives in the
+  // sepolia MetadataService of the same isolate.
+  it.each([
+    ['the name', 'dropped-by-name.eth', (name: string) => ({ name: name.toUpperCase(), namehash: null })],
+    ['only the namehash', 'dropped-by-namehash.eth', (name: string) => ({ name: null, namehash: namehash(name) })],
+  ])('an unregister reaches the gate right after a webhook that carries %s', async (_, name, identifiers) => {
+    registrations.set(name, registeredUntil(nowSec() + 365 * DAY_SEC));
+    expect((await request(`/sepolia/registry/${name}/image`)).status).toBe(200);
+
+    registrations.delete(name); // unregistered on v2 before its expiry
+    expect((await request(`/sepolia/registry/${name}/image`)).status).toBe(200); // cached live verdict
+
+    expect((await webhook(identifiers(name))).status).toBe(200);
+    expect((await request(`/sepolia/registry/${name}/image`)).status).toBe(410);
   });
 });

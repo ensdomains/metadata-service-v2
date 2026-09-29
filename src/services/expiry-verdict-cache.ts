@@ -1,76 +1,84 @@
-// In-isolate cache of MetadataService.checkExpiry verdicts (WEB-1552).
+// In-isolate cache of MetadataService.checkExpiry's live verdicts (WEB-1552).
 // checkExpiry gates every metadata, image and rasterize request (and each batch
 // entry) before any other cache, so without this every L0 edge miss paid its
 // on-chain reads (v2 getState, v1 registrar nameExpires) even when the metadata
 // itself was a warm KV hit.
 //
-// A verdict is "live" (with the expiry instant when the chain reported one) or
-// "expired" (with the instant it expired). An entry is trusted for at most
-// EXPIRY_VERDICT_TTL_MS, and a live entry never past its expiry instant: a name
-// that lapses while cached is re-read at that moment, not served for the rest
-// of the TTL. Only verdicts read from the chain are stored; checkExpiry's
-// fail-open path (chain unreadable) never reaches the cache.
+// Only a live verdict read from the chain is stored. It is trusted for at most
+// EXPIRY_VERDICT_TTL_MS, and never past the name's expiry instant when the chain
+// reported one: a name that lapses while cached is re-read at that moment, not
+// served for the rest of the TTL. Renewals and registrations keep a live verdict
+// live; only a transaction that ends a registration before its expiry (a v2
+// unregister) makes it wrong early. Nothing else is stored:
+// - An expired verdict (410) can be undone at any moment, by a renewal in the
+//   grace period or a re-registration, and the webhook reaches only the isolate
+//   that handles it. A cached 410 would outlive the renewal in every other
+//   isolate, so an expired name reads the chain on every request, as before.
+// - checkExpiry's fail-open path (chain unreadable) never reaches the cache.
 //
 // Scope: getServices keeps one MetadataService per network per isolate, each
-// with its own cache, so a verdict is keyed by (network, canonical name). The
-// webhook evicts a changed name only in the isolate that handles it; any other
-// isolate picks up a renewal, re-registration or burn within the TTL, the same
-// bound the per-colo L0 edge cache has (EDGE_CACHE_MAX_AGE_SECS in index.ts).
+// with its own cache, so a verdict is per (network, name). Entries are keyed by
+// namehash, so the webhook can evict one from an event that carries the name or
+// only its namehash; it does so only in the isolate that handles it, and any
+// other isolate re-reads within the TTL, the same bound the per-colo L0 edge
+// cache has (EDGE_CACHE_MAX_AGE_SECS in index.ts).
 //
-// Memory: keys are request-supplied names, and not every route caps their
-// length before checkExpiry, so a key longer than MAX_ENS_NAME_LENGTH is never
-// stored (that name reads the chain on every request, as before this cache; the
-// rest of the pipeline rejects it anyway). The cache therefore holds at most
-// EXPIRY_VERDICT_MAX_ENTRIES keys of at most 255 UTF-16 units each, about 7 MB
-// per network in the worst case, however long the names callers send.
+// Memory: a key is a namehash however long the name the caller sent, so the
+// cache holds at most EXPIRY_VERDICT_MAX_ENTRIES entries of fixed size.
 
-import { MAX_ENS_NAME_LENGTH } from "../utils/ens";
+import { namehash } from "viem/ens";
 
 /** Longest a verdict is reused without re-reading the chain. */
 export const EXPIRY_VERDICT_TTL_MS = 5 * 60 * 1000;
 /** Most verdicts kept per network; the least recently used is dropped beyond it. */
 export const EXPIRY_VERDICT_MAX_ENTRIES = 10_000;
 
-export type ExpiryVerdict =
-  | { expired: false; expiryMs: number | null } // null: the chain reported no expiry
-  | { expired: true; expiryMs: number };
+/**
+ * The cache key of a canonical name: its namehash, built from the same viem
+ * labelhash checkExpiry reads the chain with. (ensjs's namehash, re-exported
+ * by utils/ens, normalizes each label first, which throws on names the gate
+ * still has to check and can hash a different label than the one read.)
+ */
+export function expiryVerdictKey(canonicalName: string): string {
+  return namehash(canonicalName);
+}
 
 export class ExpiryVerdictCache {
-  // Map iteration follows insertion order, so re-inserting on every hit keeps
-  // the least recently used entry first.
-  private entries = new Map<string, { verdict: ExpiryVerdict; validUntil: number }>();
+  // namehash → the instant the live verdict stops being trusted. Map iteration
+  // follows insertion order, so re-inserting on every hit keeps the least
+  // recently used entry first.
+  private entries = new Map<string, number>();
 
   constructor(
     private readonly ttlMs = EXPIRY_VERDICT_TTL_MS,
     private readonly maxEntries = EXPIRY_VERDICT_MAX_ENTRIES,
   ) {}
 
-  get(name: string): ExpiryVerdict | undefined {
-    const entry = this.entries.get(name);
-    if (!entry) return undefined;
-    this.entries.delete(name);
-    if (Date.now() >= entry.validUntil) return undefined;
-    this.entries.set(name, entry);
-    return entry.verdict;
+  /** Whether a live verdict for `key` is cached and still trusted. */
+  isLive(key: string): boolean {
+    const validUntil = this.entries.get(key);
+    if (validUntil === undefined) return false;
+    this.entries.delete(key);
+    if (Date.now() >= validUntil) return false;
+    this.entries.set(key, validUntil);
+    return true;
   }
 
-  set(name: string, verdict: ExpiryVerdict): void {
-    // The entry bound only bounds memory if key size is bounded too (see above).
-    if (name.length > MAX_ENS_NAME_LENGTH) return;
+  /** Stores a live verdict read from the chain; `expiryMs` is the name's
+   *  expiry instant, or null when the chain reported none. */
+  setLive(key: string, expiryMs: number | null): void {
     const now = Date.now();
-    const lifetime = !verdict.expired && verdict.expiryMs !== null
-      ? Math.min(this.ttlMs, verdict.expiryMs - now)
-      : this.ttlMs;
-    this.entries.delete(name);
+    const lifetime = expiryMs === null ? this.ttlMs : Math.min(this.ttlMs, expiryMs - now);
+    this.entries.delete(key);
     if (lifetime <= 0) return;
-    this.entries.set(name, { verdict, validUntil: now + lifetime });
+    this.entries.set(key, now + lifetime);
     if (this.entries.size > this.maxEntries) {
       this.entries.delete(this.entries.keys().next().value as string);
     }
   }
 
-  delete(name: string): void {
-    this.entries.delete(name);
+  delete(key: string): void {
+    this.entries.delete(key);
   }
 
   get size(): number {

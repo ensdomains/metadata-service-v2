@@ -910,18 +910,20 @@ const handleWebhook = async (c: any) => {
       c.executionCtx.waitUntil((async () => {
         try {
           const payload = await bodyClone.json() as Partial<EnsNameEvent>;
+
+          // Drop this isolate's cached expiry verdicts for the name on every
+          // network, for any event type and whether the event carries the name
+          // or only its namehash: an unregister ends a live verdict early. Only
+          // services built in this isolate hold any; other isolates re-read
+          // within EXPIRY_VERDICT_TTL_MS.
+          for (const net of SUPPORTED_NETWORKS) {
+            _fullServices.get(net)?.metadataService.evictExpiryVerdict({ name: payload?.name, namehash: payload?.namehash });
+          }
+
           // Canonicalize like WebhookService does for its purges: the D1 name
           // column and warmed cache keys must never carry a raw-case variant.
           const name = payload?.name ? canonicalizeName(payload.name) : undefined;
           if (!name) return;
-
-          // Drop this isolate's cached expiry verdicts for the name on every
-          // network, for any event type: a renewal, re-registration or burn
-          // changes the verdict. Only services built in this isolate hold any;
-          // other isolates re-read within EXPIRY_VERDICT_TTL_MS.
-          for (const net of SUPPORTED_NETWORKS) {
-            _fullServices.get(net)?.metadataService.evictExpiryVerdict(name);
-          }
 
           // The event carries ENS protocol (v1/v2), not chain — and the chain
           // cannot be derived from the payload (v1 contracts share addresses
