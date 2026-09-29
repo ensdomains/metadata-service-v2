@@ -8,10 +8,11 @@ import { timeLeftForAttempt } from "./request-budget";
 // lands, isolates pick it up within this window without a redeploy here).
 const ID_FILTER_RECHECK_MS = 10 * 60 * 1000;
 
-// How long a registry(address) answer is reused (see getRegistry). A registry
-// stays one once deployed, so a hit is kept longer; a miss is kept briefly, so
-// a registry deployed since is recognized soon after the indexer sees it.
-export const REGISTRY_KNOWN_TTL_MS = 60 * 60 * 1000;
+// How long a registry(address) answer is reused (see getRegistry). A hit also
+// carries the registry's name, which changes when it is moved under another
+// parent; a miss is kept as briefly, so a registry deployed since is
+// recognized soon after the indexer sees it.
+export const REGISTRY_KNOWN_TTL_MS = 10 * 60 * 1000;
 export const REGISTRY_UNKNOWN_TTL_MS = 5 * 60 * 1000;
 /** Most addresses remembered per indexer; the least recently used is dropped beyond it. */
 export const REGISTRY_CACHE_MAX_ENTRIES = 10_000;
@@ -21,8 +22,9 @@ export const REGISTRY_CACHE_MAX_ENTRIES = 10_000;
  *  `extensions.code: "VALIDATION_ERROR"` with a message that does NOT name the
  *  offending field ("Unknown field in input object: …" — verified live), so
  *  match the code plus the standard unknown-field/argument message family. The
- *  only queries routed through this check are the fixed id-filter lookups, so a
- *  validation error can only mean the filter is missing from the schema. */
+ *  only queries routed through this check are the fixed id-filter lookups and
+ *  registry(address), so a validation error can only mean the filter or that
+ *  query is missing from the schema. */
 function isSchemaValidationError(error: UpstreamError): boolean {
   const cause = (error as { cause?: unknown }).cause as
     | { response?: { errors?: Array<{ message?: string; extensions?: { code?: string } }> } }
@@ -208,10 +210,11 @@ const V2_GET_DOMAINS = `
 // every registry that has that label (test.eth's id also matches test.<x>.eth
 // in each subregistry with a `test` label). The default filter leaves out
 // unreachable domains (in a registry no longer linked into the tree), which
-// have no name to serve.
-const v2GetDomainsByIdFilter = (filterField: 'tokenId' | 'canonicalId') => `
-  query GetDomainsBy_${filterField}($id: String!, $registry: String!) {
-    domains(first: 1, where: { registry: $registry, ${filterField}: $id }) {
+// have no name to serve. The `name` variant picks one row by name among a
+// registry's alias rows (see findCanonicalDomain).
+const v2GetDomainsByIdFilter = (filterField: 'tokenId' | 'canonicalId', byName = false) => `
+  query GetDomainsBy_${filterField}${byName ? '_name' : ''}($id: String!, $registry: String!${byName ? ', $name: String!' : ''}) {
+    domains(first: 1, where: { registry: $registry, ${filterField}: $id${byName ? ', name: $name' : ''} }) {
       id
       name
       labelName
@@ -236,8 +239,14 @@ const v2GetDomainsByIdFilter = (filterField: 'tokenId' | 'canonicalId') => `
   }
 `;
 
-const V2_GET_DOMAINS_BY_TOKEN_ID = v2GetDomainsByIdFilter('tokenId');
-const V2_GET_DOMAINS_BY_CANONICAL_ID = v2GetDomainsByIdFilter('canonicalId');
+const V2_GET_DOMAINS_BY_ID = {
+  tokenId: v2GetDomainsByIdFilter('tokenId'),
+  canonicalId: v2GetDomainsByIdFilter('canonicalId'),
+};
+const V2_GET_DOMAINS_BY_ID_AND_NAME = {
+  tokenId: v2GetDomainsByIdFilter('tokenId', true),
+  canonicalId: v2GetDomainsByIdFilter('canonicalId', true),
+};
 
 // A v2 registry by contract address: null when the address is not one the
 // indexer knows (a random contract, or a registry it has not seen yet).
@@ -522,38 +531,67 @@ export class IndexerService {
   }
 
   // Reverse-resolve a native v2 registry tokenId (versioned labelhash) to the
-  // domain `registry` holds under it, via the zigens tokenId/canonicalId
-  // filters. v2 dialect only — the v1 subgraph has no such tokens. Returns a
-  // clean null when the deployed schema doesn't have the filters yet (they
-  // ship separately, on the indexer side), so callers keep their pre-filter
+  // domain `registry` holds under it, by the registry's canonical name (see
+  // findCanonicalDomain), via the zigens tokenId/canonicalId filters. v2
+  // dialect only — the v1 subgraph has no such tokens. Returns a clean null
+  // when the deployed schema doesn't have the filters yet (they ship
+  // separately, on the indexer side), so callers keep their pre-filter
   // behavior until the server deploy lands.
   async getDomainByTokenId(
     tokenId: `0x${string}`,
-    registry: string,
+    registry: IndexerRegistry,
   ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
     if (this.apiVersion !== 'v2') return { domain: null, usedFallback: false };
     const id = tokenId.toLowerCase();
-    const registryAddress = registry.toLowerCase();
+    const registryAddress = registry.address.toLowerCase();
 
     // Exact current-version id first (the common marketplace case) …
-    const byToken = await this.queryDomainsByIdFilter(
-      'tokenId',
-      { id, registry: registryAddress },
-      V2_GET_DOMAINS_BY_TOKEN_ID,
-    );
+    const byToken = await this.findCanonicalDomain('tokenId', id, registryAddress, registry.name);
     if (byToken.domain) return byToken;
 
     // … then the version-bits-zeroed form, which also matches ids from before a
     // re-registration bumped the token version.
-    const byCanonical = await this.queryDomainsByIdFilter(
+    const byCanonical = await this.findCanonicalDomain(
       'canonicalId',
-      { id: canonicalTokenId(id), registry: registryAddress },
-      V2_GET_DOMAINS_BY_CANONICAL_ID,
+      canonicalTokenId(id),
+      registryAddress,
+      registry.name,
     );
     return {
       domain: byCanonical.domain,
       usedFallback: byToken.usedFallback || byCanonical.usedFallback,
     };
+  }
+
+  /**
+   * The domain `registry` holds under `id`, as the name the registry itself
+   * hangs under. Several names can point their subregistry at one registry
+   * (aliases), and the indexer then has a row per name for each of its tokens,
+   * all with the same registry and id, in namehash order: the first can be a
+   * name someone else owns (on staging, a token of support.vendor.eth's
+   * registry came first as rin.support.shopa.eth). The token's name is
+   * `<label>.<registry name>` (the bare label in the root registry). When the
+   * first row is not that name, one more lookup asks for it; no such row means
+   * the token has no canonical name, a miss. So is a row without a label name.
+   */
+  private async findCanonicalDomain(
+    field: 'tokenId' | 'canonicalId',
+    id: string,
+    registry: string,
+    registryName: string,
+  ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
+    const first = await this.queryDomainsByIdFilter(field, { id, registry }, V2_GET_DOMAINS_BY_ID[field]);
+    const row = first.domain;
+    if (!row) return first;
+    if (!row.labelName) return { domain: null, usedFallback: first.usedFallback };
+    const name = registryName ? `${row.labelName}.${registryName}` : row.labelName;
+    if (row.name === name) return first;
+    const canonical = await this.queryDomainsByIdFilter(
+      field,
+      { id, registry, name },
+      V2_GET_DOMAINS_BY_ID_AND_NAME[field],
+    );
+    return { domain: canonical.domain, usedFallback: first.usedFallback || canonical.usedFallback };
   }
 
   /** One `domains(where: { registry: $registry, <field>: $id })` lookup. A
@@ -567,7 +605,7 @@ export class IndexerService {
 
   private async queryDomainsByIdFilter(
     field: 'tokenId' | 'canonicalId',
-    variables: { id: string; registry: string },
+    variables: { id: string; registry: string; name?: string },
     query: string,
   ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
     if (Date.now() < this.idFilterUnsupportedUntil[field]) {

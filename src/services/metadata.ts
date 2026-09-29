@@ -468,6 +468,9 @@ export class MetadataService {
     // Set for the ETHRegistry, whose namehash-form ids may name only its own
     // names (see below).
     let ethRegistryToken = false;
+    // An outage of the ETHRegistry token lookup, which only it can answer for
+    // a native id: kept for when nothing else names the token.
+    let tokenLookupOutage: UpstreamError | null = null;
 
     if (addr === contracts.registrar.toLowerCase()) {
       // BaseRegistrar: tokenId is labelhash → convert to .eth namehash
@@ -487,12 +490,14 @@ export class MetadataService {
       registryType = 'registry';
       const hexId = tokenHex;
       try {
-        const { domain } = await this.indexerV2.getDomainByTokenId(hexId, addr);
+        const { domain } = await this.indexerV2.getDomainByTokenId(hexId, { address: addr, name: 'eth' });
         if (domain?.name) return { name: domain.name, registryType };
       } catch (error) {
         if (!(error instanceof UpstreamError)) throw error;
-        // Outage: the namehash path below hits the same endpoint and owns the
-        // outage semantics (surface 503, not a cacheable 404).
+        // Outage. The namehash path below can still name a namehash-form id,
+        // but never a native one (domain(id:) resolves only namehashes), so a
+        // miss there is not an answer: it rethrows this (503, not a 404).
+        tokenLookupOutage = error;
       }
       // Fall through for namehash-form ids, which some consumers pass and
       // zigens' domain(id:) resolves directly.
@@ -534,6 +539,7 @@ export class MetadataService {
       // A v1 miss proves nothing when the v2 index was never consulted (the
       // name may be v2-native) — surface the outage, not a cacheable 404.
       if (v2Outage) throw v2Outage;
+      if (tokenLookupOutage) throw tokenLookupOutage;
       throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
     }
 
@@ -548,6 +554,8 @@ export class MetadataService {
    * lowercase address.
    * - An address the indexer knows no registry at is a 404, as any other
    *   unknown contract (getRegistry caches the answer per isolate).
+   * - A token is served under the registry's canonical name, never an alias
+   *   (see IndexerService.getDomainByTokenId).
    * - A token the registry does not hold, or whose registry is no longer
    *   linked into the tree (unreachable, so it has no name to serve), is a 404.
    * - The root registry's tokens are top-level names (eth, DNS TLDs), which
@@ -564,7 +572,7 @@ export class MetadataService {
     if (!registry) {
       throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }
-    const { domain } = await this.indexerV2.getDomainByTokenId(tokenHex, addr);
+    const { domain } = await this.indexerV2.getDomainByTokenId(tokenHex, { address: addr, name: registry.name });
     if (!domain?.name) {
       throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
     }

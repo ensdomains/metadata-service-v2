@@ -10,13 +10,15 @@ let nextResponse: unknown = { domain: null };
 // When set, every request rejects with this (ClientError-shaped for GraphQL
 // errors) instead of resolving — used to simulate schema-validation failures.
 let nextError: unknown = null;
+// Responses for the next requests, in order, before nextResponse applies.
+const queued: unknown[] = [];
 
 vi.mock('graphql-request', () => ({
   GraphQLClient: vi.fn().mockImplementation(() => ({
     request: vi.fn(async (opts: { document: string; variables: Record<string, unknown> }) => {
       requests.push({ document: opts.document, variables: opts.variables });
       if (nextError) throw nextError;
-      return nextResponse;
+      return queued.length > 0 ? queued.shift() : nextResponse;
     }),
   })),
 }));
@@ -37,6 +39,7 @@ function makeV2() {
 describe('IndexerService — v2 (zigens) dialect', () => {
   beforeEach(() => {
     requests.length = 0;
+    queued.length = 0;
     nextResponse = { domain: null };
     nextError = null;
   });
@@ -85,20 +88,20 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
   describe('getDomainByTokenId (native v2 tokenId reverse lookup)', () => {
     // The sepolia ETHRegistry; both filters are scoped to the registry asked about.
-    const REGISTRY = '0x657ea849311d3d5823348dded7c2aaafb3ede09e';
+    const REGISTRY = { address: '0x657ea849311d3d5823348dded7c2aaafb3ede09e', name: 'eth' };
     // fox.eth labelhash with low 32 bits = token version 1 / canonical form
     const VERSIONED = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001' as const;
     const CANONICAL = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000000';
 
     it('queries domains(where: { tokenId }) with the lowercased exact id first', async () => {
-      nextResponse = { domains: [{ id: 'fox.eth', name: 'fox.eth' }] };
+      nextResponse = { domains: [{ id: 'fox.eth', name: 'fox.eth', labelName: 'fox' }] };
       const mixedCase = ('0x' + VERSIONED.slice(2).toUpperCase()) as `0x${string}`;
       const { domain } = await makeV2().getDomainByTokenId(mixedCase, REGISTRY);
 
       expect(domain?.name).toBe('fox.eth');
       expect(requests).toHaveLength(1);
       expect(requests[0].document).toContain('tokenId: $id');
-      expect(requests[0].variables).toEqual({ id: VERSIONED, registry: REGISTRY });
+      expect(requests[0].variables).toEqual({ id: VERSIONED, registry: REGISTRY.address });
     });
 
     it('falls back to the canonicalId filter (version bits zeroed) on an exact-id miss', async () => {
@@ -107,7 +110,7 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
       expect(requests).toHaveLength(2);
       expect(requests[1].document).toContain('canonicalId: $id');
-      expect(requests[1].variables).toEqual({ id: CANONICAL, registry: REGISTRY });
+      expect(requests[1].variables).toEqual({ id: CANONICAL, registry: REGISTRY.address });
     });
 
     it('treats a schema-rejects-the-filter error as a clean miss and stops probing for a while', async () => {
@@ -159,13 +162,58 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
     it('scopes both filters to the registry, lowercased (the same id is in every registry with the label)', async () => {
       nextResponse = { domains: [] };
-      await makeV2().getDomainByTokenId(VERSIONED, '0x657EA849311d3D5823348ddEd7C2AaAFb3EDE09E');
+      await makeV2().getDomainByTokenId(VERSIONED, { address: '0x657EA849311d3D5823348ddEd7C2AaAFb3EDE09E', name: 'eth' });
 
       expect(requests).toHaveLength(2);
       for (const request of requests) {
         expect(request.document).toContain('where: { registry: $registry,');
-        expect(request.variables.registry).toBe(REGISTRY);
+        expect(request.variables.registry).toBe(REGISTRY.address);
       }
+    });
+
+    describe('a registry several names point at (aliases)', () => {
+      const SHARED = { address: '0xb40c4f85b9a7e4b57669c979c16132898a13bedd', name: 'support.vendor.eth' };
+      const alias = { id: 'a', name: 'rin.support.shopa.eth', labelName: 'rin' };
+      const canonical = { id: 'b', name: 'rin.support.vendor.eth', labelName: 'rin' };
+
+      it("serves the registry's own name when an alias row comes first", async () => {
+        queued.push({ domains: [alias] }, { domains: [canonical] });
+        const { domain } = await makeV2().getDomainByTokenId(VERSIONED, SHARED);
+
+        expect(domain?.name).toBe('rin.support.vendor.eth');
+        expect(requests).toHaveLength(2);
+        expect(requests[1].document).toContain('name: $name');
+        expect(requests[1].variables).toEqual({ id: VERSIONED, registry: SHARED.address, name: 'rin.support.vendor.eth' });
+      });
+
+      it('asks once when the first row already carries that name', async () => {
+        nextResponse = { domains: [canonical] };
+        await makeV2().getDomainByTokenId(VERSIONED, SHARED);
+        expect(requests).toHaveLength(1);
+      });
+
+      it('is a miss when no row carries that name', async () => {
+        queued.push({ domains: [alias] }, { domains: [] }, { domains: [alias] }, { domains: [] });
+        const { domain } = await makeV2().getDomainByTokenId(VERSIONED, SHARED);
+
+        expect(domain).toBeNull();
+        expect(requests).toHaveLength(4); // per filter: the first row, then the name
+      });
+    });
+
+    it("takes the bare label as the root registry's names", async () => {
+      nextResponse = { domains: [{ id: 'eth', name: 'eth', labelName: 'eth' }] };
+      const root = { address: '0x9703dbd26dab89504490994138cf2c575251a9ce', name: '' };
+      const { domain } = await makeV2().getDomainByTokenId(VERSIONED, root);
+
+      expect(domain?.name).toBe('eth');
+      expect(requests).toHaveLength(1);
+    });
+
+    it('is a miss for a row without a label name (nothing to check its name against)', async () => {
+      nextResponse = { domains: [{ id: 'x', name: 'x.eth', labelName: null }] };
+      const { domain } = await makeV2().getDomainByTokenId(VERSIONED, REGISTRY);
+      expect(domain).toBeNull();
     });
 
     it('is a no-op on the v1 dialect (the subgraph has no v2 tokens)', async () => {

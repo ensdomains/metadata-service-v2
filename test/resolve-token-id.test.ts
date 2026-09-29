@@ -251,7 +251,7 @@ describe('MetadataService.resolveTokenId', () => {
 
       expect(result.name).toBe('fox.eth');
       expect(result.registryType).toBe('registry');
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedTokenId, V2_ETH_REGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedTokenId, { address: V2_ETH_REGISTRY, name: 'eth' });
       // The filter hit short-circuits — no namehash-form fallback query.
       expect(mockGetDomainByNamehash).not.toHaveBeenCalled();
     });
@@ -267,7 +267,7 @@ describe('MetadataService.resolveTokenId', () => {
       const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, decimal);
 
       expect(result.name).toBe('fox.eth');
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedHex, V2_ETH_REGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedHex, { address: V2_ETH_REGISTRY, name: 'eth' });
     });
 
     it.each([
@@ -278,7 +278,7 @@ describe('MetadataService.resolveTokenId', () => {
 
       await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, written);
 
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(canonical, V2_ETH_REGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(canonical, { address: V2_ETH_REGISTRY, name: 'eth' });
       expect(mockGetDomainByNamehash).toHaveBeenCalledWith(canonical);
     });
 
@@ -293,7 +293,7 @@ describe('MetadataService.resolveTokenId', () => {
       const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash);
 
       expect(result.name).toBe('fox.eth');
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(hash, V2_ETH_REGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(hash, { address: V2_ETH_REGISTRY, name: 'eth' });
       expect(mockGetDomainByNamehash).toHaveBeenCalledWith(hash);
     });
 
@@ -313,7 +313,7 @@ describe('MetadataService.resolveTokenId', () => {
 
       await metadataService.resolveTokenId('sepolia', '0x657eA849311d3D5823348ddEd7C2AaAFb3EDE09E', versionedTokenId);
 
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedTokenId, V2_ETH_REGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedTokenId, { address: V2_ETH_REGISTRY, name: 'eth' });
     });
 
     it('does not serve a subname for a namehash-form id: an ETHRegistry token is a name directly under eth', async () => {
@@ -323,6 +323,17 @@ describe('MetadataService.resolveTokenId', () => {
       await expect(
         metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash)
       ).rejects.toThrow('No domain found for tokenId');
+    });
+
+    it('surfaces an outage of the token lookup when the namehash path answers with a miss (503, not 404)', async () => {
+      // domain(id:) resolves only namehashes, so its miss says nothing about a native id.
+      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
+      mockGetDomainByTokenId.mockRejectedValue(new UpstreamError('indexer down'));
+      mockGetDomainByNamehash.mockResolvedValue({ domain: null, usedFallback: false });
+
+      await expect(
+        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, versionedTokenId)
+      ).rejects.toBeInstanceOf(UpstreamError);
     });
 
     it('404s (NotFound, not "unknown contract") for a native v2 tokenId that no indexer can reverse', async () => {
@@ -359,7 +370,7 @@ describe('MetadataService.resolveTokenId', () => {
 
       expect(result).toEqual({ name: 'jamon.sepolia.is-a-capybara.eth', registryType: 'registry' });
       expect(mockGetRegistry).toHaveBeenCalledWith(SUBREGISTRY);
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(TOKEN_ID, SUBREGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(TOKEN_ID, { address: SUBREGISTRY, name: 'sepolia.is-a-capybara.eth' });
       // No unscoped namehash lookup: a random id must not name an unrelated domain.
       expect(mockGetDomainByNamehash).not.toHaveBeenCalled();
     });
