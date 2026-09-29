@@ -44,7 +44,19 @@ const R2_FONT_PREFIX = 'fonts/';
 
 // Singleton rasterizer — initialized once per isolate
 let _rasterizer: any = null;
-let _initPromise: Promise<any> | null = null;
+let _init: { promise: Promise<unknown>; startedAt: number } | null = null;
+
+// The init loads ~29 MB of fonts, so concurrent requests share one in-flight
+// init instead of each starting their own (in a 128 MB isolate), and no request
+// gives up on it early: however slow, it is waited for, bounded only by the
+// request timeout. A failed init is dropped, so the next request retries it.
+// The init runs in the request that started it, which registers it with
+// waitUntil, so a cancelled request (e.g. a client disconnect) does not cut it
+// off. An init can still be stranded if its reads outlast that request's
+// lifetime (up to 30 s, plus up to 30 s of waitUntil); past this age it cannot
+// still be loading, and the next request starts a fresh one. Two live inits
+// never run at once.
+export const RASTERIZER_INIT_STALE_MS = 90_000;
 
 async function initRasterizer(bucket: R2Bucket): Promise<any> {
   const manifest = FONT_MANIFEST as {
@@ -82,15 +94,23 @@ async function initRasterizer(bucket: R2Bucket): Promise<any> {
 }
 
 export class RasterizeService {
-  async rasterize(svg: string, bucket: R2Bucket): Promise<Uint8Array> {
+  async rasterize(svg: string, bucket: R2Bucket, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Uint8Array> {
     if (!_rasterizer) {
-      if (!_initPromise) {
-        _initPromise = initRasterizer(bucket).then(r => {
-          _rasterizer = r;
-          return r;
-        });
+      if (!_init || Date.now() - _init.startedAt > RASTERIZER_INIT_STALE_MS) {
+        const init: Promise<unknown> = initRasterizer(bucket).then(
+          (r) => {
+            _rasterizer ??= r;
+            return r;
+          },
+          (err) => {
+            if (_init?.promise === init) _init = null;
+            throw err;
+          },
+        );
+        _init = { promise: init, startedAt: Date.now() };
+        ctx?.waitUntil(init.catch(() => {}));
       }
-      await _initPromise;
+      await _init.promise;
     }
     const pngBuffer = await _rasterizer.render(svg);
     return new Uint8Array(pngBuffer);
