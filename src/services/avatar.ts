@@ -1,4 +1,4 @@
-import { AvatarResolver, utils as avatarUtils } from '@ensdomains/ens-avatar';
+import { AvatarResolver, utils as avatarUtils, type ChainClient, type AvatarResolverOpts } from '@ensdomains/ens-avatar';
 import { fromViem, type ViemClientLike } from '@ensdomains/ens-avatar/viem';
 import {
   BaseError,
@@ -32,7 +32,9 @@ export interface AvatarImage {
  * metadata), mirroring the v1 service's AvatarMetadata shape. `host_meta` and
  * `is_owner` are present only for NFT avatars (eip155 records); they're populated
  * by @ensdomains/ens-avatar's erc721/erc1155 specs. Extra token/URI-metadata
- * fields are passed through verbatim via the index signature.
+ * fields are passed through via the index signature, apart from the scrub of
+ * whole-string script and data: URLs and the depth limit; image and link fields
+ * are sanitized first and `image_data` is never served (see sanitizeAvatarMeta).
  */
 export interface AvatarMetadata {
   uri: string;
@@ -71,13 +73,14 @@ const MAX_METADATA_JSON_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_AVATAR_BYTES = 25 * 1024 * 1024; // 25 MB
 
 /**
- * Rewrite decentralized-storage URIs (ipfs://, ar://) to public HTTPS gateways so
- * the metadata's `image` is directly fetchable by consumers — the v1 service did
- * the same for IPFS. http(s)/data URIs pass through untouched.
+ * Rewrite decentralized-storage URIs (ipfs://, ipns://, ar://) to public HTTPS
+ * gateways so the metadata's media links are directly fetchable by consumers — the
+ * v1 service did the same for IPFS. http(s)/data URIs pass through untouched.
  */
 function toGatewayUrl(uri: string): string {
   if (uri.startsWith('ipfs://ipfs/')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://ipfs/'.length)}`;
   if (uri.startsWith('ipfs://')) return `https://ipfs.io/ipfs/${uri.slice('ipfs://'.length)}`;
+  if (uri.startsWith('ipns://')) return `https://ipfs.io/ipns/${uri.slice('ipns://'.length)}`;
   if (uri.startsWith('ar://')) return `https://arweave.net/${uri.slice('ar://'.length)}`;
   return uri;
 }
@@ -212,6 +215,212 @@ function isDefinitiveMiss(error: unknown, outageSeen: boolean): boolean {
   return !outageSeen;
 }
 
+// An avatar record that names an NFT (CAIP-22/29, optionally as a did:nft: DID).
+// Only for these does ens-avatar compute `host_meta` and `is_owner` itself.
+const NFT_RECORD = /^(?:did:nft:)?eip155:/i;
+
+// Link fields of token/URI metadata that consumers follow or embed (ERC-721 /
+// OpenSea metadata, plus OpenSea's older `external_link` that v1 responses
+// carried, and the extra media URLs and permalink of OpenSea API responses,
+// which ERC-1155 token URIs may point at). `image` and `image_url` are
+// handled separately.
+const LINK_FIELDS = [
+  'animation_url',
+  'external_url',
+  'external_link',
+  'youtube_url',
+  'animation_original_url',
+  'image_preview_url',
+  'image_thumbnail_url',
+  'image_original_url',
+  'permalink',
+] as const;
+
+// Nesting past which metadata is not echoed (real token metadata nests two or
+// three levels: attributes, properties).
+const MAX_META_DEPTH = 16;
+
+/**
+ * True for a value a consumer may put in a link or embed that runs script
+ * (javascript:, vbscript:) or carries inline content (a data: URL, which has a
+ * comma), which this service never echoes. Like the URL parser, it skips
+ * leading spaces and control characters and ignores tabs and newlines
+ * anywhere, so "java\tscript:" is javascript:. It also skips leading Unicode
+ * whitespace (NBSP, BOM, U+3000, ...), which a consumer may trim before use.
+ */
+function isScriptOrInlineUrl(value: string): boolean {
+  const url = value.replace(/[\t\n\r]/g, '');
+  let start = 0;
+  // Also U+0085 (NEL), which \s misses but Python's strip() and Go's TrimSpace remove.
+  while (start < url.length && (url.charCodeAt(start) <= 0x20 || url.charCodeAt(start) === 0x85 || /\s/.test(url[start]))) start++;
+  const scheme = /^[a-z][a-z0-9+.-]*:/i.exec(url.slice(start))?.[0].toLowerCase();
+  return scheme === 'javascript:' || scheme === 'vbscript:' || (scheme === 'data:' && url.includes(',', start));
+}
+
+/**
+ * `value` without the strings that isScriptOrInlineUrl rejects, at any depth
+ * (dropped from objects, filtered out of arrays), without anything nested
+ * deeper than MAX_META_DEPTH, and without `__proto__` keys (which a consumer's
+ * naive deep merge would take for the prototype). undefined when `value`
+ * itself is dropped.
+ */
+function scrubMetaValue(value: unknown, depth: number): unknown {
+  if (typeof value === 'string') return isScriptOrInlineUrl(value) ? undefined : value;
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= MAX_META_DEPTH) return undefined;
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubMetaValue(item, depth + 1)).filter((item) => item !== undefined);
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const clean = scrubMetaValue(item, depth + 1);
+    if (clean !== undefined && key !== '__proto__') out[key] = clean;
+  }
+  return out;
+}
+
+// Longest value handed to ens-avatar's resolveURI in resolveStoragePath. Real
+// CIDs are under 100 characters; alpha.2 runs CID.parse, which is quadratic in
+// the input length, on the uncapped value (the hardened release caps CIDs at 256).
+const MAX_STORAGE_PATH_LENGTH = 512;
+
+/**
+ * The storage forms the library's image resolution also accepts — a bare CID,
+ * `ipfs/<cid>/…`, `/ipfs/<cid>/…`, `ipns/<name>` — as the gateway URL the avatar
+ * endpoint resolves them to (ens-avatar's resolveURI, default gateways, as the
+ * service's resolvers use). Only its gateway rewrites count (isOnChain false):
+ * its fallback strips a data: prefix, turning e.g. `data:,https://…` into a URL.
+ */
+function resolveStoragePath(value: string): string | null {
+  if (value.length > MAX_STORAGE_PATH_LENGTH) return null;
+  try {
+    const { uri, isOnChain } = avatarUtils.resolveURI(value);
+    return isOnChain ? null : uri;
+  } catch {
+    return null;
+  }
+}
+
+function parseHttpUrl(value: string | null): string | null {
+  if (value === null) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+}
+
+/**
+ * `value` as a canonical http(s) URL (ipfs/ipns/ar URIs and CID paths rewritten
+ * to gateways first), else null.
+ */
+function toHttpUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return parseHttpUrl(toGatewayUrl(trimmed)) ?? parseHttpUrl(resolveStoragePath(trimmed));
+}
+
+/**
+ * The image the avatar endpoint serves for `metadata`: ens-avatar's own image
+ * resolution (getImageURI, which AvatarResolver.getAvatar returns), with the
+ * resolver's options. It takes the first non-empty string of image → image_url
+ * → image_data and gives a data: URI for an inline image (an SVG sanitized by
+ * the library, or a raster image whose bytes match its type), an http(s) URL,
+ * or null when it serves nothing. (For a remote URL getAvatar also checks that
+ * it is an image; /meta leaves that to the consumer who fetches it.)
+ */
+function servedImage(metadata: AvatarMetadata, options: AvatarResolverOpts | undefined): string | null {
+  try {
+    return avatarUtils.getImageURI({
+      metadata,
+      gateways: { ipfs: options?.ipfs, arweave: options?.arweave },
+      urlDenyList: options?.urlDenyList,
+      maxSvgLength: options?.maxSvgLength,
+      maxContentLength: options?.maxContentLength,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make getMetadata output safe to serve as the /meta response. ens-avatar returns
+ * metadata as published — raw values chosen by the record or token owner — and
+ * consumers render these fields, so:
+ * - `image` is the image the avatar endpoint serves (servedImage): its http(s)
+ *   URL, or for an inline image this service's avatar image URL, the endpoint
+ *   serving the bytes as the library resolved them (inline SVG sanitized). An
+ *   image the endpoint would not serve leaves the metadata without one. Inline
+ *   bytes (data: URIs, SVG markup, `image_data`) are never echoed.
+ * - `image_url` is the same as `image` when it holds what the endpoint serves
+ *   (it is that field, or has the same value); otherwise it is kept only as an
+ *   http(s) URL (the endpoint does not serve another inline image).
+ * - link fields (LINK_FIELDS) keep only http(s) values.
+ * - any other string, at any depth, that is a javascript:, vbscript: or data:
+ *   URL is dropped, as is anything nested deeper than MAX_META_DEPTH. (`uri`
+ *   is the normalized ENS name, which cannot contain a colon.) Prose that
+ *   parses as a data: URL goes too: "Data: 10,000 avatars" is dropped.
+ * - `host_meta` / `is_owner` are kept only for an NFT record, where the library
+ *   computes them: ens-avatar 2.0.0-alpha.2 lets a URI record's own JSON set them
+ *   (e.g. a fake `is_owner: true`).
+ * Other fields pass through apart from that scrub and depth limit. Only a string
+ * that is a URL as a whole is scrubbed: URLs inside prose, object keys and CSS
+ * values are left as they are.
+ *
+ * @returns the sanitized copy, or null when there's no usable image (v1 answered
+ *          "No results found." for a record without one).
+ */
+function sanitizeAvatarMeta(
+  metadata: AvatarMetadata,
+  isNftRecord: boolean,
+  avatarImageUrl: string | undefined,
+  imageOptions: AvatarResolverOpts | undefined,
+): AvatarMetadata | null {
+  // The field the endpoint serves: the first non-empty string of image →
+  // image_url → image_data (v1's order, and the library's), so an unusable
+  // `image` is not swapped for a later field.
+  const source = (['image', 'image_url', 'image_data'] as const).find(
+    (key) => typeof metadata[key] === 'string' && metadata[key] !== '',
+  );
+  const served = servedImage(metadata, imageOptions);
+  const image = served?.startsWith('data:') ? avatarImageUrl : parseHttpUrl(served);
+  if (!image) {
+    return null;
+  }
+
+  const sanitized: AvatarMetadata = { ...metadata, image };
+  delete sanitized.image_data;
+  const imageUrl = source && metadata.image_url === metadata[source] ? image : toHttpUrl(metadata.image_url);
+  if (imageUrl) {
+    sanitized.image_url = imageUrl;
+  } else {
+    delete sanitized.image_url;
+  }
+  for (const key of LINK_FIELDS) {
+    const url = toHttpUrl(metadata[key]);
+    if (url) {
+      sanitized[key] = url;
+    } else {
+      delete sanitized[key];
+    }
+  }
+  if (!isNftRecord) {
+    delete sanitized.host_meta;
+    delete sanitized.is_owner;
+  }
+  for (const [key, value] of Object.entries(sanitized)) {
+    const clean = scrubMetaValue(value, 0);
+    if (clean === undefined || key === '__proto__') {
+      delete sanitized[key];
+    } else {
+      sanitized[key] = clean;
+    }
+  }
+  return sanitized;
+}
+
 export class AvatarService {
   private resolver: AvatarResolver;
   // Fallback resolver using the chain's default (legacy) universal resolver, set
@@ -301,8 +510,10 @@ export class AvatarService {
    * @param name           the ENS name.
    * @param avatarImageUrl absolute URL of THIS deployment's avatar *image* endpoint
    *                       for `name`. Used as the `image` value when the record
-   *                       only carries inline `image_data` (v1 behavior) — the
-   *                       image endpoint materializes and sanitizes those bytes.
+   *                       only carries inline `image_data` (v1 behavior), and in
+   *                       place of any other inline image (data: URI, SVG markup)
+   *                       — the image endpoint materializes and sanitizes those
+   *                       bytes.
    * @returns the metadata, or null when there's no resolvable avatar with a usable
    *          image (the route maps null → 404 "No results found.").
    * @throws UpstreamError when the lookup failed (the route maps it to 503).
@@ -316,26 +527,22 @@ export class AvatarService {
       return null;
     }
 
-    const metadata = await this.withLegacyFallback((resolver) =>
+    const resolved = await this.withLegacyFallback((resolver) =>
       this.resolveMetadataRecord(resolver, normalized, name),
     );
-    if (!metadata) {
+    if (!resolved) {
       return null;
     }
 
     // Resolve a usable, absolute `image` (v1 parity): explicit image → image_url →
-    // (for inline on-chain images) this service's avatar image endpoint. A record
-    // with no image at all is treated as "no results", matching v1's 404.
-    const rawImage =
-      (typeof metadata.image === 'string' && metadata.image) ||
-      (typeof metadata.image_url === 'string' && metadata.image_url) ||
-      (typeof metadata.image_data === 'string' ? avatarImageUrl : undefined) ||
-      undefined;
-    if (!rawImage) {
+    // (for inline on-chain images) this service's avatar image endpoint, and drop
+    // what isn't safe to serve. A record with no usable image is treated as "no
+    // results", matching v1's 404.
+    const metadata = sanitizeAvatarMeta(resolved.metadata, resolved.isNftRecord, avatarImageUrl, resolved.options);
+    if (!metadata) {
       return null;
     }
 
-    metadata.image = toGatewayUrl(rawImage);
     // Echo the requested name if the library didn't set `uri`.
     if (typeof metadata.uri !== 'string') {
       metadata.uri = name;
@@ -461,20 +668,50 @@ export class AvatarService {
   }
 
   /**
-   * Resolve avatar-record metadata via one resolver, bounded by the media timeout.
-   * Returns null for a definitive miss and throws UpstreamError when the lookup
-   * failed (see lookup).
+   * Resolve avatar-record metadata via one resolver, bounded by the media timeout,
+   * plus whether the avatar record is an NFT reference and the resolver's options
+   * (see sanitizeAvatarMeta). Returns null for a definitive miss and throws
+   * UpstreamError when the lookup failed (see lookup).
    */
   private async resolveMetadataRecord(
     resolver: AvatarResolver,
     normalized: string,
     name: string,
-  ): Promise<AvatarMetadata | null> {
-    return this.lookup(
-      () => resolver.getMetadata(normalized) as Promise<AvatarMetadata | null>,
+  ): Promise<{ metadata: AvatarMetadata; isNftRecord: boolean; options?: AvatarResolverOpts } | null> {
+    // The metadata doesn't say which kind of record it came from, so note the
+    // record as the library reads it through the chain client. That happens on a
+    // per-call view of the resolver (it inherits the options and fetcher), since
+    // the resolver itself is shared by concurrent requests. A resolver without a
+    // chain client (a stand-in) has no record to note: it counts as a non-NFT
+    // record, and its errors still go through lookup().
+    const seen: { record?: string | null } = {};
+    const client = resolver.client;
+    const scoped: AvatarResolver = client
+      ? Object.create(resolver, {
+          client: {
+            value: Object.create(client, {
+              getEnsRecord: {
+                value: async (ens: string, key: string) => {
+                  const result = await client.getEnsRecord(ens, key);
+                  seen.record = result.record;
+                  return result;
+                },
+              },
+            }) as ChainClient,
+          },
+        })
+      : resolver;
+
+    const metadata = await this.lookup(
+      () => scoped.getMetadata(normalized) as Promise<AvatarMetadata | null>,
       'avatar metadata resolution',
       name,
     );
+    if (!metadata) {
+      return null;
+    }
+    const isNftRecord = typeof seen.record === 'string' && NFT_RECORD.test(seen.record);
+    return { metadata, isNftRecord, options: resolver.options };
   }
 
   /**
