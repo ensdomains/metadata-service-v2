@@ -7,12 +7,12 @@ vi.mock('../src/services/rasterize', () => ({
   RasterizeService: class { async rasterize() { return new Uint8Array([0x89, 0x50, 0x4e, 0x47]); } },
 }));
 
-import { errorHandler } from '../src/index';
+import { errorHandler, type AppEnv } from '../src/index';
 
 // Mount the REAL errorHandler on a throwaway app with routes that throw, so we
 // exercise the actual handler rather than a copy.
 function appThatThrows(thrown: unknown) {
-  const app = new Hono();
+  const app = new Hono<AppEnv>();
   app.onError(errorHandler);
   app.get('/boom', () => { throw thrown; });
   return app;

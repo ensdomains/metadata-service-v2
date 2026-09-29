@@ -1,6 +1,15 @@
 name = "ens-metadata-v2"
 main = "src/index.ts"
-compatibility_date = "2024-09-25"
+# Keep this before 2025-09-15: from that date nodejs_compat uses workerd's
+# process v2 (enable_nodejs_process_v2), whose process.release.name is "node",
+# so @ensdomains/ens-avatar 2.0.0-alpha.2 takes its Node path and fetches
+# through undici instead of the Workers fetch, which breaks avatar resolution.
+# Move past it only once avatars are no longer fetched by the library's own
+# fetcher. The same date also turns on enable_nodejs_fs_module and
+# enable_nodejs_os_module: rasterize-wasm then gets a real fs from its
+# createRequire fallbacks, so check /rasterize too when moving past it. (The
+# workerd in the lockfile, 1.20250924.0, supports dates up to 2025-09-24.)
+compatibility_date = "2025-09-14"
 compatibility_flags = ["nodejs_compat"]
 find_additional_modules = true
 

@@ -1,13 +1,14 @@
-import { Context, MiddlewareHandler, Next } from 'hono';
+import { Context, MiddlewareHandler } from 'hono';
+import type { AppEnv } from '../index';
 import { validateEnsName } from '../utils/ens';
 
-// Route middlewares are typed as MiddlewareHandler (path type `string`), not
-// `(c: Context, next)`: a bare Context has path type `any`, and since hono
-// 4.12.5 that turns c.req.param() in the route handlers after them into
-// `string | undefined`.
+// Middlewares are typed as MiddlewareHandler<AppEnv>: `c.env` keeps the Env
+// binding types, and the path type is `string` rather than the `any` of a bare
+// Context, which (hono >= 4.12.5) would turn c.req.param() in the route
+// handlers after them into `string | undefined`.
 
 // Validate network parameter
-export const validateNetwork: MiddlewareHandler = async (c, next) => {
+export const validateNetwork: MiddlewareHandler<AppEnv> = async (c, next) => {
   const network = c.req.param('network');
 
   if (network && !['mainnet', 'sepolia'].includes(network)) {
@@ -21,7 +22,7 @@ export const validateNetwork: MiddlewareHandler = async (c, next) => {
 };
 
 // Validate ENS name parameter
-export const validateEnsNameParam: MiddlewareHandler = async (c, next) => {
+export const validateEnsNameParam: MiddlewareHandler<AppEnv> = async (c, next) => {
   const name = c.req.param('name');
 
   if (!name) {
@@ -65,15 +66,16 @@ function getRateBucket(method: string, path: string): RateBucket | null {
   return { name: 'default', limit: 120 };
 }
 
-function getClientIP(c: Context): string {
+function getClientIP(c: Context<AppEnv>): string {
   // Trust ONLY CF-Connecting-IP (Cloudflare always sets it). X-Forwarded-For is
   // client-spoofable, which would let a caller rotate their rate-limit bucket.
   return c.req.header('CF-Connecting-IP') || 'unknown';
 }
 
-export const rateLimiter = async (c: Context, next: Next) => {
-  const kv = (c.env as any)?.METADATA_CACHE as KVNamespace | undefined;
-  const disabled = String((c.env as any)?.RATE_LIMIT_DISABLED ?? '').toLowerCase() === 'true';
+export const rateLimiter: MiddlewareHandler<AppEnv> = async (c, next) => {
+  // `env` is undefined when the app runs without bindings (tests).
+  const kv = c.env?.METADATA_CACHE;
+  const disabled = String(c.env?.RATE_LIMIT_DISABLED ?? '').toLowerCase() === 'true';
 
   const bucket = getRateBucket(c.req.method, c.req.path);
   if (disabled || !kv || !bucket) {
@@ -115,7 +117,7 @@ export const rateLimiter = async (c: Context, next: Next) => {
 };
 
 // Request logging with performance metrics
-export const requestLogger = async (c: Context, next: Next) => {
+export const requestLogger: MiddlewareHandler<AppEnv> = async (c, next) => {
   const start = Date.now();
   const method = c.req.method;
   const path = c.req.path;

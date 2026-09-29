@@ -73,7 +73,12 @@ export interface Env {
   LOG_LEVEL: string;
 }
 
-const app = new Hono<{ Bindings: Env }>();
+// Hono env of this app. Routes, middleware and the helpers below are typed with
+// it, so `c.env` keeps the binding types above.
+export type AppEnv = { Bindings: Env };
+type AppContext = Context<AppEnv>;
+
+const app = new Hono<AppEnv>();
 
 // CF Cache API helper — Workers exposes caches.default but TS lib types don't include it
 function getCfCache(): Cache | null {
@@ -115,14 +120,14 @@ function cardCacheControl(result: ImageCacheResult): string {
 // read routes. `match` returns a fresh Response on hit; `put` stores only OK
 // responses with a bounded edge TTL (see above) while leaving the client-facing
 // Cache-Control on the returned response untouched.
-async function edgeCacheMatch(c: any): Promise<Response | null> {
+async function edgeCacheMatch(c: AppContext): Promise<Response | null> {
   const cfCache = getCfCache();
   if (!cfCache) return null;
   const cached = await cfCache.match(c.req.url);
   return cached ? new Response(cached.body, cached) : null;
 }
 
-function edgeCachePut(c: any, response: Response, maxAgeSecs: number = EDGE_CACHE_MAX_AGE_SECS): void {
+function edgeCachePut(c: AppContext, response: Response, maxAgeSecs: number = EDGE_CACHE_MAX_AGE_SECS): void {
   const cfCache = getCfCache();
   if (cfCache && response.ok) {
     // Store a clone with a capped Cache-Control so the per-colo edge entry expires
@@ -152,10 +157,10 @@ function withMediaSecurityHeaders(response: Response): Response {
 // Central error → HTTP response mapper. Maps the resolution-layer error taxonomy
 // to status codes and returns GENERIC client messages (internal detail is logged,
 // never leaked). Replaces per-route `error.message.includes(...)` string-sniffing.
-function httpError(c: any, error: unknown, fallbackMessage: string): Response {
+function httpError(c: AppContext, error: unknown, fallbackMessage: string): Response {
   const timestamp = new Date().toISOString();
   if (error instanceof DomainExpiredError) {
-    return c.json({ message: error.message, timestamp }, 410 as any);
+    return c.json({ message: error.message, timestamp }, 410);
   }
   if (error instanceof InvalidNameError) {
     return c.json({ error: 'Invalid ENS name format', timestamp }, 400);
@@ -381,7 +386,7 @@ app.get(
     try {
       const avatar = await avatarService.getAvatarImage(name);
       if (!avatar) {
-        return c.json({ message: `No avatar set for ${name}` } as any, 404);
+        return c.json({ message: `No avatar set for ${name}` }, 404);
       }
 
       return new Response(new Uint8Array(avatar.buffer), {
@@ -460,7 +465,7 @@ app.get(
     try {
       const header = await avatarService.getHeaderImage(name);
       if (!header) {
-        return c.json({ message: `No header set for ${name}` } as any, 404);
+        return c.json({ message: `No header set for ${name}` }, 404);
       }
 
       return new Response(new Uint8Array(header.buffer), {
@@ -482,7 +487,7 @@ app.get(
 
 // Shared metadata handler — used by both v1 (tokenId) and v2 (name) routes
 async function handleMetadata(
-  c: any,
+  c: AppContext,
   network: NetworkName,
   registryType: string,
   name: string,
@@ -521,7 +526,7 @@ async function handleMetadata(
 // Shared image handler — used by both v1 (tokenId) and v2 (name) routes.
 // The L0 edge-cache short-circuit happens in the route BEFORE checkExpiry, so by
 // the time we're here it's a confirmed edge miss and we only need to generate+store.
-async function handleImage(c: any, network: NetworkName, name: string) {
+async function handleImage(c: AppContext, network: NetworkName, name: string) {
   const { imageService, imageCacheService } = getImageServices(c.env, network);
 
   // Only honor `?status=` if it's a real MigrationStatus — otherwise an arbitrary
@@ -580,7 +585,7 @@ function isContractAddress(value: string): boolean {
 // The 400 for a name route (`registry` / `namewrapper`) whose name this service
 // can never look up (see isResolvableEnsName), answered before any other work,
 // the edge cache included. A contract-address route names a token id instead.
-function invalidNameResponse(c: Context): Response | null {
+function invalidNameResponse(c: AppContext): Response | null {
   const param2 = c.req.param("param2");
   if ((param2 === 'registry' || param2 === 'namewrapper') && !isResolvableEnsName(c.req.param("param3") ?? '')) {
     return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
@@ -1133,7 +1138,7 @@ app.get(
 // Webhook endpoint for cache invalidation + proactive warming. Sender-agnostic:
 // any backend that knows a name changed can POST the EnsNameEvent contract here
 // (see services/webhook.ts) — the indexer is just the current caller.
-const handleWebhook = async (c: any) => {
+const handleWebhook = async (c: AppContext) => {
   // Clone before the service consumes the body, so we can read it for warming
   // without interfering with signature verification (which reads c.req.text()).
   const bodyClone = c.req.raw.clone();
@@ -1241,7 +1246,7 @@ app.notFound((c) => {
 // Error handler. Honor HTTPException (e.g. the timeout middleware's 504 Gateway
 // Timeout) so its status isn't flattened to a generic 500; everything else is a
 // real unhandled error → 500. Exported for direct testing.
-export function errorHandler(err: unknown, c: any): Response | Promise<Response> {
+export function errorHandler(err: unknown, c: AppContext): Response | Promise<Response> {
   if (err instanceof HTTPException) {
     return err.getResponse();
   }
