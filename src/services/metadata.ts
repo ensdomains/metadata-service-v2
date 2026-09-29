@@ -18,6 +18,7 @@ import { classifyMigrationStatus, classifyV2IndexerRecord, isOnV2 } from "../uti
 import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./errors";
 import {
   validateEnsName,
+  isResolvableEnsName,
   getLabel,
   labelhash,
   canonicalizeName,
@@ -183,7 +184,7 @@ export class MetadataService {
     baseUrl?: string,
   ): Promise<MetadataResponse> {
     // Validate identifier as ENS name
-    if (!validateEnsName(identifier)) {
+    if (!isResolvableEnsName(identifier)) {
       throw new InvalidNameError();
     }
 
@@ -377,7 +378,7 @@ export class MetadataService {
     name: string,
     opts?: { strict?: boolean },
   ): Promise<MigrationStatus> {
-    if (!validateEnsName(name)) {
+    if (!isResolvableEnsName(name)) {
       throw new InvalidNameError();
     }
     // Throws NotFoundError when nothing can resolve the name.
@@ -555,7 +556,7 @@ export class MetadataService {
 
   // Get migration status (CF cache handles API response caching)
   async getMigrationStatus(name: string): Promise<MigrationStatusResponse> {
-    if (!validateEnsName(name)) {
+    if (!isResolvableEnsName(name)) {
       throw new InvalidNameError();
     }
 
@@ -633,7 +634,7 @@ export class MetadataService {
 
   // Get registry hierarchy
   async getRegistryHierarchy(name: string): Promise<RegistryHierarchyResponse> {
-    if (!validateEnsName(name)) {
+    if (!isResolvableEnsName(name)) {
       throw new InvalidNameError();
     }
 

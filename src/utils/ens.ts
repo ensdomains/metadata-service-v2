@@ -229,6 +229,27 @@ export function validateEnsName(name: string): boolean {
   return true;
 }
 
+/**
+ * Whether this service can look `name` up at all: validateEnsName's checks, and
+ * a canonical form the lookups' namehash can hash. That namehash (ensjs) runs
+ * each label through ENSIP-15 normalization and throws on one it rejects: a
+ * disallowed character such as ':', '/', a space, a control character or '_'
+ * after the start of a label, or an illegal mixture. Such a name has no node the
+ * indexers or the chain can be asked about, so it is a client error (400); it
+ * used to fail inside the lookup and be reported as an outage (503). Names that
+ * normalize to another form (upper case, say) and encoded labelhashes (`[…]`)
+ * still pass.
+ */
+export function isResolvableEnsName(name: string): boolean {
+  if (!validateEnsName(name)) return false;
+  try {
+    namehash(canonicalizeName(name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Character set analysis
 export function getCharacterSet(name: string): CharacterSet {
   const label = getLabel(name);

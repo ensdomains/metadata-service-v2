@@ -1,5 +1,5 @@
 import "./shims";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { trimTrailingSlash } from "hono/trailing-slash";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -13,7 +13,7 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
-import { canonicalizeName, validateEnsName } from "./utils/ens";
+import { canonicalizeName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { ImageGenerationService } from "./services/image";
@@ -472,11 +472,25 @@ function isContractAddress(value: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
+// The 400 for a name route (`registry` / `namewrapper`) whose name this service
+// can never look up (see isResolvableEnsName), answered before any other work,
+// the edge cache included. A contract-address route names a token id instead.
+function invalidNameResponse(c: Context): Response | null {
+  const param2 = c.req.param("param2");
+  if ((param2 === 'registry' || param2 === 'namewrapper') && !isResolvableEnsName(c.req.param("param3") ?? '')) {
+    return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
+  }
+  return null;
+}
+
 // Unified metadata endpoint: handles both v1 (contractAddress/tokenId) and v2 (registryType/name)
 app.get(
   "/:network/:param2/:param3",
   validateNetwork,
   async (c) => {
+    const invalidName = invalidNameResponse(c);
+    if (invalidName) return invalidName;
+
     // L0 edge: short-circuit before any RPC/indexer work.
     const edgeHit = await edgeCacheMatch(c);
     if (edgeHit) return edgeHit;
@@ -500,9 +514,6 @@ app.get(
 
       // v2 route: param2 is registryType
       if (param2 === 'registry' || param2 === 'namewrapper') {
-        if (!validateEnsName(param3)) {
-          return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
-        }
         return await handleMetadata(c, network, param2, param3);
       }
 
@@ -757,6 +768,9 @@ app.get(
   "/:network/:param2/:param3/image",
   validateNetwork,
   async (c) => {
+    const invalidName = invalidNameResponse(c);
+    if (invalidName) return invalidName;
+
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
     const param2 = c.req.param("param2");
@@ -780,9 +794,6 @@ app.get(
         name = resolved.name;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
         // v2: param3 is the ENS name
-        if (!validateEnsName(param3)) {
-          return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
-        }
         name = param3;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
@@ -805,6 +816,9 @@ app.get(
   "/:network/:param2/:param3/rasterize",
   validateNetwork,
   async (c) => {
+    const invalidName = invalidNameResponse(c);
+    if (invalidName) return invalidName;
+
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
     const param2 = c.req.param("param2");
@@ -822,9 +836,6 @@ app.get(
         );
         name = resolved.name;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
-        if (!validateEnsName(param3)) {
-          return c.json({ error: "Invalid ENS name format", timestamp: new Date().toISOString() }, 400);
-        }
         name = param3;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
