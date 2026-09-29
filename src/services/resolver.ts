@@ -188,36 +188,4 @@ export class ResolverService {
       expirationDate: record.expiry ? new Date(Number(record.expiry) * 1000) : undefined,
     };
   }
-
-  // Resolve multiple names in parallel
-  async resolveMultiple(
-    names: Array<{ name: string; tokenId: string }>,
-    preferredNetwork: NetworkName = 'mainnet'
-  ): Promise<NameData[]> {
-    const batchSize = 10; // Process in batches to avoid overwhelming RPC
-    const results: NameData[] = [];
-
-    for (let i = 0; i < names.length; i += batchSize) {
-      const batch = names.slice(i, i + batchSize);
-      const batchResults = await Promise.allSettled(
-        batch.map(({ name, tokenId }) => this.resolveName(name, tokenId, preferredNetwork))
-      );
-
-      batchResults.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          results.push(result.value);
-        } else {
-          console.error(`Failed to resolve ${batch[index].name}:`, result.reason);
-          // Could push a default/error state result here
-        }
-      });
-
-      // Small delay between batches
-      if (i + batchSize < names.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-    }
-
-    return results;
-  }
 }

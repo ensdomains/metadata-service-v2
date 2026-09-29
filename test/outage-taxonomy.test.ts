@@ -379,7 +379,7 @@ describe('resolveStatusForImage strict mode (webhook persistence guard)', () => 
         data: { name: 'fox.eth', ownerId: OWNER, owner: { id: OWNER } },
         source: 'indexerV1',
         usedFallback: true,
-        retries: 1,
+        fallthroughs: 1,
         v2Consulted: false,
       }),
     };

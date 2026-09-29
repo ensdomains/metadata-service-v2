@@ -1298,9 +1298,6 @@ export class MetadataService {
         lastIndexerV2Check: new Date(
           fallbackStatus.indexerV2.lastCheck,
         ).toISOString(),
-        maxRetries: fallbackStatus.config.maxRetries,
-        retryDelay: fallbackStatus.config.retryDelayMs,
-        exponentialBackoff: fallbackStatus.config.exponentialBackoff,
       },
       d1: d1Health
         ? {

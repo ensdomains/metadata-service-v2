@@ -45,7 +45,7 @@ function fallbackReturning(result: {
   v2Consulted: boolean;
   data: Record<string, unknown>;
 }) {
-  const value = { ...result, usedFallback: result.source !== 'indexerV2', retries: 0 };
+  const value = { ...result, usedFallback: result.source !== 'indexerV2', fallthroughs: 0 };
   return {
     getMigrationStatus: vi.fn().mockResolvedValue(value),
     getDomainMetadata: vi.fn().mockResolvedValue(value),
