@@ -269,11 +269,15 @@ export class ImageGenerationService {
       errors.push("Domain name is required");
     }
 
+    // Number.isInteger also rejects NaN (e.g. `?w=abc`), which passes every
+    // range comparison below. A NaN size used to render a broken card that the
+    // image cache then stored under the default 518x518 key.
     if (options.size) {
-      if (options.size.width < 100 || options.size.width > 2000) {
+      const { width, height } = options.size;
+      if (!Number.isInteger(width) || width < 100 || width > 2000) {
         errors.push("Width must be between 100 and 2000 pixels");
       }
-      if (options.size.height < 100 || options.size.height > 2000) {
+      if (!Number.isInteger(height) || height < 100 || height > 2000) {
         errors.push("Height must be between 100 and 2000 pixels");
       }
     }
