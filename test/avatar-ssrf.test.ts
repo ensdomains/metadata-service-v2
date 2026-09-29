@@ -87,9 +87,25 @@ describe('assertFetchableMediaUrl', () => {
     expect(blocked(url)).toBe(true);
   });
 
+  // WEB-1550 / WEB-1555: the Worker's fetch() connects to the port the URL
+  // names, so only the scheme's default port is allowed.
+  it.each([
+    ['8080', 'https://example.com:8080/a.png'],
+    ['8443', 'https://example.com:8443/a.png'],
+    ['6379 (Redis)', 'http://example.com:6379/'],
+    ['22 (SSH)', 'https://example.com:22/'],
+    ['443 on http:', 'http://example.com:443/a.png'],
+    ['80 on https:', 'https://example.com:80/a.png'],
+    ['on a public IP literal', 'http://93.184.216.34:8080/a.png'],
+  ])('blocks a non-default port: %s', (_label, url) => {
+    expect(blocked(url)).toBe(true);
+    expect(() => assertFetchableMediaUrl(new URL(url))).toThrow(/port/);
+  });
+
   it.each([
     'https://ipfs.io/ipfs/bafy/avatar.png',
-    'https://example.com:8443/a.png',
+    'https://example.com:443/a.png',
+    'http://example.com:80/a.png',
     'http://93.184.216.34/a.png',
     'https://notmetadata.ens.domains.example.com/a.png',
   ])('allows a public URL: %s', (url) => {
@@ -181,6 +197,33 @@ describe('fetchMediaUrl follows redirects manually and checks every hop', () => 
     const calls = stubFetch({});
     await expect(fetchMediaUrl('http://[::1]/')).rejects.toBeInstanceOf(BlockedMediaUrlError);
     expect(calls).toHaveLength(0);
+  });
+
+  it('sends an explicit default port (:443, :80, also on a redirect hop) as the plain URL', async () => {
+    const calls = stubFetch({
+      'https://cdn.example/a.png': redirect('http://img.example:80/a.png'),
+      'http://img.example/a.png': () => new Response(PNG, { status: 200 }),
+    });
+    const res = await fetchMediaUrl('https://cdn.example:443/a.png');
+    expect(res.status).toBe(200);
+    expect(calls.map((c) => c.url)).toEqual(['https://cdn.example/a.png', 'http://img.example/a.png']);
+  });
+
+  it.each(['8080', '6379', '22'])('rejects a first hop on port %s without any request', async (port) => {
+    const calls = stubFetch({});
+    await expect(fetchMediaUrl(`https://cdn.example:${port}/a.png`)).rejects.toThrow(BlockedMediaUrlError);
+    await expect(fetchMediaUrl(`http://cdn.example:${port}/a.png`)).rejects.toThrow(/port/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(['8080', '6379', '22'])('blocks a redirect to port %s without requesting it', async (port) => {
+    const calls = stubFetch({
+      'https://attacker.example/a': redirect(`https://attacker.example:${port}/b`),
+      'https://attacker.example/c': redirect(`//other.example:${port}/`),
+    });
+    await expect(fetchMediaUrl('https://attacker.example/a')).rejects.toThrow(/port/);
+    await expect(fetchMediaUrl('https://attacker.example/c')).rejects.toThrow(/port/);
+    expect(calls.map((c) => c.url)).toEqual(['https://attacker.example/a', 'https://attacker.example/c']);
   });
 });
 

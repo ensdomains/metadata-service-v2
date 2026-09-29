@@ -8,6 +8,10 @@
 // through fetchMediaUrl, which checks every hop of the redirect chain:
 //
 //  - scheme must be http: or https:;
+//  - the port must be the scheme's default (80 for http:, 443 for https:).
+//    From compatibility date 2024-09-02 (allow_custom_ports) the Worker's
+//    fetch() connects to whatever port the URL names, so otherwise a record,
+//    a redirect or a gateway URL could aim it at any port of a public host;
 //  - the host must not be a private/local target (the library's own
 //    isPrivateHostname, applied after normalizing the hostname);
 //  - the host must not be this service itself or a subdomain of it, so a record
@@ -105,6 +109,11 @@ export function resolverDenyList(hosts: readonly string[] = SELF_HOSTNAMES): str
 export function assertFetchableMediaUrl(url: URL, denyList: readonly string[] = SELF_HOSTNAMES): void {
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw new BlockedMediaUrlError(`blocked media URL scheme: ${url.protocol}`);
+  }
+  // The URL parser drops a port equal to the scheme's default (`:443` on
+  // https:, `:80` on http:), so any port still set is a non-default one.
+  if (url.port !== '') {
+    throw new BlockedMediaUrlError(`blocked media URL port: ${url.port}`);
   }
   if (url.hostname.length > MAX_HOSTNAME_LENGTH) {
     throw new BlockedMediaUrlError(`blocked media host: longer than ${MAX_HOSTNAME_LENGTH} characters`);

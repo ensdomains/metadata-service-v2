@@ -62,6 +62,7 @@ describe('the ens-avatar resolvers use the guarded fetcher', () => {
     'http://localhost./meta.json',
     'http://metadata.google.internal./computeMetadata/v1/',
     'http://127.0.0.1../meta.json',
+    'https://attacker.example:6379/meta.json',
   ])('blocks the library hop to %s without a request', async (record) => {
     quiet();
     const requested = recordingFetch(() => new Response('{}'));

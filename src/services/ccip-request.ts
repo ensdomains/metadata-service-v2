@@ -7,13 +7,13 @@
 // timeout. Any name can reach it through its resolver, and an avatar record
 // can reach it through an NFT contract whose tokenURI() reverts. This is the
 // same request with every URL and redirect hop checked by fetchMediaUrl
-// (private hosts and this service's own hostnames are refused), one timeout
-// per gateway, a bounded response, and a per-request budget of gateway bytes
-// and gateway fetches (request-budget.ts; every redirect hop is a fetch), since
-// a batch-gateway lookup fans out to as many requests as the contract asks for. ccipBudgetedHttp, the
-// transport of every client that reads contracts, counts OffchainLookup turns
-// against the same budget, since viem follows recursive lookups with no depth
-// limit.
+// (non-default ports, private hosts and this service's own hostnames are
+// refused), one timeout per gateway, a bounded response, and a per-request
+// budget of gateway bytes and gateway fetches (request-budget.ts; every
+// redirect hop is a fetch), since a batch-gateway lookup fans out to as many
+// requests as the contract asks for. ccipBudgetedHttp, the transport of every
+// client that reads contracts, counts OffchainLookup turns against the same
+// budget, since viem follows recursive lookups with no depth limit.
 import {
   BaseError,
   HttpRequestError,
