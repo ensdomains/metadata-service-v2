@@ -97,6 +97,11 @@ export interface MetadataServiceConfig {
   network?: NetworkName;
 }
 
+// A name the v2 ETHRegistry holds: a single label directly under eth.
+function isEthRegistryName(name: string): boolean {
+  return /^[^.]+\.eth$/.test(name);
+}
+
 export class MetadataService {
   private network: NetworkName;
   /**
@@ -436,8 +441,9 @@ export class MetadataService {
 
   // Resolve contract address + tokenId to ENS name. Recognizes the v1
   // BaseRegistrar (tokenId = labelhash), the v1 NameWrapper (tokenId = namehash),
-  // and — where v2 is deployed — the v2 ETHRegistry (ERC1155; tokenId = labelhash
-  // with the low 32 bits replaced by the token version).
+  // and — where v2 is deployed — every v2 registry (ERC1155; tokenId = labelhash
+  // with the low 32 bits replaced by the token version): the ETHRegistry, and
+  // any other registry the indexer knows (see resolveV2RegistryToken).
   async resolveTokenId(
     network: NetworkName,
     contractAddress: string,
@@ -459,6 +465,9 @@ export class MetadataService {
 
     let registryType: 'registry' | 'namewrapper';
     let nameHash: string;
+    // Set for the ETHRegistry, whose namehash-form ids may name only its own
+    // names (see below).
+    let ethRegistryToken = false;
 
     if (addr === contracts.registrar.toLowerCase()) {
       // BaseRegistrar: tokenId is labelhash → convert to .eth namehash
@@ -472,12 +481,13 @@ export class MetadataService {
       // v2 ETHRegistry (ERC1155). Marketplaces pass the native tokenId — a
       // labelhash whose low 32 bits are the token version — which is
       // irreversible from the hash alone, so ask the indexer's tokenId/
-      // canonicalId filters first. Returns a clean miss (falls through below)
-      // while the filters aren't in the deployed zigens schema yet.
+      // canonicalId filters first, scoped to this registry. Returns a clean
+      // miss (falls through below) while the filters aren't in the deployed
+      // zigens schema yet.
       registryType = 'registry';
       const hexId = tokenHex;
       try {
-        const { domain } = await this.indexerV2.getDomainByTokenId(hexId);
+        const { domain } = await this.indexerV2.getDomainByTokenId(hexId, addr);
         if (domain?.name) return { name: domain.name, registryType };
       } catch (error) {
         if (!(error instanceof UpstreamError)) throw error;
@@ -487,6 +497,9 @@ export class MetadataService {
       // Fall through for namehash-form ids, which some consumers pass and
       // zigens' domain(id:) resolves directly.
       nameHash = hexId;
+      ethRegistryToken = true;
+    } else if (this.blockchain.isV2Configured(network)) {
+      return this.resolveV2RegistryToken(addr, contractAddress, tokenHex, tokenId);
     } else {
       throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }
@@ -504,6 +517,9 @@ export class MetadataService {
       v2Outage = error;
       console.warn(`[tokenId] primary indexer unavailable for ${nameHash}, trying v1 subgraph:`, error);
     }
+    // A namehash names any domain, but an ETHRegistry token can only be one of
+    // the names directly under eth (a subname's namehash is not its token).
+    if (ethRegistryToken && domain?.name && !isEthRegistryName(domain.name)) domain = null;
 
     // The primary indexer is v2-only on sepolia, so a v1 unmigrated name (e.g. a
     // BaseRegistrar registration) is absent from it. Reverse namehash→name can't
@@ -511,6 +527,7 @@ export class MetadataService {
     // to the secondary v1 subgraph — matching the name-form resolution path.
     if (!domain?.name && this.indexerV1) {
       ({ domain } = await this.indexerV1.getDomainByNamehash(nameHash));
+      if (ethRegistryToken && domain?.name && !isEthRegistryName(domain.name)) domain = null;
     }
 
     if (!domain?.name) {
@@ -521,6 +538,40 @@ export class MetadataService {
     }
 
     return { name: domain.name, registryType };
+  }
+
+  /**
+   * A token of a v2 registry other than the ETHRegistry: the root registry, or
+   * a user or wrapper registry under a name. Only the indexer knows these
+   * registries, and only a lookup scoped to this one can name the token, since
+   * the same id exists in every registry that has the label. `addr` is the
+   * lowercase address.
+   * - An address the indexer knows no registry at is a 404, as any other
+   *   unknown contract (getRegistry caches the answer per isolate).
+   * - A token the registry does not hold, or whose registry is no longer
+   *   linked into the tree (unreachable, so it has no name to serve), is a 404.
+   * - The root registry's tokens are top-level names (eth, DNS TLDs), which
+   *   this service has no metadata or card for: a 404.
+   * - An indexer outage throws UpstreamError (a 503, not cached).
+   */
+  private async resolveV2RegistryToken(
+    addr: string,
+    contractAddress: string,
+    tokenHex: `0x${string}`,
+    tokenId: string,
+  ): Promise<{ name: string; registryType: 'registry' }> {
+    const registry = await this.indexerV2.getRegistry(addr);
+    if (!registry) {
+      throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
+    }
+    const { domain } = await this.indexerV2.getDomainByTokenId(tokenHex, addr);
+    if (!domain?.name) {
+      throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
+    }
+    if (!domain.name.includes('.')) {
+      throw new NotFoundError(`Top-level name ${domain.name} is not served`);
+    }
+    return { name: domain.name, registryType: 'registry' };
   }
 
   /** Whether `addr` (lowercase) is this network's v2 ETHRegistry — matches both
