@@ -292,6 +292,20 @@ export interface IndexerHierarchyItem {
 
 type ApiVersion = 'v1' | 'v2';
 
+// The data of a response that answers its query: an object holding the queried
+// root field (null, or an empty list, when the index has no match). A 200
+// without it (a proxy or maintenance page, {"data":null}, {"data":{}}) is not
+// an answer, so executeQuery fails the attempt as it does a transport error
+// (retried, then the secondary endpoint, then UpstreamError), and no caller
+// reads it as "not found".
+function answerOf<T>(data: unknown, rootField: string | undefined): T {
+  if (data === null || typeof data !== 'object' || Object.keys(data).length === 0
+    || (rootField !== undefined && !(rootField in data))) {
+    throw new Error(`malformed ensnode response: no ${rootField ?? 'data'} field`);
+  }
+  return data as T;
+}
+
 export class IndexerService {
   private client: GraphQLClient;
   private fallbackClient?: GraphQLClient;
@@ -342,9 +356,11 @@ export class IndexerService {
   private async executeQuery<T>(
     query: string,
     variables?: Record<string, any>,
+    rootField?: keyof T & string,
   ): Promise<{ data: T; usedFallback: boolean }> {
     const request = (client: GraphQLClient) =>
-      client.request<T>({ document: query, variables, signal: AbortSignal.timeout(this.timeout) });
+      client.request<T>({ document: query, variables, signal: AbortSignal.timeout(this.timeout) })
+        .then((data) => answerOf<T>(data, rootField));
 
     // Primary, with a single retry on transient failure.
     let primaryError: unknown;
@@ -380,7 +396,7 @@ export class IndexerService {
     const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
       domain: IndexerDomain | null;
-    }>(query, { name: id });
+    }>(query, { name: id }, 'domain');
 
     return { domain: data.domain, usedFallback };
   }
@@ -395,7 +411,7 @@ export class IndexerService {
     const query = this.apiVersion === 'v2' ? V2_GET_DOMAIN : V1_GET_DOMAIN;
     const { data, usedFallback } = await this.executeQuery<{
       domain: IndexerDomain | null;
-    }>(query, { name: nameHash });
+    }>(query, { name: nameHash }, 'domain');
 
     return { domain: data.domain, usedFallback };
   }
@@ -408,14 +424,14 @@ export class IndexerService {
       const ids = names.map(n => n.toLowerCase());
       const { data, usedFallback } = await this.executeQuery<{
         domains: IndexerDomain[];
-      }>(V2_GET_DOMAINS, { names: ids, first: ids.length });
+      }>(V2_GET_DOMAINS, { names: ids, first: ids.length }, 'domains');
       return { domains: data.domains, usedFallback };
     }
 
     const nameHashes = names.map((name) => namehash(name.toLowerCase()));
     const { data, usedFallback } = await this.executeQuery<{
       domains: IndexerDomain[];
-    }>(V1_GET_DOMAINS, { ids: nameHashes, first: nameHashes.length });
+    }>(V1_GET_DOMAINS, { ids: nameHashes, first: nameHashes.length }, 'domains');
 
     return { domains: data.domains, usedFallback };
   }
@@ -428,7 +444,7 @@ export class IndexerService {
     const query = this.apiVersion === 'v2' ? V2_GET_MIGRATION_STATUS : V1_GET_MIGRATION_STATUS;
     const { data, usedFallback } = await this.executeQuery<{
       domain: IndexerMigrationStatus | null;
-    }>(query, { id });
+    }>(query, { id }, 'domain');
 
     return { status: data.domain, usedFallback };
   }
@@ -442,7 +458,7 @@ export class IndexerService {
     const query = this.apiVersion === 'v2' ? V2_GET_HIERARCHY : V1_GET_HIERARCHY;
     const { data, usedFallback } = await this.executeQuery<{
       domain: IndexerHierarchyItem | null;
-    }>(query, { id });
+    }>(query, { id }, 'domain');
 
     return { hierarchy: data.domain, usedFallback };
   }

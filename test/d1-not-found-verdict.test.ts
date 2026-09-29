@@ -110,14 +110,36 @@ describe('D1 last-resort tier vs not-found verdicts', () => {
 });
 
 describe('a malformed primary-index response is not a clean miss', () => {
-  it.each(['{}', '{"data":null}', '{"message":"maintenance"}', '{"data":{}}', '{"data":{"domainz":null}}'])('HTTP 200 %s: the miss is not definitive, D1 still serves', async (body) => {
-    const { svc, d1 } = makeService('miss');
-    // Replace the stubbed v2 tier with the real indexer transport.
+  const MALFORMED = ['{}', '{"data":null}', '{"message":"maintenance"}', '{"data":{}}', '{"data":{"domainz":null}}'];
+
+  // Replace the stubbed v2 tier with the real indexer transport answering `body`.
+  function answerV2With(svc: MetadataService, body: string) {
     vi.mocked((svc as unknown as Internals).indexerV2.getDomain).mockRestore();
     vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })));
+  }
+
+  it.each(MALFORMED)('HTTP 200 %s: the miss is not definitive, D1 still serves', async (body) => {
+    const { svc, d1 } = makeService('miss');
+    answerV2With(svc, body);
     try {
       const meta = await svc.getMetadata('sepolia', 'registry', 'gone.eth', 'https://meta.test');
       expect(meta.name).toBe('gone.eth');
+      expect(d1.getDomain).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(MALFORMED)('HTTP 200 %s with no D1 row: an upstream failure (503), not a 404', async (body) => {
+    // The v1 index and the chain miss cleanly, but the v2 index never said the
+    // name is absent, so the outcome is "unknown", not "not found".
+    const { svc, d1 } = makeService('miss');
+    d1.getDomain.mockResolvedValue(null);
+    answerV2With(svc, body);
+    try {
+      const failure = await svc.getMetadata('sepolia', 'registry', 'gone.eth', 'https://meta.test').catch((e: unknown) => e);
+      expect(failure).toBeInstanceOf(UpstreamError);
+      expect(failure).not.toBeInstanceOf(NotFoundError);
       expect(d1.getDomain).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
