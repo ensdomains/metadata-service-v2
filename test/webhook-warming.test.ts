@@ -329,6 +329,65 @@ describe('webhook body size cap', () => {
     expect(warmState.persist).toEqual([]);
     expect(warmState.warm).toEqual([]);
   });
+
+  // The route clones the request (to parse it for warming) before the service
+  // reads it. A cloned body is a tee: its source is released only once both
+  // branches are cancelled, so on a 413 the route must cancel the clone it will
+  // never read, as the service cancels its own branch.
+  const CHUNK = new Uint8Array(16 * 1024).fill(0x20);
+
+  // An endless request body, recording how many chunks were pulled from it and
+  // whether it was released (cancelled).
+  function endlessBody() {
+    const source = { pulled: 0, cancelled: false };
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) { source.pulled++; controller.enqueue(CHUNK); },
+      cancel() { source.cancelled = true; },
+    });
+    return { stream, source };
+  }
+
+  async function postBody(
+    app: Awaited<ReturnType<typeof loadApp>>,
+    body: ReadableStream<Uint8Array>,
+    headers: Record<string, string>,
+  ) {
+    const tasks: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => tasks.push(p), passThroughOnException: () => {} };
+    const req = new Request('http://localhost/webhook', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body, duplex: 'half',
+    } as RequestInit);
+    const res = await app.request(req, undefined, makeEnv(), ctx as unknown as ExecutionContext);
+    await Promise.allSettled(tasks);
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the cancellations settle
+    return res;
+  }
+
+  it('413s a streamed body with no Content-Length at the cap and releases it, clone included', async () => {
+    warmState.mode = 'record';
+    const app = await loadApp();
+    const { MAX_WEBHOOK_BODY_BYTES } = await import('../src/services/webhook');
+    const { stream, source } = endlessBody();
+
+    const res = await postBody(app, stream, {});
+    expect(res.status).toBe(413);
+    expect(source.pulled * CHUNK.byteLength).toBeLessThanOrEqual(MAX_WEBHOOK_BODY_BYTES + 3 * CHUNK.byteLength);
+    expect(source.cancelled).toBe(true);
+    expect(warmState.warm).toEqual([]);
+  });
+
+  it('413s a body whose Content-Length is over the cap without reading it, and releases it', async () => {
+    warmState.mode = 'record';
+    const app = await loadApp();
+    const { MAX_WEBHOOK_BODY_BYTES } = await import('../src/services/webhook');
+    const { stream, source } = endlessBody();
+
+    const res = await postBody(app, stream, { 'Content-Length': String(MAX_WEBHOOK_BODY_BYTES + 1) });
+    expect(res.status).toBe(413);
+    expect(source.pulled).toBeLessThanOrEqual(2); // the streams' own read-ahead, nothing more
+    expect(source.cancelled).toBe(true);
+    expect(warmState.warm).toEqual([]);
+  });
 });
 
 describe.skipIf(!hasSqlite)('D1 storeMigrationStatus — partial (webhook-shaped) writes', () => {

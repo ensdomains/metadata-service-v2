@@ -1234,10 +1234,16 @@ const handleWebhook = async (c: AppContext) => {
           console.warn('[webhook] cache warming failed:', err);
         }
       })());
+    } else {
+      // Rejected (e.g. 413): the clone is never read. A cloned body is a tee,
+      // released only once both branches are cancelled, and the service has
+      // read or cancelled its own, so cancel this one too.
+      bodyClone.body?.cancel().catch(() => {});
     }
 
     return response;
   } catch (error) {
+    bodyClone.body?.cancel().catch(() => {});
     console.error("Webhook handling error:", error);
     return c.json({ error: "Webhook processing failed" }, 500);
   }

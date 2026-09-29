@@ -384,9 +384,12 @@ export class WebhookService {
 // Reads a request body as UTF-8 text, like Request.text(), or returns null once
 // it is known to be larger than maxBytes: at once when Content-Length says so,
 // otherwise (e.g. a chunked body, which has none) as soon as the bytes read
-// pass the cap, without reading the rest.
+// pass the cap. Either way the rest of the body is cancelled, not read.
 async function readBodyCapped(req: Request, maxBytes: number): Promise<string | null> {
-  if (Number(req.headers.get('Content-Length')) > maxBytes) return null;
+  if (Number(req.headers.get('Content-Length')) > maxBytes) {
+    req.body?.cancel().catch(() => {});
+    return null;
+  }
   if (!req.body) return '';
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
