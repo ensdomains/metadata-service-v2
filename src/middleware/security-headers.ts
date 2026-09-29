@@ -33,10 +33,16 @@ export const API_CONTENT_SECURITY_POLICY =
 export const MEDIA_CONTENT_SECURITY_POLICY =
   "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; sandbox";
 
-// One image type, with parameters but no second type after a comma. Only HTTP
-// whitespace (tab, space) may surround it, as browsers parse it; \s would also
-// accept \v or NBSP before the type.
-const SINGLE_IMAGE_TYPE = /^[\t ]*image\/[\w!#$&^.+-]+[\t ]*(;[^,]*)?$/i;
+// One image type, with parameters but no second type. Browsers split a
+// Content-Type into types at each comma outside a double-quoted string (Fetch
+// "get, decode, and split"), so a quoted parameter such as
+// name="portrait,large.svg" does not start a second type. Parameters with a
+// comma must keep every comma inside a closed quoted string that holds no
+// backslash, so the split never depends on how a browser ends an unclosed
+// string or reads a backslash escape; parameters without a comma are one type
+// however they are read. Only HTTP whitespace (tab, space) may surround the
+// type, as browsers parse it; \s would also accept \v or NBSP before it.
+const SINGLE_IMAGE_TYPE = /^[\t ]*image\/[\w!#$&^.+-]+[\t ]*(;([^,]*|([^",]|"[^"\\]*")*))?$/i;
 
 function isMediaResponse(headers: Headers): boolean {
   return SINGLE_IMAGE_TYPE.test(headers.get('Content-Type') ?? '');

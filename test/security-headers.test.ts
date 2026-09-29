@@ -173,6 +173,13 @@ describe('what counts as media', () => {
     'image/svg+xml; charset=utf-8',
     'image/svg+xml ; charset=utf-8',
     'image/png\t;q=1',
+    // A comma inside a quoted parameter does not start a second type.
+    'image/svg+xml; name="portrait,large.svg"',
+    'image/png; a="x,y"; b=c',
+    'image/svg+xml; a=",text/html;b="',
+    // Without a comma it is one type however a backslash or an unclosed quote is read.
+    'image/png; a="x\\y"',
+    'image/png; a="x',
   ])('a single image type (%j) gets the media CSP', async (type) => {
     expect(await served(type)).toBe(MEDIA_CSP);
   });
@@ -181,6 +188,12 @@ describe('what counts as media', () => {
     'image/png, text/html',
     'image/png,text/html;charset=utf-8',
     'image/svg+xml; charset="a", text/html',
+    'image/png; a="x,y", text/html',
+    // An unclosed quote, or a backslash in one, leaves where the type ends to
+    // how the browser reads it.
+    'image/png; a="x, text/html',
+    'image/png; a="x\\",text/html;b="',
+    'image/png; a="x\\"",text/html;b="',
     'text/html',
     'image/',
     'imagefoo/png',
