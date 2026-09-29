@@ -24,7 +24,8 @@ export const REGISTRY_CACHE_MAX_ENTRIES = 10_000;
  *  match the code plus the standard unknown-field/argument message family. The
  *  only queries routed through this check are the fixed id-filter lookups and
  *  registry(address), so a validation error can only mean the filter or that
- *  query is missing from the schema. */
+ *  query is missing from the schema. (The id-filter lookups also filter by
+ *  `registry`, so an indexer without that filter reads the same way.) */
 function isSchemaValidationError(error: UpstreamError): boolean {
   const cause = (error as { cause?: unknown }).cause as
     | { response?: { errors?: Array<{ message?: string; extensions?: { code?: string } }> } }
@@ -209,8 +210,9 @@ const V2_GET_DOMAINS = `
 // registry: an id is the labelhash plus a version, so the same id exists in
 // every registry that has that label (test.eth's id also matches test.<x>.eth
 // in each subregistry with a `test` label). The default filter leaves out
-// unreachable domains (in a registry no longer linked into the tree), which
-// have no name to serve. The `name` variant picks one row by name among a
+// unreachable domains (orphaned by a subregistry repoint, an unregistered
+// label or an expired ancestor), which have no name to serve, and
+// unnormalized ones. The `name` variant picks one row by name among a
 // registry's alias rows (see findCanonicalDomain).
 const v2GetDomainsByIdFilter = (filterField: 'tokenId' | 'canonicalId', byName = false) => `
   query GetDomainsBy_${filterField}${byName ? '_name' : ''}($id: String!, $registry: String!${byName ? ', $name: String!' : ''}) {
@@ -620,7 +622,7 @@ export class IndexerService {
     } catch (error) {
       if (error instanceof UpstreamError && isSchemaValidationError(error)) {
         this.idFilterUnsupportedUntil[field] = Date.now() + ID_FILTER_RECHECK_MS;
-        console.warn(`[indexer] ${field} filter not in deployed schema yet, treating as miss:`, error.message);
+        console.warn(`[indexer] ${field}/registry filter not in deployed schema yet, treating as miss:`, error.message);
         return { domain: null, usedFallback: false };
       }
       throw error;

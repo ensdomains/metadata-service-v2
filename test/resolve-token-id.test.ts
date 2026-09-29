@@ -336,6 +336,55 @@ describe('MetadataService.resolveTokenId', () => {
       ).rejects.toBeInstanceOf(UpstreamError);
     });
 
+    describe('as deployed on sepolia: v2 configured, with the v1 subgraph', () => {
+      let svc: MetadataService;
+
+      beforeEach(() => {
+        svc = new MetadataService(
+          {
+            indexerV2Endpoint: 'https://test-ensnode.example.com/subgraph',
+            indexerV1Endpoint: 'https://v1.test/subgraph',
+            fallbackToBlockchain: false,
+            internalCacheEnabled: false,
+            d1Enabled: false,
+          },
+          mockKV as unknown as KVNamespace,
+          { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
+          mockD1 as unknown as D1Database,
+        );
+        (svc as unknown as { blockchain: { isV2Configured: ReturnType<typeof vi.fn> } })
+          .blockchain.isV2Configured.mockReturnValue(true);
+      });
+
+      it('takes the ETHRegistry path, not the registry lookup: a namehash-form id still resolves', async () => {
+        const hash = '0x54cb177469278d1e8e843f0d60633cb4b038af8c4c5be8993161e87ca4a50b4c'; // namehash(fox.eth)
+        mockGetDomainByNamehash.mockResolvedValue({ domain: { name: 'fox.eth' }, usedFallback: false });
+
+        await expect(svc.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash))
+          .resolves.toEqual({ name: 'fox.eth', registryType: 'registry' });
+        expect(mockGetRegistry).not.toHaveBeenCalled();
+      });
+
+      it('does not serve a subname the v1 subgraph names for a namehash-form id', async () => {
+        const hash = '0x' + 'ab'.repeat(32); // namehash of a subname
+        mockGetDomainByNamehash
+          .mockResolvedValueOnce({ domain: null, usedFallback: false }) // v2
+          .mockResolvedValueOnce({ domain: { name: 'sub.foo.eth' }, usedFallback: false }); // v1
+
+        await expect(svc.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash)).rejects.toThrow('No domain found for tokenId');
+        expect(mockGetDomainByNamehash).toHaveBeenCalledTimes(2);
+      });
+
+      it('rethrows the v2 outage when only the v1 subgraph answers, with a subname', async () => {
+        const hash = '0x' + 'ab'.repeat(32);
+        mockGetDomainByNamehash
+          .mockRejectedValueOnce(new UpstreamError('indexer down')) // v2
+          .mockResolvedValueOnce({ domain: { name: 'sub.foo.eth' }, usedFallback: false }); // v1
+
+        await expect(svc.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash)).rejects.toBeInstanceOf(UpstreamError);
+      });
+    });
+
     it('404s (NotFound, not "unknown contract") for a native v2 tokenId that no indexer can reverse', async () => {
       // The ERC1155 tokenId is the labelhash with its low 32 bits replaced by the
       // token version — the real labelhash is unrecoverable, so the indexer misses.

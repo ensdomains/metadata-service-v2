@@ -556,8 +556,9 @@ export class MetadataService {
    *   unknown contract (getRegistry caches the answer per isolate).
    * - A token is served under the registry's canonical name, never an alias
    *   (see IndexerService.getDomainByTokenId).
-   * - A token the registry does not hold, or whose registry is no longer
-   *   linked into the tree (unreachable, so it has no name to serve), is a 404.
+   * - A token the registry does not hold, or one that is unreachable (orphaned
+   *   by a subregistry repoint, an unregistered label or an expired ancestor,
+   *   so it has no name to serve), is a 404.
    * - The root registry's tokens are top-level names (eth, DNS TLDs), which
    *   this service has no metadata or card for: a 404.
    * - An indexer outage throws UpstreamError (a 503, not cached).

@@ -291,12 +291,16 @@ describe('IndexerService — v2 (zigens) dialect', () => {
       nextResponse = { registry: null };
       const svc = makeV2();
       const address = (i: number) => `0x${i.toString(16).padStart(40, '0')}`;
-      for (let i = 0; i <= REGISTRY_CACHE_MAX_ENTRIES; i++) await svc.getRegistry(address(i));
+      for (let i = 0; i < REGISTRY_CACHE_MAX_ENTRIES; i++) await svc.getRegistry(address(i));
+      await svc.getRegistry(address(0)); // a hit: now the most recently used
+      expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES);
+
+      await svc.getRegistry(address(REGISTRY_CACHE_MAX_ENTRIES)); // one too many
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES + 1);
 
-      await svc.getRegistry(address(REGISTRY_CACHE_MAX_ENTRIES)); // still cached
+      await svc.getRegistry(address(0)); // kept: used after address(1)
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES + 1);
-      await svc.getRegistry(address(0)); // the oldest was dropped
+      await svc.getRegistry(address(1)); // dropped: the least recently used
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES + 2);
     });
 
