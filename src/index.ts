@@ -50,6 +50,13 @@ export interface Env {
   // D1 Database
   DB: D1Database;
 
+  // Rate Limiting bindings, one per rate-limit bucket (wrangler.toml
+  // [[ratelimits]]). A missing one makes that bucket use the KV counter.
+  RATE_LIMITER_DEFAULT?: RateLimit;
+  RATE_LIMITER_BATCH?: RateLimit;
+  RATE_LIMITER_WEBHOOK?: RateLimit;
+  RATE_LIMITER_RASTERIZE?: RateLimit;
+  RATE_LIMITER_IMAGE?: RateLimit;
 
   // Environment Variables
   ENSNODE_MAINNET_URL: string;
@@ -1140,7 +1147,7 @@ app.get(
 // (see services/webhook.ts) — the indexer is just the current caller.
 const handleWebhook = async (c: AppContext) => {
   // Clone before the service consumes the body, so we can read it for warming
-  // without interfering with signature verification (which reads c.req.text()).
+  // without interfering with signature verification (which reads c.req.raw).
   const bodyClone = c.req.raw.clone();
   const { webhookService } = getServices(c.env, 'mainnet');
 
@@ -1227,10 +1234,16 @@ const handleWebhook = async (c: AppContext) => {
           console.warn('[webhook] cache warming failed:', err);
         }
       })());
+    } else {
+      // Rejected (e.g. 413): the clone is never read. A cloned body is a tee,
+      // released only once both branches are cancelled, and the service has
+      // read or cancelled its own, so cancel this one too.
+      bodyClone.body?.cancel().catch(() => {});
     }
 
     return response;
   } catch (error) {
+    bodyClone.body?.cancel().catch(() => {});
     console.error("Webhook handling error:", error);
     return c.json({ error: "Webhook processing failed" }, 500);
   }

@@ -4,6 +4,7 @@ import { CacheService, CacheKeys, CacheTTL } from "./cache";
 import { BlockchainService } from "./blockchain";
 import { ResolverService } from "./resolver";
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from "./fallback";
+import { SharedBreakerState } from "./breaker-state";
 import { D1Service } from "./d1";
 import { SyncService, DEFAULT_SYNC_CONFIG } from "./sync";
 import { ExpiryVerdictCache, expiryVerdictKey } from "./expiry-verdict-cache";
@@ -173,6 +174,9 @@ export class MetadataService {
       this.blockchain,
       this.resolver,
       indexerV1,
+      // The indexer breaker's trips are shared with the other isolates through
+      // KV, per network (each network has its own indexer).
+      new SharedBreakerState(kv, `breaker:indexerV2:${this.network}`, fallbackConfig.indexerV2.healthCheckIntervalMs),
     );
 
     // Initialize D1 and sync services if enabled
@@ -1315,7 +1319,7 @@ export class MetadataService {
 
   // Reset fallback service health status
   resetFallbackHealth() {
-    this.fallback.resetHealthStatus();
+    return this.fallback.resetHealthStatus();
   }
 
   // Sync operations (if D1 is enabled)

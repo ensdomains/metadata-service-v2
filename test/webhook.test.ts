@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { WebhookService, timingSafeEqualHex } from '../src/services/webhook';
+import { WebhookService, timingSafeEqualHex, MAX_WEBHOOK_BODY_BYTES } from '../src/services/webhook';
 
 // --- helpers ---
 
@@ -19,16 +19,19 @@ async function signZigens(secretHex: string, ts: number, body: string): Promise<
   return `sha256=${hex}`;
 }
 
-// Minimal Hono Context double: only what WebhookService touches.
-function makeCtx(body: string, headers: Record<string, string> = {}) {
-  const textSpy = vi.fn(async () => body);
-  const lower: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v;
+// Minimal Hono Context double: only what WebhookService touches. The request is
+// a real Request (c.req.raw), whose body can be read once.
+function makeCtx(body: string | ReadableStream<Uint8Array>, headers: Record<string, string> = {}) {
+  const raw = new Request('https://metadata.test/webhook', {
+    method: 'POST', headers, body, duplex: 'half',
+  } as RequestInit);
+  const textSpy = vi.fn(() => raw.text());
   return {
     textSpy,
     req: {
+      raw,
       text: textSpy,
-      header: (name: string) => lower[name.toLowerCase()],
+      header: (name: string) => raw.headers.get(name) ?? undefined,
     },
     json: (obj: any, status = 200) =>
       new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } }),
@@ -130,11 +133,13 @@ describe('WebhookService (zigens contract)', () => {
       expect(fakes.storageManager.deleteByPrefix).toHaveBeenCalledWith('svg/svg:vitalik.eth:');
     });
 
-    it('reads the request body exactly once', async () => {
+    it('reads the request body exactly once, through the size-capped read', async () => {
       const { svc } = makeService({ requireAuth: false, allowUnauthenticated: true });
       const ctx = makeCtx(JSON.stringify(validEvent()));
-      await svc.handleWebhook(ctx);
-      expect(ctx.textSpy).toHaveBeenCalledTimes(1);
+      const getReader = vi.spyOn(ctx.req.raw.body, 'getReader');
+      expect((await svc.handleWebhook(ctx)).status).toBe(200);
+      expect(getReader).toHaveBeenCalledTimes(1);
+      expect(ctx.textSpy).not.toHaveBeenCalled(); // c.req.text() reads with no cap
     });
 
     it('no-ops invalidation for a name-less (namehash-only) event', async () => {
@@ -214,6 +219,76 @@ describe('WebhookService (zigens contract)', () => {
         'X-Webhook-Timestamp': String(staleTs),
       }));
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe('body size cap', () => {
+    // A signed, otherwise valid event whose body is exactly `size` bytes.
+    async function signedEventOfSize(size: number) {
+      const ts = Math.floor(Date.now() / 1000);
+      const unpadded = JSON.stringify(validEvent({ timestamp: ts, data: '' })).length;
+      const body = JSON.stringify(validEvent({ timestamp: ts, data: ' '.repeat(size - unpadded) }));
+      const headers = { 'X-Webhook-Signature': await signZigens(SECRET, ts, body), 'X-Webhook-Timestamp': String(ts) };
+      return { body, headers };
+    }
+
+    // A stream of `bytes` in `chunkSize` pieces, counting the pieces pulled.
+    function chunked(bytes: Uint8Array, chunkSize: number) {
+      const counter = { pulled: 0 };
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = bytes.subarray(counter.pulled * chunkSize, (counter.pulled + 1) * chunkSize);
+          counter.pulled++;
+          if (chunk.length === 0) controller.close();
+          else controller.enqueue(chunk);
+        },
+      });
+      return { stream, counter };
+    }
+
+    it('413s a body whose Content-Length is over the cap without reading it; one at the cap passes', async () => {
+      const { svc, fakes } = makeService({ requireAuth: true, secret: SECRET });
+
+      const atCap = await signedEventOfSize(MAX_WEBHOOK_BODY_BYTES);
+      const ok = makeCtx(atCap.body, { ...atCap.headers, 'Content-Length': String(MAX_WEBHOOK_BODY_BYTES) });
+      expect((await svc.handleWebhook(ok)).status).toBe(200);
+      fakes.cache.delete.mockClear();
+
+      const over = await signedEventOfSize(MAX_WEBHOOK_BODY_BYTES + 1);
+      const ctx = makeCtx(over.body, { ...over.headers, 'Content-Length': String(MAX_WEBHOOK_BODY_BYTES + 1) });
+      const getReader = vi.spyOn(ctx.req.raw.body, 'getReader');
+      const res = await svc.handleWebhook(ctx);
+      expect(res.status).toBe(413);
+      expect(await res.json()).toEqual({ error: 'Payload too large' });
+      expect(getReader).not.toHaveBeenCalled();
+      expect(ctx.textSpy).not.toHaveBeenCalled();
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+    });
+
+    it('413s a streamed body without Content-Length as soon as it passes the cap; a normal one passes', async () => {
+      const { svc, fakes } = makeService({ requireAuth: true, secret: SECRET });
+
+      // A normal signed event, in small pieces that split its multi-byte characters.
+      const ts = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify(validEvent({ timestamp: ts, data: '{"note":"café ✓"}' }));
+      const normal = chunked(new TextEncoder().encode(body), 7);
+      const ok = makeCtx(normal.stream, {
+        'X-Webhook-Signature': await signZigens(SECRET, ts, body),
+        'X-Webhook-Timestamp': String(ts),
+      });
+      expect(ok.req.raw.headers.get('Content-Length')).toBeNull();
+      expect((await svc.handleWebhook(ok)).status).toBe(200);
+      fakes.cache.delete.mockClear();
+
+      // 1 MiB in 16 KiB pieces: the read stops at the 5th piece (80 KiB).
+      const big = await signedEventOfSize(1024 * 1024);
+      const over = chunked(new TextEncoder().encode(big.body), 16 * 1024);
+      const ctx = makeCtx(over.stream, big.headers);
+      expect(ctx.req.raw.headers.get('Content-Length')).toBeNull();
+      const res = await svc.handleWebhook(ctx);
+      expect(res.status).toBe(413);
+      expect(over.counter.pulled).toBeLessThanOrEqual(6);
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
     });
   });
 

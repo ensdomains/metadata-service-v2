@@ -61,6 +61,37 @@ database_name = "ens-metadata-db"
 database_id = "5b6e560b-4ecf-4e8a-962e-b7d67181c01c"
 preview_database_id = "ens-metadata-database-preview-id"
 
+# Rate Limiting bindings: one per rate-limit bucket in
+# src/middleware/validation.ts (RATE_LIMIT_BUCKETS), with the same limit per
+# 60s, counted per client IP (CF-Connecting-IP). namespace_id is a positive
+# integer, unique among the rate limiters of the Cloudflare account.
+[[ratelimits]]
+name = "RATE_LIMITER_DEFAULT"
+namespace_id = "1001"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_BATCH"
+namespace_id = "1002"
+simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_WEBHOOK"
+namespace_id = "1003"
+# One transaction can emit a burst of events from the one sender, and a 429
+# drops that event's cache purge and warm-up.
+simple = { limit = 600, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_RASTERIZE"
+namespace_id = "1004"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "RATE_LIMITER_IMAGE"
+namespace_id = "1005"
+simple = { limit = 60, period = 60 }
+
 
 # Environment variables
 [vars]
