@@ -135,14 +135,16 @@ function edgeCachePut(c: any, response: Response, maxAgeSecs: number = EDGE_CACH
   }
 }
 
-// A media response served from the edge cache, with MEDIA_SECURITY_HEADERS
-// whatever it was stored with. An entry stored before those headers existed
-// can be up to EDGE_CACHE_MAX_AGE_SECS old when a deploy adds them (and the
-// KV/R2 card version bump does not reach this URL-keyed cache); the headers
-// are what keeps its bytes inert on this origin.
+// A media response served from the edge cache, with any of
+// MEDIA_SECURITY_HEADERS it was stored without. An entry stored before those
+// headers existed can be up to EDGE_CACHE_MAX_AGE_SECS old when a deploy adds
+// them (and the KV/R2 card version bump does not reach this URL-keyed cache);
+// the headers are what keeps its bytes inert on this origin. A header the entry
+// carries is kept, as the security-headers middleware keeps a CSP a handler
+// set: every entry is one of this service's own responses.
 function withMediaSecurityHeaders(response: Response): Response {
   for (const [header, value] of Object.entries(MEDIA_SECURITY_HEADERS)) {
-    response.headers.set(header, value);
+    if (!response.headers.has(header)) response.headers.set(header, value);
   }
   return response;
 }
