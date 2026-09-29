@@ -75,17 +75,31 @@ describe('toLiveGatewayUrl', () => {
   });
 });
 
+// A resolver's IPFS gateway as a URL. ens-avatar 2.0.0-alpha.3 stores the
+// option in canonical form ("https://gw.example/"); alpha.2 kept it as given.
+const gatewayOf = (resolver: unknown) =>
+  new URL((resolver as { options: { ipfs: string } }).options.ipfs).href;
+
 describe('ens-avatar resolution through the gateway', () => {
   it('gives both resolvers the gateway', () => {
     const svc = new AvatarService('https://rpc.invalid', mainnet, undefined, '0x' + '11'.repeat(20), GW);
     const { resolver, legacyResolver } = svc as unknown as { resolver: AvatarResolver; legacyResolver: AvatarResolver };
-    expect((resolver as unknown as { options: { ipfs: string } }).options.ipfs).toBe(GW);
-    expect((legacyResolver as unknown as { options: { ipfs: string } }).options.ipfs).toBe(GW);
+    expect(gatewayOf(resolver)).toBe(new URL(GW).href);
+    expect(gatewayOf(legacyResolver)).toBe(new URL(GW).href);
   });
 
   it('defaults both resolvers to Filebase', () => {
     const svc = new AvatarService('https://rpc.invalid', mainnet);
-    expect((svc as unknown as { resolver: { options: { ipfs: string } } }).resolver.options.ipfs).toBe(DEFAULT_IPFS_GATEWAY);
+    expect(gatewayOf((svc as unknown as { resolver: AvatarResolver }).resolver)).toBe(new URL(DEFAULT_IPFS_GATEWAY).href);
+  });
+
+  it('gives the resolvers a gateway ens-avatar accepts, whatever IPFS_GATEWAY carries', () => {
+    // alpha.3 throws on a gateway with a query, fragment or credentials, which
+    // would fail every avatar request; IPFS_GATEWAY is reduced to its origin.
+    const gateway = parseIpfsGateway('https://user:pass@my-gw.example/some/path?x=1#y');
+    expect(gateway).toBe('https://my-gw.example');
+    const svc = new AvatarService('https://rpc.invalid', mainnet, undefined, '0x' + '11'.repeat(20), gateway);
+    expect(gatewayOf((svc as unknown as { resolver: AvatarResolver }).resolver)).toBe('https://my-gw.example/');
   });
 
   it("the library resolves ipfs:// and ipns:// records and ipfs.io links with that option", () => {
@@ -137,8 +151,8 @@ describe('avatar media fetches', () => {
     const { AvatarResolver: Resolver } = await import('@ensdomains/ens-avatar');
     const gateways: string[] = [];
     vi.spyOn(Resolver.prototype, 'getAvatar').mockImplementation(async function (this: { options?: { ipfs?: string } }) {
-      gateways.push(String(this.options?.ipfs));
-      return `${this.options?.ipfs}/ipfs/QmHash`;
+      gateways.push(new URL(String(this.options?.ipfs)).href);
+      return new URL('/ipfs/QmHash', this.options?.ipfs).href;
     });
     const fetched: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -151,7 +165,7 @@ describe('avatar media fetches', () => {
     const res = await app.request('/mainnet/avatar/nick.eth', undefined, env as unknown as Record<string, unknown>, ctx);
 
     expect(res.status).toBe(200);
-    expect(gateways).toEqual(['https://my-gw.myfilebase.com']);
+    expect(gateways).toEqual(['https://my-gw.myfilebase.com/']);
     expect(fetched).toEqual(['https://my-gw.myfilebase.com/ipfs/QmHash']);
   });
 });
