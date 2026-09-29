@@ -35,10 +35,19 @@ describe('parseIpfsGateway', () => {
     ['https://my-gw.myfilebase.com', 'https://my-gw.myfilebase.com'],
     ['https://my-gw.myfilebase.com/', 'https://my-gw.myfilebase.com'],
     ['https://my-gw.myfilebase.com/ipfs/', 'https://my-gw.myfilebase.com'],
+    ['https://my-gw.myfilebase.com:443', 'https://my-gw.myfilebase.com'],
+    ['https://my-gw.example:8443', DEFAULT_IPFS_GATEWAY],
     ['http://my-gw.example', DEFAULT_IPFS_GATEWAY],
     ['my-gw.example', DEFAULT_IPFS_GATEWAY],
   ])('%j → %s', (value, expected) => {
     expect(parseIpfsGateway(value)).toBe(expected);
+  });
+
+  it("refuses another port, which ens-avatar drops when it moves an ipfs.io link", () => {
+    const { uri } = avatarUtils.resolveURI('https://ipfs.io/ipfs/QmHash', { ipfs: 'https://my-gw.example:8443' });
+    expect(uri).toBe('https://my-gw.example/ipfs/QmHash');
+    expect(parseIpfsGateway('https://my-gw.example:8443')).toBe(DEFAULT_IPFS_GATEWAY);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('IPFS_GATEWAY="https://my-gw.example:8443"'));
   });
 
   it('defaults to Filebase', () => {
