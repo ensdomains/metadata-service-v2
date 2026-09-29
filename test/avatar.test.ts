@@ -46,6 +46,9 @@ const NFT_RECORD = 'eip155:1/erc721:0xabc/1';
 
 const CID = 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG';
 
+// A 1x1 PNG: the library checks a raster data: URI's bytes against its type.
+const PNG_DATA_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
 const IMG_URL = 'https://meta.test/mainnet/avatar/nick.eth';
 
 describe('AvatarService.getAvatarMeta', () => {
@@ -91,15 +94,21 @@ describe('AvatarService.getAvatarMeta', () => {
   });
 
   it('rewrites an ipfs:// image to a public gateway URL', async () => {
-    const primary = { getMetadata: vi.fn().mockResolvedValue({ uri: 'nick.eth', image: 'ipfs://QmHash/pic.png' }) };
+    const primary = { getMetadata: vi.fn().mockResolvedValue({ uri: 'nick.eth', image: `ipfs://${CID}/pic.png` }) };
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
-    expect(result?.image).toBe('https://ipfs.io/ipfs/QmHash/pic.png');
+    expect(result?.image).toBe(`https://ipfs.io/ipfs/${CID}/pic.png`);
   });
 
   it('rewrites the ipfs://ipfs/ prefix form', async () => {
-    const primary = { getMetadata: vi.fn().mockResolvedValue({ image: 'ipfs://ipfs/QmHash' }) };
+    const primary = { getMetadata: vi.fn().mockResolvedValue({ image: `ipfs://ipfs/${CID}` }) };
     const result = await makeService(primary).getAvatarMeta('nick.eth', IMG_URL);
-    expect(result?.image).toBe('https://ipfs.io/ipfs/QmHash');
+    expect(result?.image).toBe(`https://ipfs.io/ipfs/${CID}`);
+  });
+
+  it('has no image for an ipfs:// URI that is not a CID, which the avatar endpoint does not serve either', async () => {
+    const primary = { getMetadata: vi.fn().mockResolvedValue({ image: 'ipfs://QmHash/pic.png' }) };
+    expect(await makeService(primary).getAvatarMeta('nick.eth', IMG_URL)).toBeNull();
+    expect(utils.getImageURI({ metadata: { image: 'ipfs://QmHash/pic.png' } })).toBeNull();
   });
 
   it('rewrites an ar:// image to the Arweave gateway', async () => {
@@ -204,8 +213,7 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script></svg>',
     '  <?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>',
     'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+',
-    'data:image/svg+xml,%3Csvg%20onload%3D%22alert(1)%22%2F%3E',
-    'data:image/png;base64,iVBORw0KGgo=',
+    PNG_DATA_URI,
   ])('replaces an inline image (%j) with the avatar image URL', async (image) => {
     const result = await makeService(uriMeta({ image, image_url: image })).getAvatarMeta('nick.eth', IMG_URL);
     expect(result?.image).toBe(IMG_URL);
@@ -213,6 +221,30 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
     const body = JSON.stringify(result);
     expect(body).not.toContain('data:');
     expect(body).not.toContain('<');
+  });
+
+  it.each([
+    ['a URL-encoded SVG data: URI', 'data:image/svg+xml,%3Csvg%20onload%3D%22alert(1)%22%2F%3E'],
+    ['an SVG data: URI with a charset', `data:image/svg+xml;charset=utf-8;base64,${Buffer.from('<svg/>').toString('base64')}`],
+    ['an upper-case SVG data: URI', `DATA:IMAGE/SVG+XML;base64,${Buffer.from('<svg/>').toString('base64')}`],
+    ['a PNG data: URI whose bytes are not a PNG', 'data:image/png;base64,iVBORw0KGgo='],
+  ])('has no image for an inline image the avatar endpoint does not serve (%s)', async (_, image) => {
+    // The endpoint serves what ens-avatar resolves, which is nothing for these;
+    // an avatar image URL here would point at a 404.
+    expect(utils.getImageURI({ metadata: { image } })).toBeNull();
+    expect(await makeService(uriMeta({ image })).getAvatarMeta('nick.eth', IMG_URL)).toBeNull();
+  });
+
+  it.each([
+    ['an inline image_url behind a remote image, which the endpoint does not serve, is dropped',
+      { image: 'https://cdn.test/a.png', image_url: PNG_DATA_URI }, { image: 'https://cdn.test/a.png' }],
+    ['an inline image_url that is the image the endpoint serves is the avatar image URL',
+      { image: '', image_url: PNG_DATA_URI }, { image: IMG_URL, image_url: IMG_URL }],
+    ['a remote image_url behind an inline image is kept',
+      { image: PNG_DATA_URI, image_url: 'https://cdn.test/b.png' }, { image: IMG_URL, image_url: 'https://cdn.test/b.png' }],
+  ])('image_url: %s', async (_, meta, expected) => {
+    const result = await makeService(uriMeta({ name: 'x', ...meta })).getAvatarMeta('nick.eth', IMG_URL);
+    expect(result).toEqual({ name: 'x', uri: 'nick.eth', ...expected });
   });
 
   it('never echoes image_data, even next to an http(s) image', async () => {
@@ -223,7 +255,7 @@ describe('AvatarService.getAvatarMeta sanitization', () => {
   });
 
   it('treats an inline image as unusable when no avatar image URL is supplied', async () => {
-    const primary = uriMeta({ image: 'data:image/png;base64,iVBORw0KGgo=' });
+    const primary = uriMeta({ image: PNG_DATA_URI });
     expect(await makeService(primary).getAvatarMeta('nick.eth')).toBeNull();
   });
 
@@ -572,4 +604,45 @@ describe('AvatarService.getAvatarMeta with the real ens-avatar resolver', () => 
     expect(uriResult).not.toHaveProperty('host_meta');
     expect(nftResult).toMatchObject({ is_owner: true, host_meta: { token_id: '7' } });
   });
+
+  // /meta points an inline image at the avatar endpoint, on this service's
+  // origin. The endpoint serves what ens-avatar resolves: an inline SVG only in
+  // the library's sanitized form, so no script or handler reaches the origin,
+  // and /meta points there only when the endpoint serves an image at all.
+  const EVIL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script>'
+    + '<a href="javascript:alert(3)"><rect width="9" height="9"/></a>'
+    + '<foreignObject><iframe src="javascript:alert(4)"></iframe></foreignObject></svg>';
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+  const INLINE: Record<string, string> = {
+    'a base64 SVG data: URI': `data:image/svg+xml;base64,${b64(EVIL_SVG)}`,
+    'a URL-encoded SVG data: URI': `data:image/svg+xml,${encodeURIComponent(EVIL_SVG)}`,
+    'SVG markup': EVIL_SVG,
+    'SVG markup with an XML declaration': `<?xml version="1.0"?>${EVIL_SVG}`,
+    'an upper-case SVG data: URI': `DATA:IMAGE/SVG+XML;base64,${b64(EVIL_SVG)}`,
+    'a mixed-case SVG data: URI': `Data:Image/Svg+Xml;base64,${b64(EVIL_SVG)}`,
+    'an SVG data: URI with a charset': `data:image/svg+xml;charset=utf-8;base64,${b64(EVIL_SVG)}`,
+    'SVG labelled as a PNG': `data:image/png;base64,${b64(EVIL_SVG)}`,
+    'an SVG data: URI after whitespace': `  data:image/svg+xml;base64,${b64(EVIL_SVG)}`,
+  };
+  const PLACES: Record<string, (value: string) => Parameters<typeof realService>[0]> = {
+    'the avatar record': (value) => ({ records: { 'nick.eth': value } }),
+    'the record JSON image': (value) => ({ records: { 'nick.eth': RECORD_URL }, recordJson: { image: value } }),
+    'the record JSON image_url': (value) => ({ records: { 'nick.eth': RECORD_URL }, recordJson: { image_url: value } }),
+    'the record JSON image_data': (value) => ({ records: { 'nick.eth': RECORD_URL }, recordJson: { image_data: value } }),
+    'NFT token metadata': (value) => ({ records: { 'nick.eth': `eip155:1/erc721:${CONTRACT}/7` }, tokenMeta: { image: value } }),
+  };
+  it.each(Object.keys(INLINE).flatMap((inline) => Object.keys(PLACES).map((place) => [inline, place])))(
+    '%s in %s: /meta points at the avatar endpoint exactly when it serves the image, never active SVG',
+    async (inline, place) => {
+      const svc = realService(PLACES[place](INLINE[inline]));
+      const meta = await svc.getAvatarMeta('nick.eth', IMG_URL);
+      const served = await svc.getAvatarImage('nick.eth');
+
+      expect(meta?.image === IMG_URL).toBe(served !== null);
+      if (served) {
+        expect(served.mimeType).toBe('image/svg+xml');
+        expect(served.buffer.toString('utf8')).not.toMatch(/<script|\son\w+\s*=|javascript:|<iframe|<foreignObject/i);
+      }
+    },
+  );
 });
