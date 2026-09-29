@@ -70,3 +70,9 @@ MAX_AVATAR_BYTES = "26214400"  # 25 MB cap on fetched avatar size (DoS guard)
 # Secrets (set via `wrangler secret put`, never in plaintext here):
 #   WEBHOOK_SECRET   — required in production (webhook is fail-closed without it)
 #   MAINNET_RPC_URL, SEPOLIA_RPC_URL — primary RPC endpoints (required)
+
+# Cron triggers (UTC). Daily D1 retention run, the `scheduled` handler in
+# src/index.ts: deletes cached rows not refreshed within D1_RETENTION_SECS
+# (default 30 days). Off-peak, and off the top of the hour.
+[triggers]
+crons = ["17 4 * * *"]

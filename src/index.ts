@@ -16,6 +16,7 @@ import { MetadataService, DomainExpiredError } from "./services/metadata";
 import { canonicalizeName, validateEnsName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
+import { runD1Retention } from "./services/d1";
 import { ImageGenerationService } from "./services/image";
 import { AvatarService } from "./services/avatar";
 import { ImageCacheService } from "./services/image-cache";
@@ -60,6 +61,8 @@ export interface Env {
   WEBHOOK_ALLOW_UNAUTHENTICATED?: string; // local dev only: accept webhooks without a secret
   RATE_LIMIT_DISABLED?: string;
   MAX_AVATAR_BYTES?: string; // max fetched avatar size in bytes (default 25 MB)
+  D1_READ_MAX_AGE_SECS?: string; // D1 rows older than this are a miss (default 7 days)
+  D1_RETENTION_SECS?: string; // daily cron deletes D1 rows older than this (default 30 days)
   LOG_LEVEL: string;
 }
 
@@ -160,6 +163,25 @@ function getIndexerV2Url(env: Env, network: NetworkName): string {
   return env[NETWORKS[network].indexerV2UrlEnvKey];
 }
 
+// Optional duration override in seconds → ms. Unset/invalid → undefined, so the
+// service's default applies.
+// A duration env var in whole seconds, or undefined (the caller's default) when
+// it is unset, not a whole number of seconds (e.g. "30d", which parseInt would
+// read as 30) or below `minSecs`.
+function envSecsToMs(name: string, value: string | undefined, minSecs = 1): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
+  const secs = /^\s*\d+\s*$/.test(value) ? Number(value) : NaN;
+  if (!(secs >= minSecs)) {
+    console.warn(`[config] ignoring ${name}=${JSON.stringify(value)}: expected whole seconds, at least ${minSecs}`);
+    return undefined;
+  }
+  return secs * 1000;
+}
+
+// A retention below a day is taken for a unit slip (seconds meant as days):
+// the next cron run would delete almost every D1 row.
+const MIN_D1_RETENTION_SECS = 24 * 60 * 60;
+
 function getImageServices(env: Env, network: NetworkName): ImageServices {
   const cached = _imageServices.get(network);
   if (cached) return cached;
@@ -197,6 +219,7 @@ function getServices(env: Env, network: NetworkName): FullServices {
       fallbackToBlockchain: true,
       internalCacheEnabled: true,
       d1Enabled: true,
+      d1ReadMaxAgeMs: envSecsToMs('D1_READ_MAX_AGE_SECS', env.D1_READ_MAX_AGE_SECS),
     },
     env.METADATA_CACHE,
     {
@@ -403,6 +426,7 @@ async function handleMetadata(
       registryType as 'registry' | 'namewrapper',
       name,
       baseUrl,
+      c.executionCtx,
     ),
   );
 
@@ -664,6 +688,7 @@ app.post("/batch-metadata", async (c) => {
               registryType as 'registry' | 'namewrapper',
               name,
               baseUrl,
+              c.executionCtx,
             ),
           );
           return { name, metadata };
@@ -1023,5 +1048,15 @@ export function errorHandler(err: unknown, c: any): Response | Promise<Response>
 
 app.onError(errorHandler);
 
+// Cron trigger ([triggers] in wrangler.toml): the daily D1 retention run.
+const scheduled: ExportedHandlerScheduledHandler<Env> = async (_controller, env) => {
+  if (!env.DB) {
+    console.warn('[d1-retention] no D1 binding, skipped');
+    return;
+  }
+  await runD1Retention(env.DB, envSecsToMs('D1_RETENTION_SECS', env.D1_RETENTION_SECS, MIN_D1_RETENTION_SECS));
+};
 
-export default app;
+// The Worker's handlers: the Hono app (fetch, plus the request() helper the
+// tests call) with the cron handler attached.
+export default Object.assign(app, { scheduled });

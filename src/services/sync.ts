@@ -1,7 +1,7 @@
 // Sync service for storing ensnode data in D1 for fast local queries
 import { D1Service } from './d1';
 import { IndexerService, type IndexerDomain } from './indexer';
-import { validateEnsName } from '../utils/ens';
+import { validateEnsName, canonicalizeName } from '../utils/ens';
 import { MIGRATION_STATUS } from '../types';
 import { classifyV2IndexerRecord } from '../utils/migration';
 
@@ -28,8 +28,10 @@ export class SyncService {
     private config: SyncConfig
   ) {}
 
-  // Sync a single domain from ensnode to D1
-  async syncDomain(name: string, force: boolean = false): Promise<SyncResult> {
+  // Sync a single domain from ensnode to D1. `fetched` is the domain the caller
+  // already read from the same indexer (getMetadata): it is stored as-is
+  // instead of being queried again.
+  async syncDomain(name: string, force: boolean = false, fetched?: IndexerDomain): Promise<SyncResult> {
     const startTime = Date.now();
     let processed = 0;
     let stored = 0;
@@ -57,8 +59,10 @@ export class SyncService {
 
       processed = 1;
 
-      // Fetch from ensnode
-      const { domain, usedFallback } = await this.indexerV2.getDomain(name);
+      // Fetch from ensnode, unless the caller already has the domain
+      const { domain, usedFallback } = fetched
+        ? { domain: fetched, usedFallback: false }
+        : await this.indexerV2.getDomain(name);
 
       if (domain) {
         await this.d1.storeDomain(domain, 'ensnode');
@@ -114,7 +118,7 @@ export class SyncService {
         const existingMap = new Map(existing.map(d => [d.name, d]));
 
         namesToSync = validNames.filter(name => {
-          const record = existingMap.get(name);
+          const record = existingMap.get(canonicalizeName(name));
           return !record || (Date.now() - record.last_updated) >= this.config.staleThreshold;
         });
       }
