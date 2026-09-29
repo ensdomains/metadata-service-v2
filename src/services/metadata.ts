@@ -6,6 +6,7 @@ import { ResolverService } from "./resolver";
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from "./fallback";
 import { D1Service } from "./d1";
 import { SyncService, DEFAULT_SYNC_CONFIG } from "./sync";
+import { ExpiryVerdictCache, expiryVerdictKey } from "./expiry-verdict-cache";
 import type {
   MetadataResponse,
   MetadataAttribute,
@@ -115,6 +116,9 @@ export class MetadataService {
   private fallback: FallbackService;
   private d1?: D1Service;
   private sync?: SyncService;
+  // Live checkExpiry verdicts for this network, so the per-request expiry gate
+  // reads the chain once per live name per TTL (see expiry-verdict-cache.ts).
+  private expiryVerdicts = new ExpiryVerdictCache();
 
   constructor(
     config: MetadataServiceConfig,
@@ -312,6 +316,9 @@ export class MetadataService {
   //    unknown + v1 lapsed" must not 410 a name that may be live on v2. (This is
   //    different from v2-not-deployed → getV2Registration returns null → the v1
   //    registrar is genuinely authoritative.)
+  //  - Every request runs this gate, so a live verdict read from the chain is
+  //    cached in-isolate (expiry-verdict-cache.ts). An expired verdict never is
+  //    (a renewal can undo it at any moment), and neither is a fail-open outcome.
   async checkExpiry(name: string): Promise<void> {
     // ENS names are case-insensitive but labelhash is not: canonicalize before
     // the suffix check and any hashing, so `DeadName.ETH` gets the same verdict
@@ -320,6 +327,10 @@ export class MetadataService {
     const canonical = canonicalizeName(name);
     if (!canonical.endsWith('.eth') || canonical.split('.').length !== 2) return;
 
+    const verdictKey = expiryVerdictKey(canonical);
+    if (this.expiryVerdicts.isLive(verdictKey)) return;
+
+    // The fail-open returns below cache nothing; settleExpiry caches a live verdict.
     if (this.blockchain.isV2Configured(this.network)) {
       let v2: { status: number; expiry: bigint } | null;
       try {
@@ -329,23 +340,41 @@ export class MetadataService {
         return;
       }
       if (v2 && v2.status === 2) {
-        if (v2.expiry && Number(v2.expiry) * 1000 < Date.now()) {
-          throw new DomainExpiredError(canonical, new Date(Number(v2.expiry) * 1000));
-        }
+        this.settleExpiry(canonical, verdictKey, v2.expiry);
         return; // live on v2 — ignore any lapsed v1 registration
       }
     }
 
+    let expiry: bigint;
     try {
       const label = canonical.split('.')[0];
       const hash = labelhash(label);
-      const expiry = await this.blockchain.getExpiry(this.network, hash);
-      if (expiry && Number(expiry) * 1000 < Date.now()) {
-        throw new DomainExpiredError(canonical, new Date(Number(expiry) * 1000));
-      }
+      expiry = await this.blockchain.getExpiry(this.network, hash);
     } catch (error) {
-      if (error instanceof DomainExpiredError) throw error;
       console.warn(`Failed to check expiry for ${canonical}:`, error);
+      return;
+    }
+    this.settleExpiry(canonical, verdictKey, expiry);
+  }
+
+  // Throws DomainExpiredError (→ 410) if an expiry read from the chain (unix
+  // seconds; 0 when there is none) has passed, and caches the live verdict
+  // otherwise.
+  private settleExpiry(canonical: string, verdictKey: string, expiry: bigint): void {
+    const expiryMs = Number(expiry) * 1000;
+    if (expiry && expiryMs < Date.now()) {
+      throw new DomainExpiredError(canonical, new Date(expiryMs));
+    }
+    this.expiryVerdicts.setLive(verdictKey, expiry ? expiryMs : null);
+  }
+
+  /** Drops this isolate's cached expiry verdict for a changed name, given by
+   *  whichever of the name and its namehash a webhook event carries, so the
+   *  next request re-reads the chain. */
+  evictExpiryVerdict({ name, namehash }: { name?: string | null; namehash?: unknown }): void {
+    if (name) this.expiryVerdicts.delete(expiryVerdictKey(canonicalizeName(name)));
+    if (typeof namehash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(namehash)) {
+      this.expiryVerdicts.delete(namehash.toLowerCase());
     }
   }
 
