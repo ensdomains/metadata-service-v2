@@ -2,6 +2,7 @@ import { AvatarResolver } from '@ensdomains/ens-avatar';
 import { fromViem } from '@ensdomains/ens-avatar/viem';
 import { createPublicClient, http, isAddress, type Chain } from 'viem';
 import { normalize } from '../utils/ens';
+import { toSafeImage } from './media-safety';
 
 export interface AvatarImage {
   buffer: Buffer;
@@ -45,16 +46,6 @@ const MEDIA_RESOLVE_TIMEOUT_MS = 8_000;
 // by ~33%, and the rendered SVG is cached in KV (25 MB value limit) — so an avatar
 // above ~18 MB renders but its SVG won't fit in KV and just won't be cached.
 const DEFAULT_MAX_AVATAR_BYTES = 25 * 1024 * 1024; // 25 MB
-
-/** Detect image MIME type from magic bytes */
-function detectMimeType(buffer: Buffer): string | null {
-  if (buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg';
-  if (buffer[0] === 0x89 && buffer[1] === 0x50) return 'image/png';
-  if (buffer[0] === 0x47 && buffer[1] === 0x49) return 'image/gif';
-  if (buffer[0] === 0x52 && buffer[1] === 0x49) return 'image/webp';
-  if (buffer[0] === 0x3c) return 'image/svg+xml';
-  return null;
-}
 
 /**
  * Rewrite decentralized-storage URIs (ipfs://, ar://) to public HTTPS gateways so
@@ -270,20 +261,30 @@ export class AvatarService {
     }
   }
 
-  /** Materialize a resolved media URI (data: or http(s)) into image bytes. */
+  /**
+   * Materialize a resolved media URI (data: or http(s)) into image bytes.
+   *
+   * The bytes are chosen by the name's owner and are served on this origin and
+   * embedded in the NFT card, so the declared type (data: URI prefix or remote
+   * Content-Type) is never used: toSafeImage derives the type from the bytes
+   * themselves, accepts SVG only with an <svg> root (served unchanged under
+   * MEDIA_SECURITY_HEADERS), and rejects anything outside the image allowlist.
+   */
   private async fetchMedia(uri: string, kind: string, name: string): Promise<AvatarImage | null> {
     // Handle data URIs (already base64 encoded)
     if (uri.startsWith('data:')) {
-      const mimeTypeMatch = uri.match(/[^:]\w+\/[\w-+\d.]+(?=;|,)/);
       const base64data = uri.split('base64,')[1];
 
-      if (!base64data || !mimeTypeMatch) {
+      if (!base64data) {
         console.warn(`Invalid data URI format for ${kind} of ${name}`);
         return null;
       }
 
-      const buffer = Buffer.from(base64data, 'base64');
-      return { buffer, mimeType: mimeTypeMatch[0] };
+      const safe = toSafeImage(Buffer.from(base64data, 'base64'));
+      if (!safe) {
+        console.warn(`Rejected ${kind} data URI for ${name}: not an allowlisted image`);
+      }
+      return safe;
     }
 
     // Handle HTTP/HTTPS URLs (ens-avatar resolves IPFS and NFTs to HTTP URLs)
@@ -314,10 +315,11 @@ export class AvatarService {
         console.warn(`${kind} for ${name} too large (${arrayBuffer.byteLength} bytes)`);
         return null;
       }
-      const buffer = Buffer.from(arrayBuffer);
-      const mimeType = detectMimeType(buffer) || response.headers.get('Content-Type') || 'image/png';
-
-      return { buffer, mimeType };
+      const safe = toSafeImage(Buffer.from(arrayBuffer));
+      if (!safe) {
+        console.warn(`Rejected ${kind} for ${name}: not an allowlisted image`);
+      }
+      return safe;
     }
 
     console.warn(`Unsupported ${kind} URI format for ${name}: ${uri}`);

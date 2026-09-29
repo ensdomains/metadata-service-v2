@@ -23,6 +23,7 @@ import { ImageCacheService } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
 import { RasterizeService } from "./services/rasterize";
+import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
 import { CachePresets } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
@@ -107,6 +108,18 @@ function edgeCachePut(c: any, response: Response): void {
     const edgeCopy = new Response(clone.body, { status: clone.status, statusText: clone.statusText, headers });
     c.executionCtx.waitUntil(cfCache.put(c.req.url, edgeCopy));
   }
+}
+
+// A media response served from the edge cache, with MEDIA_SECURITY_HEADERS
+// whatever it was stored with. An entry stored before those headers existed
+// can be up to EDGE_CACHE_MAX_AGE_SECS old when a deploy adds them (and the
+// KV/R2 card version bump does not reach this URL-keyed cache); the headers
+// are what keeps its bytes inert on this origin.
+function withMediaSecurityHeaders(response: Response): Response {
+  for (const [header, value] of Object.entries(MEDIA_SECURITY_HEADERS)) {
+    response.headers.set(header, value);
+  }
+  return response;
 }
 
 // Central error → HTTP response mapper. Maps the resolution-layer error taxonomy
@@ -338,6 +351,7 @@ app.get(
       return new Response(new Uint8Array(avatar.buffer), {
         status: 200,
         headers: {
+          ...MEDIA_SECURITY_HEADERS,
           'Content-Type': avatar.mimeType,
           'Content-Length': avatar.buffer.length.toString(),
           'Cache-Control': 'public, max-age=3600',
@@ -410,6 +424,7 @@ app.get(
       return new Response(new Uint8Array(header.buffer), {
         status: 200,
         headers: {
+          ...MEDIA_SECURITY_HEADERS,
           'Content-Type': header.mimeType,
           'Content-Length': header.buffer.length.toString(),
           'Cache-Control': 'public, max-age=3600',
@@ -499,6 +514,7 @@ async function handleImage(c: any, network: NetworkName, name: string) {
   const response = new Response(result.svg, {
     status: 200,
     headers: {
+      ...MEDIA_SECURITY_HEADERS,
       'Content-Type': result.contentType,
       'X-Cache-Status': cacheStatus,
       'Cache-Control': `public, max-age=${ttlConfig.softTtl}, stale-while-revalidate=${ttlConfig.hardTtl - ttlConfig.softTtl}`,
@@ -925,7 +941,7 @@ app.get(
     try {
       // L0 edge: short-circuit before any tokenId resolution, expiry RPC, or render.
       const edgeHit = await edgeCacheMatch(c);
-      if (edgeHit) return edgeHit;
+      if (edgeHit) return withMediaSecurityHeaders(edgeHit);
 
       let name: string;
 
@@ -991,7 +1007,7 @@ app.get(
       const cfCache = getCfCache();
       if (cfCache) {
         const cached = await cfCache.match(c.req.url);
-        if (cached) return new Response(cached.body, cached);
+        if (cached) return withMediaSecurityHeaders(new Response(cached.body, cached));
       }
 
       // Don't render an NFT for an expired name (existence is enforced below via
@@ -1043,6 +1059,7 @@ app.get(
       const pngResponse = new Response(png.buffer as ArrayBuffer, {
         status: 200,
         headers: {
+          ...MEDIA_SECURITY_HEADERS,
           'Content-Type': 'image/png',
           'Content-Length': png.byteLength.toString(),
           'X-Cache-Status': result.cacheStatus,
