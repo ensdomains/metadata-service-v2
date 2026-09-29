@@ -85,22 +85,55 @@ describe('RasterizeService', () => {
     expect(createRasterizer).toHaveBeenCalledTimes(1);
   });
 
-  it('stops waiting on an init that never settles, and the next request starts a fresh one', async () => {
-    const { RasterizeService, RASTERIZER_INIT_WAIT_MS } = await import('../src/services/rasterize');
+  // An R2 read that answers after `ms` of fake time.
+  const after = (ms: number) => new Promise((resolve) => setTimeout(() => resolve(r2Object([0])), ms));
+
+  it('serves a slow but healthy init to the request that started it and to those waiting on it', async () => {
+    const { RasterizeService } = await import('../src/services/rasterize');
     createRasterizer.mockResolvedValue(renderer);
-    // The first init's R2 reads never settle (its request was cancelled).
-    let hung = true;
-    const r2 = { get: vi.fn(() => (hung ? never() : Promise.resolve(r2Object([0])))) } as unknown as R2Bucket;
+    const r2 = { get: vi.fn(() => after(20_000)) } as unknown as R2Bucket;
     const svc = new RasterizeService();
 
-    const first = svc.rasterize('<svg/>', r2).catch((e: Error) => e.message);
-    const waiter = await within(svc.rasterize('<svg/>', r2), RASTERIZER_INIT_WAIT_MS + 50);
-    expect(waiter).toEqual({ error: `Rasterizer init did not finish within ${RASTERIZER_INIT_WAIT_MS} ms` });
+    const both = await within(Promise.all([svc.rasterize('<svg/>', r2), svc.rasterize('<svg/>', r2)]), 20_050);
 
-    hung = false;
-    expect(await within(svc.rasterize('<svg/>', r2), 100)).toEqual(new Uint8Array([0x89, 0x50]));
+    expect(both).toEqual([new Uint8Array([0x89, 0x50]), new Uint8Array([0x89, 0x50])]);
     expect(createRasterizer).toHaveBeenCalledTimes(1);
-    // The request that started the stuck init gives up too.
-    expect(await first).toBe(`Rasterizer init did not finish within ${RASTERIZER_INIT_WAIT_MS} ms`);
+  });
+
+  it('never starts a second init while the first may still be loading, and replaces one that cannot be', async () => {
+    const { RasterizeService, RASTERIZER_INIT_STALE_MS } = await import('../src/services/rasterize');
+    createRasterizer.mockResolvedValue(renderer);
+    // The first init's R2 reads never settle (its request's lifetime ended).
+    let hung = true;
+    const get = vi.fn(() => (hung ? never() : Promise.resolve(r2Object([0]))));
+    const r2 = { get } as unknown as R2Bucket;
+    const svc = new RasterizeService();
+
+    void svc.rasterize('<svg/>', r2);
+    const readsPerInit = get.mock.calls.length;
+    // Within the stale age, later requests wait on the same init: no new reads.
+    await vi.advanceTimersByTimeAsync(RASTERIZER_INIT_STALE_MS);
+    expect(await within(svc.rasterize('<svg/>', r2), 100)).toBe('PENDING');
+    expect(get.mock.calls.length).toBe(readsPerInit);
+
+    // Past it, the stranded init cannot still be loading: a fresh one starts.
+    hung = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await within(svc.rasterize('<svg/>', r2), 100)).toEqual(new Uint8Array([0x89, 0x50]));
+    expect(get.mock.calls.length).toBe(2 * readsPerInit);
+    expect(createRasterizer).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers the init with waitUntil, so a cancelled request does not cut it off', async () => {
+    const { RasterizeService } = await import('../src/services/rasterize');
+    createRasterizer.mockResolvedValue(renderer);
+    const r2 = bucket([async () => r2Object([0])]);
+    const svc = new RasterizeService();
+    const waitUntil = vi.fn();
+
+    await within(Promise.all([svc.rasterize('<svg/>', r2, { waitUntil }), svc.rasterize('<svg/>', r2, { waitUntil })]), 100);
+
+    expect(waitUntil).toHaveBeenCalledTimes(1); // by the request that started the init
+    await expect(waitUntil.mock.calls[0][0]).resolves.not.toThrow();
   });
 });

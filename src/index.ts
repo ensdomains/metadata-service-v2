@@ -869,7 +869,7 @@ app.get(
       }
 
       // Rasterize SVG to PNG
-      const png = await rasterizeService.rasterize(svgForRasterize, c.env.ASSET_BUCKET);
+      const png = await rasterizeService.rasterize(svgForRasterize, c.env.ASSET_BUCKET, c.executionCtx);
 
       const pngResponse = new Response(png.buffer as ArrayBuffer, {
         status: 200,
