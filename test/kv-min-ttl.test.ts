@@ -43,31 +43,101 @@ describe('CacheService.set', () => {
   });
 });
 
+// A KV namespace whose every write fails (an outage, or a rate-limited put).
+function failingKv() {
+  return { ...strictKv(), put: vi.fn().mockRejectedValue(new Error('KV PUT failed: 503 Service Unavailable')) };
+}
+
+type HierarchyInternals = {
+  fallback: { getRegistryHierarchy: ReturnType<typeof vi.fn> };
+  d1?: { getHierarchy: ReturnType<typeof vi.fn> };
+};
+
+function hierarchyService(kv: ReturnType<typeof strictKv>) {
+  const svc = new MetadataService(
+    {
+      indexerV2Endpoint: 'https://ensnode.test/graphql',
+      network: 'mainnet',
+      fallbackToBlockchain: true,
+      internalCacheEnabled: true,
+      d1Enabled: false,
+    },
+    kv as unknown as KVNamespace,
+    { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
+  );
+  return { svc, internals: svc as unknown as HierarchyInternals };
+}
+
+const chainBuilt = () =>
+  vi.fn().mockResolvedValue({
+    data: { name: 'sub.nick.eth', owner: { id: OWNER }, resolver: { address: RESOLVER } },
+    source: 'blockchain',
+    usedFallback: true,
+  });
+
+const allSourcesFail = () => vi.fn().mockRejectedValue(new Error('indexer and RPC unavailable'));
+
 describe('MetadataService.getRegistryHierarchy with the internal cache on', () => {
   it('returns a chain-built hierarchy instead of failing on its cache write', async () => {
     const kv = strictKv();
-    const svc = new MetadataService(
-      {
-        indexerV2Endpoint: 'https://ensnode.test/graphql',
-        network: 'mainnet',
-        fallbackToBlockchain: true,
-        internalCacheEnabled: true,
-        d1Enabled: false,
-      },
-      kv as unknown as KVNamespace,
-      { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
-    );
-    (svc as unknown as { fallback: { getRegistryHierarchy: ReturnType<typeof vi.fn> } }).fallback = {
-      getRegistryHierarchy: vi.fn().mockResolvedValue({
-        data: { name: 'sub.nick.eth', owner: { id: OWNER }, resolver: { address: RESOLVER } },
-        source: 'blockchain',
-        usedFallback: true,
-      }),
-    };
+    const { svc, internals } = hierarchyService(kv);
+    internals.fallback = { getRegistryHierarchy: chainBuilt() };
 
     const result = await svc.getRegistryHierarchy('sub.nick.eth');
 
     expect(result.hierarchy).toEqual([{ name: 'sub.nick.eth', owner: OWNER, resolver: RESOLVER, level: 3 }]);
     expect(kv.put).toHaveBeenCalledWith(expect.stringContaining('hierarchy'), expect.any(String), { expirationTtl: 60 });
+  });
+});
+
+// Each answer is cached right before it is returned, so a write that threw
+// would fail the request: from the chain-built and D1 paths it would drop to
+// the last-resort answer, whose own write would then throw out of the method.
+describe('MetadataService.getRegistryHierarchy when every cache write fails', () => {
+  it('still returns the chain-built hierarchy', async () => {
+    const kv = failingKv();
+    const { svc, internals } = hierarchyService(kv);
+    internals.fallback = { getRegistryHierarchy: chainBuilt() };
+
+    const result = await svc.getRegistryHierarchy('sub.nick.eth');
+
+    expect(result.hierarchy).toEqual([{ name: 'sub.nick.eth', owner: OWNER, resolver: RESOLVER, level: 3 }]);
+    expect(kv.put).toHaveBeenCalledTimes(1);
+  });
+
+  it('still returns the stale D1 hierarchy when every live source fails', async () => {
+    const kv = failingKv();
+    const { svc, internals } = hierarchyService(kv);
+    const d1Records = [
+      { name: 'eth', owner: OWNER, resolver: RESOLVER, level: 1 },
+      { name: 'nick.eth', owner: OWNER, resolver: RESOLVER, level: 2 },
+    ];
+    internals.fallback = { getRegistryHierarchy: allSourcesFail() };
+    internals.d1 = { getHierarchy: vi.fn().mockResolvedValue(d1Records) };
+
+    const result = await svc.getRegistryHierarchy('nick.eth');
+
+    expect(result).toEqual({ name: 'nick.eth', hierarchy: d1Records });
+    expect(kv.put).toHaveBeenCalledTimes(1);
+  });
+
+  it('still returns the last-resort basic hierarchy, whose write comes right before the return', async () => {
+    const kv = failingKv();
+    const { svc, internals } = hierarchyService(kv);
+    internals.fallback = { getRegistryHierarchy: allSourcesFail() };
+
+    const result = await svc.getRegistryHierarchy('sub.nick.eth');
+
+    const zero = '0x0000000000000000000000000000000000000000';
+    const resolver = expect.stringMatching(/^0x[0-9a-fA-F]{40}$/);
+    expect(result).toEqual({
+      name: 'sub.nick.eth',
+      hierarchy: [
+        { name: 'eth', owner: zero, resolver, level: 1 },
+        { name: 'nick.eth', owner: zero, resolver, level: 2 },
+        { name: 'sub.nick.eth', owner: zero, resolver, level: 3 },
+      ],
+    });
+    expect(kv.put).toHaveBeenCalledTimes(1);
   });
 });
