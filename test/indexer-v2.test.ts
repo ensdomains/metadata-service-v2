@@ -22,6 +22,7 @@ vi.mock('graphql-request', () => ({
 }));
 
 import { IndexerService } from '../src/services/indexer';
+import { UpstreamError } from '../src/services/errors';
 import { namehash } from '../src/utils/ens';
 
 function makeV2() {
@@ -164,5 +165,44 @@ describe('IndexerService — v2 (zigens) dialect', () => {
     await v1.getDomain('fox.eth');
 
     expect(requests[0].variables).toEqual({ name: namehash('fox.eth') });
+  });
+});
+
+// A 200 whose body is not an answer to the query (a proxy or maintenance page,
+// {"data":null}, {"data":{}}) must fail like a transport error, not read as "no
+// such name": the fallback layer would take that for a clean miss (→ 404).
+describe('IndexerService — a response that is not an answer', () => {
+  const lookups: Array<[string, (idx: IndexerService) => Promise<unknown>, string]> = [
+    ['getDomain', (idx) => idx.getDomain('fox.eth'), 'domain'],
+    ['getDomainByNamehash', (idx) => idx.getDomainByNamehash(namehash('fox.eth')), 'domain'],
+    ['getDomains', (idx) => idx.getDomains(['fox.eth']), 'domains'],
+    ['getMigrationStatus', (idx) => idx.getMigrationStatus('fox.eth'), 'domain'],
+    ['getHierarchy', (idx) => idx.getHierarchy('fox.eth'), 'domain'],
+  ];
+  const NOT_ANSWERS: Array<[string, unknown]> = [
+    ['no data', undefined],
+    ['data: null', null],
+    ['data: {}', {}],
+    ['another field', { domainz: null, domainss: [] }],
+  ];
+
+  beforeEach(() => {
+    requests.length = 0;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it.each(lookups.flatMap(([method, call]) => NOT_ANSWERS.map(([label, body]) => [method, label, call, body] as const)))(
+    '%s with %s: UpstreamError after the retry',
+    async (_method, _label, call, body) => {
+      nextResponse = body;
+      await expect(call(makeV2())).rejects.toBeInstanceOf(UpstreamError);
+      expect(requests).toHaveLength(2);
+    },
+  );
+
+  it.each(lookups)('%s with the queried field present and null (or empty) is an answer', async (_method, call, field) => {
+    nextResponse = { [field]: field === 'domains' ? [] : null };
+    await expect(call(makeV2())).resolves.toBeDefined();
+    expect(requests).toHaveLength(1);
   });
 });
