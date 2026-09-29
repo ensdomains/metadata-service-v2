@@ -14,10 +14,15 @@ export interface CachedResponse<T> {
   compressed?: boolean;
 }
 
+// KV rejects an expirationTtl below 60 seconds (the put throws).
+export const KV_MIN_EXPIRATION_TTL_SECS = 60;
+
 export class CacheService {
   constructor(private kv: KVNamespace) {}
 
-  // Store data in cache with TTL
+  // Store data in cache with TTL (at least KV's minimum). Best-effort: a failed
+  // write is logged, never thrown, so caching an answer cannot fail the request
+  // that computed it.
   async set<T>(
     key: string,
     data: T,
@@ -51,9 +56,13 @@ export class CacheService {
       }
     }
 
-    await this.kv.put(cacheKey, serialized, {
-      expirationTtl: ttl,
-    });
+    try {
+      await this.kv.put(cacheKey, serialized, {
+        expirationTtl: Math.max(KV_MIN_EXPIRATION_TTL_SECS, ttl),
+      });
+    } catch (error) {
+      console.warn(`Cache write failed for ${cacheKey}:`, error);
+    }
   }
 
   // Get data from cache
