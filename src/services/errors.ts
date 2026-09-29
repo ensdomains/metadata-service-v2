@@ -31,6 +31,19 @@ export class UpstreamError extends Error {
   }
 }
 
+/**
+ * The request's deadline (request-budget.ts) ran out before a data source could
+ * answer. Still an UpstreamError (the data could not be read, never a clean
+ * miss), but it says nothing about that source's health, so it must not trip
+ * the circuit-breaker.
+ */
+export class RequestDeadlineError extends UpstreamError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'RequestDeadlineError';
+  }
+}
+
 export function isNotFoundError(e: unknown): e is NotFoundError {
   return e instanceof NotFoundError;
 }
