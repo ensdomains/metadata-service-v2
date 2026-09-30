@@ -490,7 +490,7 @@ export class MetadataService {
       registryType = 'registry';
       const hexId = tokenHex;
       try {
-        const { domain } = await this.indexerV2.getDomainByTokenId(hexId, { address: addr, name: 'eth' });
+        const { domain } = await this.indexerV2.getDomainByTokenId(hexId, addr);
         if (domain?.name) return { name: domain.name, registryType };
       } catch (error) {
         if (!(error instanceof UpstreamError)) throw error;
@@ -553,9 +553,11 @@ export class MetadataService {
    * the same id exists in every registry that has the label. `addr` is the
    * lowercase address.
    * - An address the indexer knows no registry at is a 404, as any other
-   *   unknown contract (getRegistry caches the answer per isolate).
-   * - A token is served under the registry's canonical name, never an alias
-   *   (see IndexerService.getDomainByTokenId).
+   *   unknown contract (isRegistry caches the answer per isolate).
+   * - A token is served under the registry's canonical name, never an alias,
+   *   with the name read in the token's own lookup: a registry moved under
+   *   another parent is named by where it is now (see
+   *   IndexerService.getDomainByTokenId).
    * - A token the registry does not hold, or one that is unreachable (orphaned
    *   by a subregistry repoint, an unregistered label or an expired ancestor,
    *   so it has no name to serve), is a 404.
@@ -569,11 +571,10 @@ export class MetadataService {
     tokenHex: `0x${string}`,
     tokenId: string,
   ): Promise<{ name: string; registryType: 'registry' }> {
-    const registry = await this.indexerV2.getRegistry(addr);
-    if (!registry) {
+    if (!(await this.indexerV2.isRegistry(addr))) {
       throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }
-    const { domain } = await this.indexerV2.getDomainByTokenId(tokenHex, { address: addr, name: registry.name });
+    const { domain } = await this.indexerV2.getDomainByTokenId(tokenHex, addr);
     if (!domain?.name) {
       throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
     }

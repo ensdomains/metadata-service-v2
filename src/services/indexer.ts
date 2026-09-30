@@ -8,11 +8,11 @@ import { timeLeftForAttempt } from "./request-budget";
 // lands, isolates pick it up within this window without a redeploy here).
 const ID_FILTER_RECHECK_MS = 10 * 60 * 1000;
 
-// How long a registry(address) answer is reused (see getRegistry). A hit also
-// carries the registry's name, which changes when it is moved under another
-// parent; a miss is kept as briefly, so a registry deployed since is
-// recognized soon after the indexer sees it.
-export const REGISTRY_KNOWN_TTL_MS = 10 * 60 * 1000;
+// How long an isRegistry answer is reused. Only whether the address is a
+// registry is kept, never its name (see findCanonicalDomain): a registry stays
+// one, so a hit is kept longer; a miss is kept briefly, so a registry deployed
+// since is recognized soon after the indexer sees it.
+export const REGISTRY_KNOWN_TTL_MS = 60 * 60 * 1000;
 export const REGISTRY_UNKNOWN_TTL_MS = 5 * 60 * 1000;
 /** Most addresses remembered per indexer; the least recently used is dropped beyond it. */
 export const REGISTRY_CACHE_MAX_ENTRIES = 10_000;
@@ -212,11 +212,12 @@ const V2_GET_DOMAINS = `
 // in each subregistry with a `test` label). The default filter leaves out
 // unreachable domains (orphaned by a subregistry repoint, an unregistered
 // label or an expired ancestor), which have no name to serve, and
-// unnormalized ones. The `name` variant picks one row by name among a
-// registry's alias rows (see findCanonicalDomain).
+// unnormalized ones. The first lookup also reads the registry's name, which
+// names the token (see findCanonicalDomain); the `name` variant then picks one
+// row by name among a registry's alias rows.
 const v2GetDomainsByIdFilter = (filterField: 'tokenId' | 'canonicalId', byName = false) => `
   query GetDomainsBy_${filterField}${byName ? '_name' : ''}($id: String!, $registry: String!${byName ? ', $name: String!' : ''}) {
-    domains(first: 1, where: { registry: $registry, ${filterField}: $id${byName ? ', name: $name' : ''} }) {
+${byName ? '' : '    registry(address: $registry) {\n      name\n    }\n'}    domains(first: 1, where: { registry: $registry, ${filterField}: $id${byName ? ', name: $name' : ''} }) {
       id
       name
       labelName
@@ -256,7 +257,6 @@ const V2_GET_REGISTRY = `
   query GetRegistry($address: String!) {
     registry(address: $address) {
       address
-      name
     }
   }
 `;
@@ -347,13 +347,6 @@ export interface IndexerDomain {
   /** Set ONLY by the blockchain fallback tier (fallback.ts): the on-chain
    *  classification of the record (`unmigrated` | `migrated`; never `native`). */
   chainMigrationStatus?: string;
-}
-
-/** A v2 registry as the indexer knows it. `name` is the name the registry
- *  holds the subnames of ("" for the root registry). */
-export interface IndexerRegistry {
-  address: string;
-  name: string;
 }
 
 export interface IndexerResponse<T> {
@@ -533,22 +526,22 @@ export class IndexerService {
   }
 
   // Reverse-resolve a native v2 registry tokenId (versioned labelhash) to the
-  // domain `registry` holds under it, by the registry's canonical name (see
-  // findCanonicalDomain), via the zigens tokenId/canonicalId filters. v2
+  // domain the registry at `registry` holds under it, by the registry's
+  // canonical name (see findCanonicalDomain), via the zigens tokenId/canonicalId filters. v2
   // dialect only — the v1 subgraph has no such tokens. Returns a clean null
   // when the deployed schema doesn't have the filters yet (they ship
   // separately, on the indexer side), so callers keep their pre-filter
   // behavior until the server deploy lands.
   async getDomainByTokenId(
     tokenId: `0x${string}`,
-    registry: IndexerRegistry,
+    registry: string,
   ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
     if (this.apiVersion !== 'v2') return { domain: null, usedFallback: false };
     const id = tokenId.toLowerCase();
-    const registryAddress = registry.address.toLowerCase();
+    const registryAddress = registry.toLowerCase();
 
     // Exact current-version id first (the common marketplace case) …
-    const byToken = await this.findCanonicalDomain('tokenId', id, registryAddress, registry.name);
+    const byToken = await this.findCanonicalDomain('tokenId', id, registryAddress);
     if (byToken.domain) return byToken;
 
     // … then the version-bits-zeroed form, which also matches ids from before a
@@ -557,7 +550,6 @@ export class IndexerService {
       'canonicalId',
       canonicalTokenId(id),
       registryAddress,
-      registry.name,
     );
     return {
       domain: byCanonical.domain,
@@ -574,18 +566,26 @@ export class IndexerService {
    * registry came first as rin.support.shopa.eth). The token's name is
    * `<label>.<registry name>` (the bare label in the root registry). When the
    * first row is not that name, one more lookup asks for it; no such row means
-   * the token has no canonical name, a miss. So is a row without a label name.
+   * the token has no canonical name, a miss. So is a row without a label name,
+   * or one from a registry the indexer does not know.
+   *
+   * The registry's name is read in the same query as the rows, never from a
+   * cache: a registry moved under another parent is renamed, and a name read
+   * earlier would pick its old path while that is still an alias row, or miss
+   * once it is gone.
    */
   private async findCanonicalDomain(
     field: 'tokenId' | 'canonicalId',
     id: string,
     registry: string,
-    registryName: string,
   ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
     const first = await this.queryDomainsByIdFilter(field, { id, registry }, V2_GET_DOMAINS_BY_ID[field]);
     const row = first.domain;
     if (!row) return first;
-    if (!row.labelName) return { domain: null, usedFallback: first.usedFallback };
+    const registryName = first.registryName;
+    if (!row.labelName || typeof registryName !== 'string') {
+      return { domain: null, usedFallback: first.usedFallback };
+    }
     const name = registryName ? `${row.labelName}.${registryName}` : row.labelName;
     if (row.name === name) return first;
     const canonical = await this.queryDomainsByIdFilter(
@@ -609,16 +609,16 @@ export class IndexerService {
     field: 'tokenId' | 'canonicalId',
     variables: { id: string; registry: string; name?: string },
     query: string,
-  ): Promise<{ domain: IndexerDomain | null; usedFallback: boolean }> {
+  ): Promise<{ domain: IndexerDomain | null; registryName?: string; usedFallback: boolean }> {
     if (Date.now() < this.idFilterUnsupportedUntil[field]) {
       return { domain: null, usedFallback: false };
     }
     try {
-      const { data, usedFallback } = await this.executeQuery<{ domains: IndexerDomain[] }>(
-        query,
-        variables,
-      );
-      return { domain: data.domains[0] ?? null, usedFallback };
+      const { data, usedFallback } = await this.executeQuery<{
+        domains: IndexerDomain[];
+        registry?: { name: string } | null;
+      }>(query, variables);
+      return { domain: data.domains[0] ?? null, registryName: data.registry?.name, usedFallback };
     } catch (error) {
       if (error instanceof UpstreamError && isSchemaValidationError(error)) {
         this.idFilterUnsupportedUntil[field] = Date.now() + ID_FILTER_RECHECK_MS;
@@ -629,55 +629,56 @@ export class IndexerService {
     }
   }
 
-  // registry(address) answers, per lowercase address: the registry or null,
-  // and until when to reuse it. Map order is recency (re-inserted on each hit).
-  private registryCache = new Map<string, { registry: IndexerRegistry | null; until: number }>();
+  // isRegistry answers, per lowercase address: whether it is a registry, and
+  // until when to reuse that. Map order is recency (re-inserted on each hit).
+  private registryCache = new Map<string, { known: boolean; until: number }>();
   private registryQueryUnsupportedUntil = 0;
 
   /**
-   * The v2 registry at `address`, or null when the indexer knows no registry
-   * there. Answers are cached per isolate (REGISTRY_KNOWN_TTL_MS for a
-   * registry, REGISTRY_UNKNOWN_TTL_MS for none, at most
-   * REGISTRY_CACHE_MAX_ENTRIES addresses), so a request for a random address
-   * costs one indexer query per isolate in that time rather than one each. An
-   * outage throws UpstreamError and is not cached. Null on the v1 dialect,
+   * Whether the indexer knows a v2 registry at `address`. Answers are cached
+   * per isolate (REGISTRY_KNOWN_TTL_MS for a registry, REGISTRY_UNKNOWN_TTL_MS
+   * for none, at most REGISTRY_CACHE_MAX_ENTRIES addresses), so a request for
+   * a random address costs one indexer query per isolate in that time rather
+   * than one each. Only that is cached: the registry's name, which changes when
+   * it moves, is read with each token lookup (see findCanonicalDomain). An
+   * outage throws UpstreamError and is not cached. False on the v1 dialect,
    * and while the deployed schema has no registry(address) query.
    */
-  async getRegistry(address: string): Promise<IndexerRegistry | null> {
-    if (this.apiVersion !== 'v2' || Date.now() < this.registryQueryUnsupportedUntil) return null;
+  async isRegistry(address: string): Promise<boolean> {
+    if (this.apiVersion !== 'v2' || Date.now() < this.registryQueryUnsupportedUntil) return false;
     const key = address.toLowerCase();
     const cached = this.registryCache.get(key);
     if (cached) {
       this.registryCache.delete(key);
       if (Date.now() < cached.until) {
         this.registryCache.set(key, cached);
-        return cached.registry;
+        return cached.known;
       }
     }
 
-    let registry: IndexerRegistry | null;
+    let known: boolean;
     try {
-      const { data } = await this.executeQuery<{ registry: IndexerRegistry | null }>(
+      const { data } = await this.executeQuery<{ registry: { address: string } | null }>(
         V2_GET_REGISTRY,
         { address: key },
         'registry',
       );
-      registry = data.registry;
+      known = data.registry !== null;
     } catch (error) {
       if (error instanceof UpstreamError && isSchemaValidationError(error)) {
         this.registryQueryUnsupportedUntil = Date.now() + ID_FILTER_RECHECK_MS;
         console.warn('[indexer] registry(address) query not in deployed schema yet, treating as unknown:', error.message);
-        return null;
+        return false;
       }
       throw error;
     }
 
-    const ttl = registry ? REGISTRY_KNOWN_TTL_MS : REGISTRY_UNKNOWN_TTL_MS;
-    this.registryCache.set(key, { registry, until: Date.now() + ttl });
+    const ttl = known ? REGISTRY_KNOWN_TTL_MS : REGISTRY_UNKNOWN_TTL_MS;
+    this.registryCache.set(key, { known, until: Date.now() + ttl });
     if (this.registryCache.size > REGISTRY_CACHE_MAX_ENTRIES) {
       this.registryCache.delete(this.registryCache.keys().next().value as string);
     }
-    return registry;
+    return known;
   }
 
   // Get multiple domains in batch

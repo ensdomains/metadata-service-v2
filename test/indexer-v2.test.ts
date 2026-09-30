@@ -88,20 +88,22 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
   describe('getDomainByTokenId (native v2 tokenId reverse lookup)', () => {
     // The sepolia ETHRegistry; both filters are scoped to the registry asked about.
-    const REGISTRY = { address: '0x657ea849311d3d5823348dded7c2aaafb3ede09e', name: 'eth' };
+    const REGISTRY = '0x657ea849311d3d5823348dded7c2aaafb3ede09e';
     // fox.eth labelhash with low 32 bits = token version 1 / canonical form
     const VERSIONED = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001' as const;
     const CANONICAL = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000000';
 
     it('queries domains(where: { tokenId }) with the lowercased exact id first', async () => {
-      nextResponse = { domains: [{ id: 'fox.eth', name: 'fox.eth', labelName: 'fox' }] };
+      nextResponse = { registry: { name: 'eth' }, domains: [{ id: 'fox.eth', name: 'fox.eth', labelName: 'fox' }] };
       const mixedCase = ('0x' + VERSIONED.slice(2).toUpperCase()) as `0x${string}`;
       const { domain } = await makeV2().getDomainByTokenId(mixedCase, REGISTRY);
 
       expect(domain?.name).toBe('fox.eth');
       expect(requests).toHaveLength(1);
       expect(requests[0].document).toContain('tokenId: $id');
-      expect(requests[0].variables).toEqual({ id: VERSIONED, registry: REGISTRY.address });
+      // The registry's name comes in the same query as the rows.
+      expect(requests[0].document).toContain('registry(address: $registry)');
+      expect(requests[0].variables).toEqual({ id: VERSIONED, registry: REGISTRY });
     });
 
     it('falls back to the canonicalId filter (version bits zeroed) on an exact-id miss', async () => {
@@ -110,7 +112,7 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
       expect(requests).toHaveLength(2);
       expect(requests[1].document).toContain('canonicalId: $id');
-      expect(requests[1].variables).toEqual({ id: CANONICAL, registry: REGISTRY.address });
+      expect(requests[1].variables).toEqual({ id: CANONICAL, registry: REGISTRY });
     });
 
     it('treats a schema-rejects-the-filter error as a clean miss and stops probing for a while', async () => {
@@ -162,48 +164,65 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
     it('scopes both filters to the registry, lowercased (the same id is in every registry with the label)', async () => {
       nextResponse = { domains: [] };
-      await makeV2().getDomainByTokenId(VERSIONED, { address: '0x657EA849311d3D5823348ddEd7C2AaAFb3EDE09E', name: 'eth' });
+      await makeV2().getDomainByTokenId(VERSIONED, '0x657EA849311d3D5823348ddEd7C2AaAFb3EDE09E');
 
       expect(requests).toHaveLength(2);
       for (const request of requests) {
         expect(request.document).toContain('where: { registry: $registry,');
-        expect(request.variables.registry).toBe(REGISTRY.address);
+        expect(request.variables.registry).toBe(REGISTRY);
       }
     });
 
     describe('a registry several names point at (aliases)', () => {
-      const SHARED = { address: '0xb40c4f85b9a7e4b57669c979c16132898a13bedd', name: 'support.vendor.eth' };
+      const SHARED = '0xb40c4f85b9a7e4b57669c979c16132898a13bedd';
+      const named = (registryName: string, ...rows: object[]) => ({ registry: { name: registryName }, domains: rows });
       const alias = { id: 'a', name: 'rin.support.shopa.eth', labelName: 'rin' };
       const canonical = { id: 'b', name: 'rin.support.vendor.eth', labelName: 'rin' };
 
       it("serves the registry's own name when an alias row comes first", async () => {
-        queued.push({ domains: [alias] }, { domains: [canonical] });
+        queued.push(named('support.vendor.eth', alias), { domains: [canonical] });
         const { domain } = await makeV2().getDomainByTokenId(VERSIONED, SHARED);
 
         expect(domain?.name).toBe('rin.support.vendor.eth');
         expect(requests).toHaveLength(2);
         expect(requests[1].document).toContain('name: $name');
-        expect(requests[1].variables).toEqual({ id: VERSIONED, registry: SHARED.address, name: 'rin.support.vendor.eth' });
+        expect(requests[1].variables).toEqual({ id: VERSIONED, registry: SHARED, name: 'rin.support.vendor.eth' });
       });
 
       it('asks once when the first row already carries that name', async () => {
-        nextResponse = { domains: [canonical] };
+        nextResponse = named('support.vendor.eth', canonical);
         await makeV2().getDomainByTokenId(VERSIONED, SHARED);
         expect(requests).toHaveLength(1);
       });
 
       it('is a miss when no row carries that name', async () => {
-        queued.push({ domains: [alias] }, { domains: [] }, { domains: [alias] }, { domains: [] });
+        queued.push(named('support.vendor.eth', alias), { domains: [] }, named('support.vendor.eth', alias), { domains: [] });
         const { domain } = await makeV2().getDomainByTokenId(VERSIONED, SHARED);
 
         expect(domain).toBeNull();
         expect(requests).toHaveLength(4); // per filter: the first row, then the name
       });
+
+      it('names a moved registry by where it is now: the name is read with the rows, not cached', async () => {
+        // Moved from support.vendor.eth to vendor2.eth; its old path is still an alias row.
+        const moved = { id: 'c', name: 'rin.vendor2.eth', labelName: 'rin' };
+        queued.push(named('vendor2.eth', canonical), { domains: [moved] });
+        const { domain } = await makeV2().getDomainByTokenId(VERSIONED, SHARED);
+
+        expect(domain?.name).toBe('rin.vendor2.eth');
+        expect(requests[1].variables.name).toBe('rin.vendor2.eth');
+      });
+    });
+
+    it('is a miss when the indexer knows no registry at the address, whatever rows come back', async () => {
+      nextResponse = { registry: null, domains: [{ id: 'fox.eth', name: 'fox.eth', labelName: 'fox' }] };
+      const { domain } = await makeV2().getDomainByTokenId(VERSIONED, REGISTRY);
+      expect(domain).toBeNull();
     });
 
     it("takes the bare label as the root registry's names", async () => {
-      nextResponse = { domains: [{ id: 'eth', name: 'eth', labelName: 'eth' }] };
-      const root = { address: '0x9703dbd26dab89504490994138cf2c575251a9ce', name: '' };
+      nextResponse = { registry: { name: '' }, domains: [{ id: 'eth', name: 'eth', labelName: 'eth' }] };
+      const root = '0x9703dbd26dab89504490994138cf2c575251a9ce';
       const { domain } = await makeV2().getDomainByTokenId(VERSIONED, root);
 
       expect(domain?.name).toBe('eth');
@@ -211,7 +230,7 @@ describe('IndexerService — v2 (zigens) dialect', () => {
     });
 
     it('is a miss for a row without a label name (nothing to check its name against)', async () => {
-      nextResponse = { domains: [{ id: 'x', name: 'x.eth', labelName: null }] };
+      nextResponse = { registry: { name: 'eth' }, domains: [{ id: 'x', name: 'x.eth', labelName: null }] };
       const { domain } = await makeV2().getDomainByTokenId(VERSIONED, REGISTRY);
       expect(domain).toBeNull();
     });
@@ -225,10 +244,10 @@ describe('IndexerService — v2 (zigens) dialect', () => {
     });
   });
 
-  describe('getRegistry (a v2 registry by contract address)', () => {
+  describe('isRegistry (whether an address is a v2 registry)', () => {
     const ADDRESS = '0x6F076422511cF206088e710DE61ABBE5fAE0E516';
     const LOWER = ADDRESS.toLowerCase();
-    const REGISTRY = { address: LOWER, name: 'sepolia.is-a-capybara.eth' };
+    const REGISTRY = { address: LOWER };
 
     beforeEach(() => {
       vi.useFakeTimers({ toFake: ['Date'] });
@@ -240,50 +259,50 @@ describe('IndexerService — v2 (zigens) dialect', () => {
 
     it('queries registry(address) with the lowercased address', async () => {
       nextResponse = { registry: REGISTRY };
-      expect(await makeV2().getRegistry(ADDRESS)).toEqual(REGISTRY);
+      expect(await makeV2().isRegistry(ADDRESS)).toBe(true);
 
       expect(requests).toHaveLength(1);
       expect(requests[0].document).toContain('registry(address: $address)');
       expect(requests[0].variables).toEqual({ address: LOWER });
     });
 
-    it('reuses a registry for REGISTRY_KNOWN_TTL_MS, then asks again', async () => {
+    it('reuses a hit for REGISTRY_KNOWN_TTL_MS, then asks again', async () => {
       nextResponse = { registry: REGISTRY };
       const svc = makeV2();
-      await svc.getRegistry(ADDRESS);
+      await svc.isRegistry(ADDRESS);
       vi.advanceTimersByTime(REGISTRY_KNOWN_TTL_MS - 1);
-      expect(await svc.getRegistry(LOWER)).toEqual(REGISTRY);
+      expect(await svc.isRegistry(LOWER)).toBe(true);
       expect(requests).toHaveLength(1);
 
       vi.advanceTimersByTime(1);
-      await svc.getRegistry(ADDRESS);
+      await svc.isRegistry(ADDRESS);
       expect(requests).toHaveLength(2);
     });
 
     it('remembers an address with no registry for REGISTRY_UNKNOWN_TTL_MS, so a random address costs one query', async () => {
       nextResponse = { registry: null };
       const svc = makeV2();
-      expect(await svc.getRegistry(ADDRESS)).toBeNull();
+      expect(await svc.isRegistry(ADDRESS)).toBe(false);
       vi.advanceTimersByTime(REGISTRY_UNKNOWN_TTL_MS - 1);
-      expect(await svc.getRegistry(ADDRESS)).toBeNull();
+      expect(await svc.isRegistry(ADDRESS)).toBe(false);
       expect(requests).toHaveLength(1);
 
       // A registry deployed since is recognized once the miss expires.
       vi.advanceTimersByTime(1);
       nextResponse = { registry: REGISTRY };
-      expect(await svc.getRegistry(ADDRESS)).toEqual(REGISTRY);
+      expect(await svc.isRegistry(ADDRESS)).toBe(true);
       expect(requests).toHaveLength(2);
     });
 
     it('throws UpstreamError on an outage and does not cache it', async () => {
       const svc = makeV2();
       nextError = new Error('fetch failed: ECONNREFUSED');
-      await expect(svc.getRegistry(ADDRESS)).rejects.toBeInstanceOf(UpstreamError);
+      await expect(svc.isRegistry(ADDRESS)).rejects.toBeInstanceOf(UpstreamError);
 
       nextError = null;
       nextResponse = { registry: REGISTRY };
       const before = requests.length;
-      expect(await svc.getRegistry(ADDRESS)).toEqual(REGISTRY);
+      expect(await svc.isRegistry(ADDRESS)).toBe(true);
       expect(requests.length).toBe(before + 1);
     });
 
@@ -291,16 +310,16 @@ describe('IndexerService — v2 (zigens) dialect', () => {
       nextResponse = { registry: null };
       const svc = makeV2();
       const address = (i: number) => `0x${i.toString(16).padStart(40, '0')}`;
-      for (let i = 0; i < REGISTRY_CACHE_MAX_ENTRIES; i++) await svc.getRegistry(address(i));
-      await svc.getRegistry(address(0)); // a hit: now the most recently used
+      for (let i = 0; i < REGISTRY_CACHE_MAX_ENTRIES; i++) await svc.isRegistry(address(i));
+      await svc.isRegistry(address(0)); // a hit: now the most recently used
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES);
 
-      await svc.getRegistry(address(REGISTRY_CACHE_MAX_ENTRIES)); // one too many
+      await svc.isRegistry(address(REGISTRY_CACHE_MAX_ENTRIES)); // one too many
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES + 1);
 
-      await svc.getRegistry(address(0)); // kept: used after address(1)
+      await svc.isRegistry(address(0)); // kept: used after address(1)
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES + 1);
-      await svc.getRegistry(address(1)); // dropped: the least recently used
+      await svc.isRegistry(address(1)); // dropped: the least recently used
       expect(requests).toHaveLength(REGISTRY_CACHE_MAX_ENTRIES + 2);
     });
 
@@ -309,15 +328,15 @@ describe('IndexerService — v2 (zigens) dialect', () => {
         response: { errors: [{ message: 'Cannot query field "registry" on type "Query".' }] },
       });
       const svc = makeV2();
-      expect(await svc.getRegistry(ADDRESS)).toBeNull();
+      expect(await svc.isRegistry(ADDRESS)).toBe(false);
       const probed = requests.length;
-      expect(await svc.getRegistry('0x' + '22'.repeat(20))).toBeNull();
+      expect(await svc.isRegistry('0x' + '22'.repeat(20))).toBe(false);
       expect(requests).toHaveLength(probed);
     });
 
-    it('is null on the v1 dialect, without a query', async () => {
+    it('is false on the v1 dialect, without a query', async () => {
       const v1 = new IndexerService({ primaryEndpoint: 'https://subgraph.test', apiVersion: 'v1' });
-      expect(await v1.getRegistry(ADDRESS)).toBeNull();
+      expect(await v1.isRegistry(ADDRESS)).toBe(false);
       expect(requests).toHaveLength(0);
     });
   });
