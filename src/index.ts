@@ -597,6 +597,12 @@ function isContractAddress(value: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
+// The token id of a metadata URL. A v2 registry's token URI may end it with
+// `.json` (the suffix its URI renderer can append), which names the same token.
+function metadataTokenId(param: string): string {
+  return param.endsWith('.json') ? param.slice(0, -'.json'.length) : param;
+}
+
 // The 400 for a name route (`registry` / `namewrapper`) whose name this service
 // can never look up (see isResolvableEnsName), answered before any other work,
 // the edge cache included. A contract-address route names a token id instead.
@@ -632,7 +638,7 @@ app.get(
         const { name, registryType } = await metadataService.resolveTokenId(
           network,
           param2,
-          param3,
+          metadataTokenId(param3),
         );
         return await handleMetadata(c, network, registryType, name);
       }

@@ -113,21 +113,22 @@ export const NETWORKS = {
       nameWrapper: '0x0635513f179D50A207757E05759CbD106d7dFcE8',  // name_wrapper
       resolver: '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5',     // public_resolver
     },
-    // ENS v2 (Sepolia) — 2026-07-30 deployment (docs:addresses dump; live-verified
-    // against the UR proxy on-chain 2026-08-04). These rot on every silent
-    // redeploy; runtime UR discovery is authoritative, these are last-known.
+    // ENS v2 (Sepolia) — 2026-09-15 deployment (the deploy's address list;
+    // live-verified against the UR proxy on-chain 2026-09-29). These rot on every
+    // silent redeploy; runtime UR discovery is authoritative, these are last-known.
     v2: {
-      rootRegistry: '0x8115186e8f2e0b0281e86ab91f0f48ba90364354',  // live RootRegistry (last-known; discovered via UR at runtime)
-      ethRegistry: '0xbdc85dd5b15d7ecb354cd7cb6f2c50b4f2c4f0e2',   // live ETHRegistry (last-known; discovered via UR at runtime)
+      rootRegistry: '0x9703dbd26dab89504490994138cf2c575251a9ce',  // live RootRegistry (last-known; discovered via UR at runtime)
+      ethRegistry: '0x657ea849311d3d5823348dded7c2aaafb3ede09e',   // live ETHRegistry (last-known; discovered via UR at runtime)
       // Migration is handled by separate controllers (see src/utils/migration.ts).
-      // 2026-07-30 deployment siblings (no runtime consumer):
-      // MigrationHelper 0x1d8c7aa9862f9b823309ad87a4864fb27c575e85 (V1 side),
-      // UnlockedMigrationController 0x2fcf83232b93bd29c59db18aaa1d4b62e9f9fc73 (V2 side).
-      migrationContract: '0x5c39e36a69a9897f08954c71acb1f36e0bd4f409', // LockedMigrationController
+      // 2026-09-15 deployment siblings (no runtime consumer):
+      // MigrationHelper 0x58d12d60471b98f191856e4c2d56886e9c3ea573 (V1 side),
+      // UnlockedMigrationController 0x7ed171bb143a905f56105e4ea146543ecb122f55 (V2 side).
+      migrationContract: '0xab1b57c6ee5e91e6090595c0af14cb9b8bc7773f', // LockedMigrationController
       // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
-      resolver: '0xe7b9a25607e02da8145e4eb1836ca539e53f11f7', // PublicResolverV2
+      resolver: '0xd7e590ad0e92a6ac1d81f4483a9b951d3585a50f', // PublicResolverV2
       // UpgradableUniversalResolverProxy — the STABLE vanity address. NEVER pin a
-      // UniversalResolverV2 implementation (currently 0x4a1817d13e9cf196f471725176355c1234b63c70):
+      // UniversalResolverV2 implementation (currently 0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3,
+      // behind ManagedUniversalResolverProxy 0x6d80f2172cfdec5730fe683860c33d26fc42e6f1):
       // implementations walk whichever registries they were deployed with and go
       // dead on redeploys (the June one returned resolver=0 for live names,
       // verified 2026-07-14); the proxy tracks the current implementation +
