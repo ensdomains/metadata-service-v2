@@ -100,7 +100,7 @@ the on-chain tier):
 - `MAX_AVATAR_BYTES`: cap on fetched avatar size in bytes (default 25 MB)
 - `MAX_BATCH_NAMES`: max names per `POST /batch-metadata` request (default 100)
 - `IPFS_GATEWAY`: https origin (default port) of the IPFS gateway for avatar and header media (`ipfs://`/`ipns://` records, and links to the retired ipfs.io, dweb.link, w3s.link and nftstorage.link gateways). Default `https://ipfs.filebase.io`, a public gateway limited to 200 requests a minute: set a dedicated gateway for production
-- `RATE_LIMIT_DISABLED`: set to `true` to disable the per-IP rate limiter (local dev). Limits are per IP per 60s window: 120 default, 60 for `/image` and `/webhook`, 30 for `/rasterize`, 20 for `/batch-metadata`; `/` and `/health` are exempt
+- `RATE_LIMIT_DISABLED`: set to `true` to disable the per-IP rate limiter (local dev). Limits are per IP per 60s window, enforced by the Cloudflare Rate Limiting bindings in `wrangler.toml` (`[[ratelimits]]`, counted per Cloudflare location; a bucket without its binding falls back to a KV counter): 120 default, 60 for `/image`, 600 for `/webhook` (whose body is capped at 64 KiB), 30 for `/rasterize`, 20 for `/batch-metadata`; `/` and `/health` are exempt
 - `LOG_LEVEL`: declared in the Worker env and set in `wrangler.toml`, but not currently read by the code
 
 **Webhook (`POST /webhook`):**
