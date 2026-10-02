@@ -2,6 +2,7 @@ import { namehash } from "@ensdomains/ensjs/utils";
 import { ens_normalize as normalize } from "@adraffy/ens-normalize";
 import { keccak256, numberToHex, pad, toHex } from "viem";
 import { packetToBytes, labelhash } from "viem/ens";
+import { InvalidTokenIdError } from "../services/errors";
 
 // Type declaration for Intl.Segmenter
 declare namespace Intl {
@@ -102,8 +103,16 @@ export function tokenIdToHex(tokenId: string): `0x${string}` {
     return tokenId as `0x${string}`;
   }
 
-  // Convert from decimal to hex
-  const hex = BigInt(tokenId).toString(16).padStart(64, "0");
+  // A non-integer spelling reaches BigInt and throws a bare SyntaxError.
+  // That is a client error, not an uncaught conversion failure.
+  let value: bigint;
+  try {
+    value = BigInt(tokenId);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new InvalidTokenIdError();
+    throw error;
+  }
+  const hex = value.toString(16).padStart(64, "0");
   return `0x${hex}` as `0x${string}`;
 }
 
