@@ -10,6 +10,10 @@
 export interface RasterDimensions {
   width: number;
   height: number;
+  /** JPEG only: anything but a sequential (SOF0 baseline / SOF1 extended)
+   *  frame. Progressive decoding keeps every coefficient of the image until
+   *  the last scan, so it costs more memory per pixel. */
+  progressive?: boolean;
 }
 
 // How far into the file a header may be (JPEG can carry EXIF/ICC segments
@@ -104,7 +108,10 @@ function jpegDimensions(r: HeaderWindow): RasterDimensions | null {
       marker = r.u8(pos + 1);
     }
     if (marker === null) return null;
-    if (JPEG_SOF.has(marker)) return dims(r.u16be(pos + 7), r.u16be(pos + 5));
+    if (JPEG_SOF.has(marker)) {
+      const size = dims(r.u16be(pos + 7), r.u16be(pos + 5));
+      return size && { ...size, progressive: marker !== 0xc0 && marker !== 0xc1 };
+    }
     if (marker === 0xd9 || marker === 0xda) return null; // EOI / start of scan: no frame header
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
       pos += 2;

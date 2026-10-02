@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ImageGenerationService } from '../src/services/image';
+import { ImageGenerationService, MAX_RASTERIZED_AVATAR_PIXELS, maxRasterizedAvatarPixels } from '../src/services/image';
 import { MAX_HEADER_SCAN_BYTES, rasterDimensions } from '../src/services/raster-dimensions';
 
 // resvg (the /rasterize route) decodes a raster avatar to its full declared
@@ -8,8 +8,10 @@ import { MAX_HEADER_SCAN_BYTES, rasterDimensions } from '../src/services/raster-
 // 128 MB isolate limit, and decoding needs several times the bitmap (a
 // progressive JPEG at 2048x2048 took 66 MB). A raster avatar is rasterized only
 // when it is a PNG, JPEG or GIF of at most 6 MiB of base64 whose header declares
-// at most 1024x1024 pixels; otherwise, or when the size cannot be read within
-// the scanned window, the card is rasterized on its no-avatar background.
+// at most its format's pixel cap (measured, see MAX_RASTERIZED_AVATAR_PIXELS):
+// PNG 1200x1200, baseline JPEG 2048x2048, any other JPEG 1536x1536, GIF
+// 1344x1344. Otherwise, or when the size cannot be read within the scanned
+// window, the card is rasterized on its no-avatar background.
 
 function png(width: number, height: number): Buffer {
   const ihdr = Buffer.alloc(25);
@@ -72,11 +74,13 @@ describe('rasterDimensions reads the declared size from the header', () => {
   it.each([
     ['image/png', png(640, 480), { width: 640, height: 480 }],
     ['image/png', png(8000, 8000), { width: 8000, height: 8000 }],
-    ['image/jpeg', jpeg(1200, 900), { width: 1200, height: 900 }],
-    ['image/jpeg (progressive, after a 60 KiB APP segment)', jpeg(5000, 4000, 60 * 1024, 0xc2), { width: 5000, height: 4000 }],
+    ['image/jpeg', jpeg(1200, 900), { width: 1200, height: 900, progressive: false }],
+    ['image/jpeg (extended sequential)', jpeg(1200, 900, 16, 0xc1), { width: 1200, height: 900, progressive: false }],
+    ['image/jpeg (progressive, after a 60 KiB APP segment)', jpeg(5000, 4000, 60 * 1024, 0xc2), { width: 5000, height: 4000, progressive: true }],
+    ['image/jpeg (lossless, decoded like neither: the progressive cap)', jpeg(640, 480, 16, 0xc3), { width: 640, height: 480, progressive: true }],
     ['image/gif', gif(300, 200), { width: 300, height: 200 }],
     ['image/gif (first frame larger than the screen)', gif(10, 10, 9000, 9000), { width: 9000, height: 9000 }],
-    ['image/jpeg (fill bytes before the frame marker)', Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 0xff), jpeg(640, 480).subarray(2)]), { width: 640, height: 480 }],
+    ['image/jpeg (fill bytes before the frame marker)', Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 0xff), jpeg(640, 480).subarray(2)]), { width: 640, height: 480, progressive: false }],
   ])('%s', (label, bytes, expected) => {
     const type = label.split(' ')[0];
     expect(rasterDimensions(type, b64(bytes))).toEqual(expected);
@@ -106,6 +110,16 @@ describe('rasterDimensions reads the declared size from the header', () => {
   });
 });
 
+describe('maxRasterizedAvatarPixels', () => {
+  it('gives each format its cap, and a JPEG of unknown frame type the lower one', () => {
+    expect(maxRasterizedAvatarPixels('image/png', { width: 1, height: 1 })).toBe(MAX_RASTERIZED_AVATAR_PIXELS.png);
+    expect(maxRasterizedAvatarPixels('image/gif', { width: 1, height: 1 })).toBe(MAX_RASTERIZED_AVATAR_PIXELS.gif);
+    expect(maxRasterizedAvatarPixels('image/jpeg', { width: 1, height: 1, progressive: false })).toBe(MAX_RASTERIZED_AVATAR_PIXELS.jpeg);
+    expect(maxRasterizedAvatarPixels('image/jpeg', { width: 1, height: 1, progressive: true })).toBe(MAX_RASTERIZED_AVATAR_PIXELS.progressiveJpeg);
+    expect(maxRasterizedAvatarPixels('image/jpeg', { width: 1, height: 1 })).toBe(MAX_RASTERIZED_AVATAR_PIXELS.progressiveJpeg);
+  });
+});
+
 describe('forRasterization keeps only raster avatars within the pixel cap', () => {
   const svc = new ImageGenerationService();
   const card = async (bytes: Buffer, type: string) =>
@@ -118,21 +132,30 @@ describe('forRasterization keeps only raster avatars within the pixel cap', () =
   });
 
   it.each([
-    ['image/png', png(1024, 1024)],
-    ['image/jpeg', jpeg(1024, 1024, 60 * 1024, 0xc2)],
-    ['image/jpeg', jpeg(800, 1300)],
-    ['image/gif', gif(500, 500)],
-  ])('keeps a %s avatar at or under 1024x1024 pixels', async (type, bytes) => {
+    ['image/png', png(1200, 1200), 'PNG at the cap'],
+    ['image/png', png(1080, 1080), 'the common 1080px PNG'],
+    ['image/png', png(1440, 1000), 'a non-square PNG of the same pixel count'],
+    ['image/jpeg', jpeg(2048, 2048, 60 * 1024), 'baseline JPEG at the cap'],
+    ['image/jpeg', jpeg(2048, 2048, 16, 0xc1), 'extended sequential JPEG at the baseline cap'],
+    ['image/jpeg', jpeg(1536, 1536, 60 * 1024, 0xc2), 'progressive JPEG at its cap'],
+    ['image/jpeg', jpeg(800, 1300), 'a small JPEG'],
+    ['image/gif', gif(1344, 1344), 'GIF at the cap'],
+    ['image/gif', gif(500, 500), 'a small GIF'],
+  ])('keeps a %s avatar within its format cap (%#: %s)', async (type, bytes) => {
     const withAvatar = await card(bytes, type);
     expect(svc.forRasterization(withAvatar, 'nick.eth')).toBe(withAvatar);
   });
 
   it.each([
     ['image/png', png(8000, 8000)],
-    ['image/png', png(1025, 1024)],
+    ['image/png', png(1201, 1200)],
+    ['image/png', png(1441, 1000)],
     ['image/png', png(2048, 2048)],
-    ['image/jpeg', jpeg(1500, 1500)],
+    ['image/jpeg', jpeg(2049, 2048)],
+    ['image/jpeg', jpeg(1537, 1536, 16, 0xc2)],
+    ['image/jpeg', jpeg(1600, 1600, 16, 0xc3)],
     ['image/jpeg', jpeg(5000, 5000, 1024)],
+    ['image/gif', gif(1345, 1344)],
     ['image/gif', gif(10, 10, 9000, 9000)],
   ])('replaces a %s avatar over the cap with the no-avatar background', async (type, bytes) => {
     const out = svc.forRasterization(await card(bytes, type), 'nick.eth');

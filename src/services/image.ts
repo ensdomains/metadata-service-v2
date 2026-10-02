@@ -5,7 +5,7 @@ import { getCharacterSet } from "../utils/ens";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
 import { isSafeImageType } from "./media-safety";
-import { rasterDimensions } from "./raster-dimensions";
+import { rasterDimensions, type RasterDimensions } from "./raster-dimensions";
 
 // Standard base64 alphabet only. The avatar payload is interpolated into an SVG
 // attribute, so anything else must never reach the markup.
@@ -21,19 +21,47 @@ const AVATAR_ELEMENT_RE = /<image href="data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+
 const DATA_HREF_RE = /<[^<>]*\bhref\s*=\s*["']\s*data:/gi;
 
 // Raster formats resvg decodes (this build has no WebP decoder), and the
-// largest raster avatar the Worker rasterizes. resvg allocates the whole
-// decoded image in WebAssembly memory, which never shrinks for the life of the
-// isolate, and decoding needs more than the bitmap: measured with this resvg
-// build at 2048x2048, a PNG adds 17-29 MB, a baseline JPEG 41 MB, a GIF 52 MB
-// and a progressive JPEG (possible in a 24 KB file) 66 MB, on top of ~46 MB for
-// the card itself at the 2000px output size, the fonts' ~20 MB and the JS heap,
-// against a 128 MB isolate. At 1024x1024 the worst case (progressive JPEG) adds
-// ~16 MB. The card draws the avatar at 518px, so a 1024px avatar loses nothing
-// at the default size. The payload itself is bounded too: resvg holds the SVG
-// (with the base64) and the decoded file, whatever size the header declares.
+// largest raster avatar the Worker rasterizes, per format. resvg allocates the
+// decoded image (and a copy scaled to the drawn size) in WebAssembly memory,
+// which never shrinks for the life of the isolate, against a 128 MB isolate
+// that also holds the fonts (~20 MB) and the JS heap. A render's cost is set
+// by the header's declared size, and by format: progressive JPEG keeps every
+// coefficient until the last scan, PNG and GIF decode to full RGBA.
+//
+// The caps keep the costliest render where the single 1024x1024 cap had it.
+// Measured with this resvg build (render objects freed, rasterize-wasm
+// 1.0.2), on the real card, the costliest at the
+// 2000px output size (the card alone: 33.6 MB; 3.9 MB at the default 518px):
+// the old cap's worst was a 1024x1024 16-bit PNG at 60.3 MB of resvg memory,
+// and up to these caps no measured size passes 61.3 MB (PNG 1200, 16-bit),
+// 58.8 MB (baseline JPEG 2048), 55.1 MB (progressive JPEG 1360) or 59.6 MB
+// (GIF 1168). Above them costs climb unevenly with size (resvg's allocator
+// grows in steps): a 1900x1900 interlaced PNG takes 69.4 MB, a 2048x2048
+// progressive JPEG 64.8 MB, a 1400x1400 GIF 61.3 MB. Every size was sampled
+// in 16-32px steps up to its cap. The card draws the avatar at 518px, so
+// these sizes lose nothing at the default output. The payload itself is
+// bounded too: resvg holds the SVG (with the base64) and the decoded file,
+// whatever size the header declares, and the JS heap holds the SVG strings.
 const RASTERIZABLE_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/gif"]);
-const MAX_RASTERIZED_AVATAR_PIXELS = 1024 * 1024;
-// Base64 characters (~4.5 MB of file): room for an uncompressed 1024x1024 RGBA PNG.
+export const MAX_RASTERIZED_AVATAR_PIXELS = {
+  png: 1200 * 1200,
+  // A baseline (SOF0) or extended sequential (SOF1) JPEG.
+  jpeg: 2048 * 2048,
+  // Every other JPEG frame type, progressive above all.
+  progressiveJpeg: 1536 * 1536,
+  gif: 1344 * 1344,
+} as const;
+
+/** The largest declared pixel count rasterized for an avatar of `type`. A JPEG
+ *  size without the progressive flag gets the lower cap. */
+export function maxRasterizedAvatarPixels(type: string, size: RasterDimensions): number {
+  if (type === "image/png") return MAX_RASTERIZED_AVATAR_PIXELS.png;
+  if (type === "image/gif") return MAX_RASTERIZED_AVATAR_PIXELS.gif;
+  return size.progressive === false ? MAX_RASTERIZED_AVATAR_PIXELS.jpeg : MAX_RASTERIZED_AVATAR_PIXELS.progressiveJpeg;
+}
+// Base64 characters (~4.5 MB of file): room for an uncompressed 1024x1024 RGBA
+// PNG, and what bounds the JS heap's copies of the SVG (measured: 47.6 MB at
+// the largest payload under it, the same under the old pixel cap).
 const MAX_RASTERIZED_AVATAR_BASE64 = 6 * 1024 * 1024;
 
 // Escape user-controlled text before it is interpolated into SVG markup. The
@@ -181,7 +209,7 @@ export class ImageGenerationService {
   // The card as it may be rasterized on this service (the /rasterize route runs
   // resvg inside the Worker). An embedded avatar is kept only if it is a PNG,
   // JPEG or GIF of at most MAX_RASTERIZED_AVATAR_BASE64 whose header declares at
-  // most MAX_RASTERIZED_AVATAR_PIXELS; anything else is replaced by the card's
+  // most its format's MAX_RASTERIZED_AVATAR_PIXELS; anything else is replaced by the card's
   // no-avatar background:
   // - an SVG avatar: rendering owner-chosen SVG costs CPU out of all proportion
   //   to its size (<use> fan-out, per-element filters, masks or group opacity,
@@ -202,7 +230,7 @@ export class ImageGenerationService {
         const size = RASTERIZABLE_AVATAR_TYPES.has(type) && payload.length <= MAX_RASTERIZED_AVATAR_BASE64
           ? rasterDimensions(type, payload)
           : null;
-        if (size && size.width * size.height <= MAX_RASTERIZED_AVATAR_PIXELS) {
+        if (size && size.width * size.height <= maxRasterizedAvatarPixels(type, size)) {
           kept++;
           return element;
         }
