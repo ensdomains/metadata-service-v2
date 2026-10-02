@@ -9,9 +9,10 @@
 /** The requested name was not present in a data source (a clean miss, not a failure). */
 export class NotFoundError extends Error {
   /**
-   * True only when every tier, including the primary (v2) index, answered with
-   * a clean miss. While the indexer circuit breaker is open the primary index is
-   * skipped, so a miss from the remaining tiers is not proof of absence.
+   * True only when every consulted tier, including an actually consulted primary
+   * (v2) index, answered with a clean miss. A skipped primary (disabled or circuit
+   * breaker open) is not a consulted miss, so remaining-tier misses are not proof
+   * of absence.
    */
   readonly definitive: boolean;
 
