@@ -23,4 +23,12 @@ describe('W3-NAMES-003 out-of-range token ids', () => {
   it('decimal 2^256 - 1 still converts to a 32-byte hex value', () => {
     expect(tokenIdToHex((2n ** 256n - 1n).toString())).toBe(`0x${'f'.repeat(64)}`);
   });
+
+  it('0x-prefixed 2^256 throws InvalidTokenIdError instead of returning a 65-digit hex value', () => {
+    expect(() => tokenIdToHex(`0x1${'0'.repeat(64)}`)).toThrow(InvalidTokenIdError);
+  });
+
+  it('returns an in-range 0x value unchanged', () => {
+    expect(tokenIdToHex('0xdeadBEEF')).toBe('0xdeadBEEF');
+  });
 });

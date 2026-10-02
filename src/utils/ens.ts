@@ -2,6 +2,7 @@ import { namehash } from "@ensdomains/ensjs/utils";
 import { ens_normalize as normalize } from "@adraffy/ens-normalize";
 import { keccak256, numberToHex, pad, toHex } from "viem";
 import { packetToBytes, labelhash } from "viem/ens";
+import { InvalidTokenIdError } from "../services/errors";
 
 // Type declaration for Intl.Segmenter
 declare namespace Intl {
@@ -96,14 +97,22 @@ export function getDomainLevel(name: string): number {
   return name.split(".").length;
 }
 
-// Convert token ID to proper hex format
+// Convert token ID to proper hex format. Token ids are uint256: a value at or
+// above 2^256 must throw, not widen into a 65-digit hex string.
 export function tokenIdToHex(tokenId: string): `0x${string}` {
   if (tokenId.startsWith("0x")) {
+    if (/^0x[0-9a-fA-F]+$/.test(tokenId) && BigInt(tokenId) >= 2n ** 256n) {
+      throw new InvalidTokenIdError();
+    }
     return tokenId as `0x${string}`;
   }
 
   // Convert from decimal to hex
-  const hex = BigInt(tokenId).toString(16).padStart(64, "0");
+  const value = BigInt(tokenId);
+  if (value >= 2n ** 256n) {
+    throw new InvalidTokenIdError();
+  }
+  const hex = value.toString(16).padStart(64, "0");
   return `0x${hex}` as `0x${string}`;
 }
 
