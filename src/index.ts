@@ -29,7 +29,7 @@ import { withServingHost } from "./services/media-fetch";
 import { RasterizeService } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
-import { CachePresets } from "./utils/cache-headers";
+import { CachePresets, CacheTTL } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
@@ -515,7 +515,7 @@ async function handleMetadata(
   const url = new URL(c.req.url);
   const baseUrl = `${url.protocol}//${url.host}`;
 
-  const { metadata, cacheStatus, ttlConfig } = await metadataCacheService.get(
+  const { metadata, cacheStatus, ttlConfig, rescued } = await metadataCacheService.get(
     network,
     registryType,
     name,
@@ -530,6 +530,13 @@ async function handleMetadata(
   );
 
   c.header('X-Cache-Status', cacheStatus);
+  if (rescued) {
+    // Stale D1 after a live-tier outage is still 200, but not a healthy success.
+    c.header('Cache-Control', `public, max-age=${CacheTTL.error}`);
+    const rescuedRes = c.json(metadata);
+    edgeCachePut(c, rescuedRes, CacheTTL.error);
+    return rescuedRes;
+  }
   c.header('Cache-Control', `public, max-age=${ttlConfig.softTtl}, stale-while-revalidate=${ttlConfig.hardTtl - ttlConfig.softTtl}`);
   const res = c.json(metadata);
   // L0 edge: store with the per-status Cache-Control set above (gives metadata

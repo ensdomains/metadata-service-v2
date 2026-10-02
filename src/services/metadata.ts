@@ -41,6 +41,14 @@ export class DomainExpiredError extends Error {
   }
 }
 
+// Stale D1 last-resort answers are still 200, but they are not a live-tier hit.
+// A WeakSet keeps that fact off the public JSON body.
+const staleD1Rescues = new WeakSet<object>();
+
+export function isStaleD1Rescue(metadata: object): boolean {
+  return staleD1Rescues.has(metadata);
+}
+
 export interface BlockchainEnvironment {
   MAINNET_RPC_URL: string;
   SEPOLIA_RPC_URL: string;
@@ -299,6 +307,7 @@ export class MetadataService {
               baseUrl,
               registryType,
             );
+            staleD1Rescues.add(metadata);
             return metadata;
           }
         } catch (d1Error) {

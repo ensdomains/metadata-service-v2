@@ -18,6 +18,7 @@
 //       contract_address, name|null, namehash|null, data, timestamp }
 import type { Context } from 'hono';
 import { CacheService, CacheKeys } from './cache';
+import { buildCacheKey } from './metadata-cache';
 import { validateEnsName, canonicalizeName, MAX_ENS_NAME_LENGTH, MAX_NAME_LABELS } from '../utils/ens';
 
 // A name the service never serves because of its size, however well-formed.
@@ -262,7 +263,7 @@ export class WebhookService {
       // (MetadataService.getRegistryHierarchy). The `domain`/`migrationStatus`
       // deletes are deliberately kept as defensive no-ops so that if those internal
       // caches are ever wired up, invalidation already covers them. The
-      // user-facing data is flushed by invalidateMetadataCache (`meta:`) below.
+      // user-facing data is flushed by invalidateMetadataCache (`meta:v2:`) below.
       const networks = ['mainnet', 'sepolia'];
       await Promise.all(networks.flatMap(net => [
         this.cache.delete(CacheKeys.domain(domainName, net)),
@@ -292,9 +293,9 @@ export class WebhookService {
   }
 
   // Invalidate endpoint-level metadata cache entries for a domain. Metadata keys
-  // are fully deterministic (`meta:{network}:{registryType}:{name}` — see
+  // are fully deterministic (`meta:v2:{network}:{registryType}:{name}` — see
   // metadata-cache.ts buildCacheKey), so delete the exact key set directly.
-  // NEVER list the whole `meta:` namespace here: KV list() returns at most 1000
+  // NEVER list the whole `meta:v2:` namespace here: KV list() returns at most 1000
   // keys per page, so a listing-based purge silently misses entries once the
   // namespace outgrows a page (which production traffic does almost immediately).
   private async invalidateMetadataCache(domainName: string): Promise<void> {
@@ -302,7 +303,7 @@ export class WebhookService {
     try {
       const keys = SUPPORTED_NETWORKS.flatMap((network) =>
         (['registry', 'namewrapper'] as const).map(
-          (registryType) => `meta:${network}:${registryType}:${domainName}`,
+          (registryType) => buildCacheKey(network, registryType, domainName),
         ),
       );
       await Promise.all(keys.map((k) => this.metadataCacheKv!.delete(k)));

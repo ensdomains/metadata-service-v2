@@ -5,7 +5,8 @@ import { MIGRATION_STATUS } from '../types';
 import { canonicalizeName } from '../utils/ens';
 import { SUPPORTED_NETWORKS } from '../config/networks';
 import { NotFoundError } from './errors';
-import { DomainExpiredError } from './metadata';
+import { DomainExpiredError, isStaleD1Rescue } from './metadata';
+import { CacheTTL } from '../utils/cache-headers';
 
 interface MetadataCacheEntry {
   metadata: MetadataResponse;
@@ -25,12 +26,16 @@ export interface MetadataCacheResult {
   metadata: MetadataResponse;
   cacheStatus: MetadataCacheStatus;
   ttlConfig: TtlConfig;
+  /** Stale D1 rescue after a live-tier failure: short TTL, no ordinary KV write. */
+  rescued?: boolean;
 }
 
-function buildCacheKey(network: string, registryType: string, identifier: string): string {
+export function buildCacheKey(network: string, registryType: string, identifier: string): string {
   // Canonical (case-insensitive) name so mixed-case requests share one entry and
   // the webhook's invalidation matches what the read path wrote.
-  return `meta:${network}:${registryType}:${canonicalizeName(identifier)}`;
+  // Bump v1→v2 so entries written before the stale-D1-rescue fix (which stored
+  // rescues as healthy long-lived successes) are never served as healthy again.
+  return `meta:v2:${network}:${registryType}:${canonicalizeName(identifier)}`;
 }
 
 function getTtlConfig(migrationStatus: string): TtlConfig {
@@ -93,6 +98,12 @@ export class MetadataCacheService {
 
     // --- Cache miss: fetch from origin ---
     const metadata = await fetchMetadata();
+    if (isStaleD1Rescue(metadata)) {
+      // Outage rescue must not be stored as a healthy long-lived success.
+      const ttlConfig = { softTtl: CacheTTL.error, hardTtl: CacheTTL.error };
+      console.log(`[metadata-cache] MISS ${identifier} (${Date.now() - start}ms) → stale D1 rescue, skipping ordinary KV write`);
+      return { metadata, cacheStatus: 'miss', ttlConfig, rescued: true };
+    }
     const migrationStatus = extractMigrationStatus(metadata);
     const ttlConfig = getTtlConfig(migrationStatus);
 
@@ -132,6 +143,10 @@ export class MetadataCacheService {
   ): Promise<void> {
     try {
       const metadata = await fetchMetadata();
+      if (isStaleD1Rescue(metadata)) {
+        // Keep a healthy entry rather than replacing it with an outage rescue.
+        return;
+      }
       const migrationStatus = extractMigrationStatus(metadata);
       const ttlConfig = getTtlConfig(migrationStatus);
       await this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig);
