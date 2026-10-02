@@ -13,10 +13,14 @@ import {
   requestLogger,
 } from "./middleware/validation";
 import { securityHeaders } from "./middleware/security-headers";
-import { MetadataService, DomainExpiredError } from "./services/metadata";
+import {
+  MetadataService,
+  DomainExpiredError,
+  isDegradedRegistryHierarchy,
+} from "./services/metadata";
 import { canonicalizeName, validateEnsName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
-import { CacheService } from "./services/cache";
+import { CacheService, CacheTTL as InternalCacheTTL } from "./services/cache";
 import { runD1Retention } from "./services/d1";
 import { ImageGenerationService } from "./services/image";
 import { AvatarService } from "./services/avatar";
@@ -717,14 +721,17 @@ app.get(
       await metadataService.checkExpiry(name);
 
       const hierarchy = await metadataService.getRegistryHierarchy(name);
+      const degraded = isDegradedRegistryHierarchy(hierarchy);
 
-      const cacheHeaders = CachePresets.hierarchy(name);
+      const cacheHeaders = degraded
+        ? CachePresets.error()
+        : CachePresets.hierarchy(name);
       Object.entries(cacheHeaders).forEach(([key, value]) => {
         c.header(key, value);
       });
 
       const res = c.json(hierarchy);
-      edgeCachePut(c, res);
+      edgeCachePut(c, res, degraded ? InternalCacheTTL.error : EDGE_CACHE_MAX_AGE_SECS);
       return res;
     } catch (error) {
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {

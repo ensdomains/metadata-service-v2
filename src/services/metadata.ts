@@ -41,6 +41,31 @@ export class DomainExpiredError extends Error {
   }
 }
 
+// Degraded hierarchy provenance is intentionally kept out of the public
+// response object. The internal cache stores an envelope, then restores this
+// process-local marker when the value is read back.
+const degradedRegistryHierarchies = new WeakSet<RegistryHierarchyResponse>();
+
+interface DegradedRegistryHierarchyCacheEntry {
+  response: RegistryHierarchyResponse;
+  degraded: true;
+}
+
+function isDegradedHierarchyCacheEntry(
+  value: RegistryHierarchyResponse | DegradedRegistryHierarchyCacheEntry,
+): value is DegradedRegistryHierarchyCacheEntry {
+  return 'degraded' in value && value.degraded === true && 'response' in value;
+}
+
+function markDegradedHierarchy(response: RegistryHierarchyResponse): RegistryHierarchyResponse {
+  degradedRegistryHierarchies.add(response);
+  return response;
+}
+
+export function isDegradedRegistryHierarchy(response: RegistryHierarchyResponse): boolean {
+  return degradedRegistryHierarchies.has(response);
+}
+
 export interface BlockchainEnvironment {
   MAINNET_RPC_URL: string;
   SEPOLIA_RPC_URL: string;
@@ -749,10 +774,15 @@ export class MetadataService {
 
     const cacheKey = CacheKeys.hierarchy(name, this.network);
 
-    // Try cache first
-    const cached = await this.cache.get<RegistryHierarchyResponse>(cacheKey);
+    // Try cache first. Degraded placeholders use a private envelope so their
+    // short-cache provenance survives serialization without entering the JSON.
+    const cached = await this.cache.get<
+      RegistryHierarchyResponse | DegradedRegistryHierarchyCacheEntry
+    >(cacheKey);
     if (cached) {
-      return cached;
+      return isDegradedHierarchyCacheEntry(cached)
+        ? markDegradedHierarchy(cached.response)
+        : cached;
     }
 
     try {
@@ -823,8 +853,23 @@ export class MetadataService {
         error,
       );
 
-      // Generate basic hierarchy as last resort
+      // Generate basic hierarchy as last resort. A non-definitive miss means
+      // the primary was unavailable or skipped, and a total upstream outage
+      // also produces a zero-owner placeholder — both are degraded and must
+      // not be published as a healthy success.
       const fallbackResponse = this.generateBasicHierarchy(name);
+      if (
+        (error instanceof NotFoundError && !error.definitive) ||
+        error instanceof UpstreamError
+      ) {
+        await this.cache.set(
+          cacheKey,
+          { response: fallbackResponse, degraded: true } satisfies DegradedRegistryHierarchyCacheEntry,
+          { ttl: CacheTTL.error },
+        );
+        return markDegradedHierarchy(fallbackResponse);
+      }
+
       await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
       return fallbackResponse;
     }
