@@ -854,10 +854,14 @@ export class MetadataService {
       );
 
       // Generate basic hierarchy as last resort. A non-definitive miss means
-      // the primary was unavailable or skipped, so retain degraded provenance
-      // across the internal-cache write without exposing it in the response.
+      // the primary was unavailable or skipped, and a total upstream outage
+      // also produces a zero-owner placeholder — both are degraded and must
+      // not be published as a healthy success.
       const fallbackResponse = this.generateBasicHierarchy(name);
-      if (error instanceof NotFoundError && !error.definitive) {
+      if (
+        (error instanceof NotFoundError && !error.definitive) ||
+        error instanceof UpstreamError
+      ) {
         await this.cache.set(
           cacheKey,
           { response: fallbackResponse, degraded: true } satisfies DegradedRegistryHierarchyCacheEntry,
