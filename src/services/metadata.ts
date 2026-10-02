@@ -749,9 +749,15 @@ export class MetadataService {
 
     const cacheKey = CacheKeys.hierarchy(name, this.network);
 
-    // Try cache first
-    const cached = await this.cache.get<RegistryHierarchyResponse>(cacheKey);
+    // Try cache first. An outage placeholder is stored as a wrapper so the
+    // flag survives KV without becoming a field of the hierarchy object.
+    const cached = await this.cache.get<
+      RegistryHierarchyResponse | { outagePlaceholder: true; body: RegistryHierarchyResponse }
+    >(cacheKey);
     if (cached) {
+      if ("outagePlaceholder" in cached && cached.outagePlaceholder === true && "body" in cached) {
+        return this.markOutagePlaceholder(cached.body);
+      }
       return cached;
     }
 
@@ -826,10 +832,15 @@ export class MetadataService {
       // Generate basic hierarchy as last resort. This is an outage answer,
       // not a resolved hierarchy: the route must cache it with the error TTL
       // at the client and the edge, including when this KV copy is served later.
+      // The returned object stays the placeholder shape; the flag is not an
+      // enumerable field, and the KV copy carries it in a wrapper.
       const fallbackResponse = this.generateBasicHierarchy(name);
-      (fallbackResponse as { outagePlaceholder?: true }).outagePlaceholder = true;
-      await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
-      return fallbackResponse;
+      await this.cache.set(
+        cacheKey,
+        { outagePlaceholder: true as const, body: fallbackResponse },
+        { ttl: CacheTTL.error },
+      );
+      return this.markOutagePlaceholder(fallbackResponse);
     }
   }
 
@@ -1157,6 +1168,14 @@ export class MetadataService {
       name,
       hierarchy: levels.reverse(), // Root first
     };
+  }
+
+  // The flag is non-enumerable so callers that compare the placeholder
+  // shape do not see it. The route reads it to choose the error TTL.
+  private markOutagePlaceholder(body: RegistryHierarchyResponse): RegistryHierarchyResponse {
+    const copy = { ...body };
+    Object.defineProperty(copy, "outagePlaceholder", { value: true, enumerable: false });
+    return copy;
   }
 
   // Generate basic hierarchy as fallback
