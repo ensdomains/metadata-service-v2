@@ -167,6 +167,14 @@ function withMediaSecurityHeaders(response: Response): Response {
 // to status codes and returns GENERIC client messages (internal detail is logged,
 // never leaked). Replaces per-route `error.message.includes(...)` string-sniffing.
 function httpError(c: AppContext, error: unknown, fallbackMessage: string): Response {
+  // Route catches call this instead of rethrowing, so app.onError never sees an
+  // HTTPException raised by a service call (the timeout middleware's 504, or the
+  // same class from checkExpiry). Return its own response so the status is not
+  // flattened to 500. That response is not a healthy success: edgeCachePut stores
+  // only response.ok, and this branch does not apply migration-status cache headers.
+  if (error instanceof HTTPException) {
+    return error.getResponse();
+  }
   const timestamp = new Date().toISOString();
   if (error instanceof DomainExpiredError) {
     return c.json({ message: error.message, timestamp }, 410);
