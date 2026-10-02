@@ -758,7 +758,7 @@ export class MetadataService {
       if ("outagePlaceholder" in cached && cached.outagePlaceholder === true && "body" in cached) {
         return this.markOutagePlaceholder(cached.body);
       }
-      return cached;
+      return cached as RegistryHierarchyResponse;
     }
 
     try {
