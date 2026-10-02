@@ -215,7 +215,7 @@ const deadNameMetadata = {
   attributes: [{ trait_type: 'Migration Status', display_type: 'string', value: 'native' }],
 } as unknown as MetadataResponse;
 
-const CACHE_KEY = 'meta:sepolia:registry:burnedname.eth';
+const CACHE_KEY = 'meta:v2:sepolia:registry:burnedname.eth';
 
 function seedStaleEntry(kv: ReturnType<typeof makeKv>) {
   // native name → softTtl 86400s, but the entry is 25h old: stale-but-within-hardTtl.

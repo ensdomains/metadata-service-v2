@@ -38,7 +38,7 @@ import app from '../src/index';
 
 const PATH = '/sepolia/registry/stale-route.eth';
 const EDGE_URL = `http://localhost${PATH}`;
-const ORDINARY_KV_KEY = 'meta:sepolia:registry:stale-route.eth';
+const ORDINARY_KV_KEY = 'meta:v2:sepolia:registry:stale-route.eth';
 const SHORT_CACHE = 'public, max-age=30';
 
 const env = { ...createMockEnv(), RATE_LIMIT_DISABLED: 'true' };

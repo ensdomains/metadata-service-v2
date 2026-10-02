@@ -214,8 +214,8 @@ function cacheEntryFor(name: string): string {
 
 const env = {
   METADATA_CACHE: makeKv({
-    [`meta:sepolia:registry:${EXPIRED_NAME}`]: cacheEntryFor(EXPIRED_NAME),
-    [`meta:sepolia:registry:${LIVE_NAME}`]: cacheEntryFor(LIVE_NAME),
+    [`meta:v2:sepolia:registry:${EXPIRED_NAME}`]: cacheEntryFor(EXPIRED_NAME),
+    [`meta:v2:sepolia:registry:${LIVE_NAME}`]: cacheEntryFor(LIVE_NAME),
   }),
   SVG_CACHE: makeKv(),
   ASSET_BUCKET: { get: async () => null, put: async () => {}, delete: async () => {} },

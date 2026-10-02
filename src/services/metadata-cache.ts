@@ -30,10 +30,12 @@ export interface MetadataCacheResult {
   rescued?: boolean;
 }
 
-function buildCacheKey(network: string, registryType: string, identifier: string): string {
+export function buildCacheKey(network: string, registryType: string, identifier: string): string {
   // Canonical (case-insensitive) name so mixed-case requests share one entry and
   // the webhook's invalidation matches what the read path wrote.
-  return `meta:${network}:${registryType}:${canonicalizeName(identifier)}`;
+  // Bump v1→v2 so entries written before the stale-D1-rescue fix (which stored
+  // rescues as healthy long-lived successes) are never served as healthy again.
+  return `meta:v2:${network}:${registryType}:${canonicalizeName(identifier)}`;
 }
 
 function getTtlConfig(migrationStatus: string): TtlConfig {

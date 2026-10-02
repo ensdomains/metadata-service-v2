@@ -51,9 +51,9 @@ function makeFakes() {
   const metadataCacheKv = {
     list: vi.fn(async () => ({
       keys: [
-        { name: 'meta:mainnet:registry:vitalik.eth' },
-        { name: 'meta:sepolia:namewrapper:vitalik.eth' },
-        { name: 'meta:mainnet:registry:other.eth' }, // must NOT be deleted
+        { name: 'meta:v2:mainnet:registry:vitalik.eth' },
+        { name: 'meta:v2:sepolia:namewrapper:vitalik.eth' },
+        { name: 'meta:v2:mainnet:registry:other.eth' }, // must NOT be deleted
       ],
     })),
     delete: vi.fn(async () => {}),
@@ -122,11 +122,11 @@ describe('WebhookService (zigens contract)', () => {
       // registryType combination for THIS name (no namespace listing, which
       // silently breaks past KV's 1000-key list page).
       expect(fakes.metadataCacheKv.delete).toHaveBeenCalledTimes(4);
-      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:mainnet:registry:vitalik.eth');
-      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:mainnet:namewrapper:vitalik.eth');
-      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:sepolia:registry:vitalik.eth');
-      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:sepolia:namewrapper:vitalik.eth');
-      expect(fakes.metadataCacheKv.delete).not.toHaveBeenCalledWith('meta:mainnet:registry:other.eth');
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:v2:mainnet:registry:vitalik.eth');
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:v2:mainnet:namewrapper:vitalik.eth');
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:v2:sepolia:registry:vitalik.eth');
+      expect(fakes.metadataCacheKv.delete).toHaveBeenCalledWith('meta:v2:sepolia:namewrapper:vitalik.eth');
+      expect(fakes.metadataCacheKv.delete).not.toHaveBeenCalledWith('meta:v2:mainnet:registry:other.eth');
       // image caches
       expect(fakes.svgCacheKv.list).toHaveBeenCalledWith({ prefix: 'svg:vitalik.eth:', cursor: undefined });
       expect(fakes.storageManager.deleteByPrefix).toHaveBeenCalledWith('avatars/vitalik.eth:');
