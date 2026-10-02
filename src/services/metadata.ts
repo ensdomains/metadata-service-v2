@@ -370,11 +370,24 @@ export class MetadataService {
   // seconds; 0 when there is none) has passed, and caches the live verdict
   // otherwise.
   private settleExpiry(canonical: string, verdictKey: string, expiry: bigint): void {
-    const expiryMs = Number(expiry) * 1000;
-    if (expiry && expiryMs < Date.now()) {
-      throw new DomainExpiredError(canonical, new Date(expiryMs));
+    // Number(expiry) is not exact past 2^53, so Number(expiry) * 1000 can
+    // land on or after Date.now() when the exact instant has already passed.
+    const nowMs = BigInt(Date.now());
+    const exactMs = expiry * 1000n;
+    if (expiry && exactMs < nowMs) {
+      // Date cannot represent an instant past ±8.64e15 ms. The verdict is the
+      // throw; the message uses the latest representable instant beyond that.
+      const latest = 8_640_000_000_000_000n;
+      const dateMs = exactMs > latest ? latest : exactMs;
+      throw new DomainExpiredError(canonical, new Date(Number(dateMs)));
     }
-    this.expiryVerdicts.setLive(verdictKey, expiry ? expiryMs : null);
+    const rounded = Number(exactMs);
+    // Never cache a live verdict past the exact instant. A rounded-up number
+    // has no positive lifetime left, so setLive stores nothing.
+    this.expiryVerdicts.setLive(
+      verdictKey,
+      expiry ? (BigInt(rounded) > exactMs ? Number(nowMs) : rounded) : null,
+    );
   }
 
   /** Drops this isolate's cached expiry verdict for a changed name, given by
