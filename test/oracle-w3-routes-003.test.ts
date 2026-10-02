@@ -12,7 +12,7 @@ import { createMockEnv } from './mocks/hono-env';
 const ZERO = '0x0000000000000000000000000000000000000000';
 const RESOLVER = CONTRACTS.sepolia.resolver;
 const PATH = '/registry-hierarchy/non-definitive.eth?network=sepolia';
-const URL = `http://localhost${PATH}`;
+const HIERARCHY_URL = `http://localhost${PATH}`;
 
 const placeholder = {
   name: 'non-definitive.eth',
@@ -23,8 +23,8 @@ const placeholder = {
 };
 
 const edgeStore = new Map<string, Response>();
-const keyOf = (r: RequestInfo | URL) =>
-  typeof r === 'string' ? r : r instanceof URL ? r.href : r.url;
+const keyOf = (r: RequestInfo | globalThis.URL) =>
+  typeof r === 'string' ? r : r instanceof globalThis.URL ? r.href : r.url;
 
 (globalThis as unknown as { caches: unknown }).caches = {
   default: {
@@ -109,7 +109,7 @@ describe('W3-ROUTES-003 non-definitive hierarchy miss', () => {
     expect(body).toEqual(placeholder);
     expect(hasKey(body, '_provenance')).toBe(false);
     expect.soft(res.headers.get('Cache-Control')).toBe('public, max-age=30');
-    expect.soft(edgeStore.get(URL)?.headers.get('Cache-Control')).toBe('public, max-age=30');
+    expect.soft(edgeStore.get(HIERARCHY_URL)?.headers.get('Cache-Control')).toBe('public, max-age=30');
 
     edgeStore.clear();
     const second = makeCtx();
@@ -122,6 +122,6 @@ describe('W3-ROUTES-003 non-definitive hierarchy miss', () => {
     expect(againBody).toEqual(placeholder);
     expect(hasKey(againBody, '_provenance')).toBe(false);
     expect.soft(again.headers.get('Cache-Control')).toBe('public, max-age=30');
-    expect.soft(edgeStore.get(URL)?.headers.get('Cache-Control')).toBe('public, max-age=30');
+    expect.soft(edgeStore.get(HIERARCHY_URL)?.headers.get('Cache-Control')).toBe('public, max-age=30');
   });
 });
