@@ -823,8 +823,11 @@ export class MetadataService {
         error,
       );
 
-      // Generate basic hierarchy as last resort
+      // Generate basic hierarchy as last resort. This is an outage answer,
+      // not a resolved hierarchy: the route must cache it with the error TTL
+      // at the client and the edge, including when this KV copy is served later.
       const fallbackResponse = this.generateBasicHierarchy(name);
+      (fallbackResponse as { outagePlaceholder?: true }).outagePlaceholder = true;
       await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
       return fallbackResponse;
     }

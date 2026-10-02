@@ -29,7 +29,7 @@ import { withServingHost } from "./services/media-fetch";
 import { RasterizeService } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
-import { CachePresets } from "./utils/cache-headers";
+import { CachePresets, CacheTTL } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
@@ -717,14 +717,20 @@ app.get(
       await metadataService.checkExpiry(name);
 
       const hierarchy = await metadataService.getRegistryHierarchy(name);
-
-      const cacheHeaders = CachePresets.hierarchy(name);
+      // The generated placeholder is the only outage answer this route still
+      // returns as 200. A resolved hierarchy, including a blockchain read and a
+      // stale D1 rescue, keeps the healthy hierarchy TTL.
+      const outagePlaceholder =
+        (hierarchy as { outagePlaceholder?: true }).outagePlaceholder === true;
+      const cacheHeaders = outagePlaceholder
+        ? CachePresets.error()
+        : CachePresets.hierarchy(name);
       Object.entries(cacheHeaders).forEach(([key, value]) => {
         c.header(key, value);
       });
 
-      const res = c.json(hierarchy);
-      edgeCachePut(c, res);
+      const res = c.json({ name: hierarchy.name, hierarchy: hierarchy.hierarchy });
+      edgeCachePut(c, res, outagePlaceholder ? CacheTTL.error : undefined);
       return res;
     } catch (error) {
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
