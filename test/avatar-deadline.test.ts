@@ -1,10 +1,10 @@
-// W8-BUDGET-002 round-10 oracle: dispatch-based once auto-removal.
-// Hooks AbortController.prototype.abort so {once:true} tuples are
-// removed from tracking only when the actual abort dispatch invokes
-// them.  Listeners registered on an already-aborted signal are never
-// forgiven and must be explicitly removed.  Includes contract tests
-// for pre-dispatch once removal, post-abort non-forgiveness, and
-// post-abort explicit cleanup.
+// W8-BUDGET-002 round-11 oracle: invocation-based once auto-removal.
+// Wraps {once:true} callbacks so the tuple is removed only when the
+// listener is actually invoked by the abort dispatch — not before.
+// stopImmediatePropagation-skipped listeners and post-abort registrations
+// with repeated abort() never invoke → tuples remain → cleanup fails.
+// Removes the AbortController.prototype.abort hook; the wrapper handles
+// all auto-removal per native EventTarget semantics.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
@@ -35,7 +35,8 @@ function findTuple(signal: AbortSignal, type: string, cb: EventListenerOrEventLi
 
 const origAdd = AbortSignal.prototype.addEventListener;
 const origRemove = AbortSignal.prototype.removeEventListener;
-const origAbort = AbortController.prototype.abort;
+// Map original callback → wrapper for {once} listeners.
+const onceWrappers = new WeakMap<EventListenerOrEventListenerObject, EventListener>();
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -48,23 +49,24 @@ beforeEach(() => {
     return ctrl.signal;
   });
 
-  // Hook abort dispatch: remove {once} tuples for the listeners that fired.
-  vi.spyOn(AbortController.prototype, 'abort').mockImplementation(function (this: AbortController, reason?: any) {
-    const sig = this.signal;
-    // Capture the set of {once} callbacks that will be auto-removed.
-    const onceCbs = new Set(activeTuples.filter(t => t.signal === sig && t.once).map(t => t.callback));
-    const r = origAbort.call(this, reason);
-    // Remove those tuples — EventTarget already auto-removed the listeners.
-    activeTuples = activeTuples.filter(t => !(t.signal === sig && t.once && onceCbs.has(t.callback)));
-    return r;
-  });
-
   vi.spyOn(AbortSignal.prototype, 'addEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) {
       if (type === 'abort') {
-        const cap = normCapture(options);
+        const cap = normCapture(options); const once = normOnce(options);
         if (findTuple(this, type, listener, cap) === -1) {
-          activeTuples.push({ signal: this, type, callback: listener, capture: cap, once: normOnce(options) });
+          activeTuples.push({ signal: this, type, callback: listener, capture: cap, once });
+        }
+        if (once) {
+          // Wrap so the tuple is removed only when this exact listener is invoked.
+          const signal = this;
+          const wrapped = function (this: AbortSignal, ev: Event) {
+            const idx = findTuple(signal, type, listener, cap);
+            if (idx !== -1) activeTuples.splice(idx, 1);
+            if (typeof listener === 'function') (listener as EventListener).call(this, ev);
+            else (listener as EventListenerObject).handleEvent(ev);
+          };
+          onceWrappers.set(listener, wrapped as EventListener);
+          return origAdd.call(this, type, wrapped, options);
         }
       }
       return origAdd.call(this, type, listener, options);
@@ -74,6 +76,9 @@ beforeEach(() => {
       if (type === 'abort') {
         const idx = findTuple(this, type, listener, normCapture(options));
         if (idx !== -1) activeTuples.splice(idx, 1);
+        // Use the wrapper if one was registered for this {once} listener.
+        const effective = onceWrappers.get(listener) || listener;
+        return origRemove.call(this, type, effective, options);
       }
       return origRemove.call(this, type, listener, options);
     });
@@ -90,8 +95,7 @@ afterEach(() => {
 async function settle<T>(promise: Promise<T>, maxMs: number) {
   const o: { done: boolean; value?: T; error?: unknown; elapsed: number } = { done: false, elapsed: 0 };
   promise.then(v => { o.done = true; o.value = v; }, e => { o.done = true; o.error = e; });
-  const s = Date.now();
-  await vi.advanceTimersByTimeAsync(0);
+  const s = Date.now(); await vi.advanceTimersByTimeAsync(0);
   while (!o.done && Date.now() - s < maxMs) await vi.advanceTimersByTimeAsync(50);
   o.elapsed = Date.now() - s; return o;
 }
@@ -101,8 +105,8 @@ function expectNotDeadline(err: unknown) { expect(err).toBeDefined(); if (err in
 
 function makeService(uri: string) {
   const svc = new AvatarService(RPC_URL, NETWORKS.mainnet.chain);
-  const fake = { getAvatar: vi.fn().mockResolvedValue(uri), getHeader: vi.fn().mockResolvedValue(uri) };
-  (svc as any).resolver = fake; (svc as any).legacyResolver = undefined;
+  (svc as any).resolver = { getAvatar: vi.fn().mockResolvedValue(uri), getHeader: vi.fn().mockResolvedValue(uri) };
+  (svc as any).legacyResolver = undefined;
   const fm = vi.fn(); vi.stubGlobal('fetch', fm);
   return { svc, fetchMock: fm };
 }
@@ -110,18 +114,15 @@ function fetchUrls(m: ReturnType<typeof vi.fn>): string[] {
   return m.mock.calls.map(c => typeof c[0] === 'string' ? c[0] : c[0] instanceof URL ? c[0].href : String(c[0]));
 }
 function validPng() { return new Response(Uint8Array.from(atob(PNG_BASE64), c => c.charCodeAt(0)), { status: 200, headers: { 'Content-Type': 'image/png' } }); }
-
 function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   return new Promise<Response>((_, reject) => {
     const s = init?.signal; if (s?.aborted) { reject(s.reason); return; }
     s?.addEventListener('abort', () => reject(s.reason), { once: true });
   });
 }
-
 function assertAllRemoved() { expect(activeTuples).toEqual([]); }
 
 // ------- prior oracles -------
-
 describe('W8-BUDGET-002: prior oracles', () => {
   it('entry guard', async () => {
     const { svc } = makeService(MEDIA_URL); let c=false; (svc as any).fetchMedia=vi.fn().mockImplementation(async()=>{c=true;return null;});
@@ -180,8 +181,7 @@ describe('W8-BUDGET-002: prior oracles', () => {
   });
 });
 
-// ------- dispatch-based contract tests -------
-
+// ------- invocation-based contract tests -------
 describe('W8-BUDGET-002: tuple instrumentation contract', () => {
   it('deduplicates identical (signal,type,callback,capture)', () => {
     const s = new AbortController().signal; const cb = () => {};
@@ -195,7 +195,7 @@ describe('W8-BUDGET-002: tuple instrumentation contract', () => {
     s.removeEventListener('abort', cb, { capture: true });
     assertAllRemoved();
   });
-  it('separate capture values create separate tuples', () => {
+  it('separate capture values', () => {
     const s = new AbortController().signal; const cb = () => {};
     s.addEventListener('abort', cb, false); s.addEventListener('abort', cb, true);
     expect(activeTuples.length).toBe(2);
@@ -223,26 +223,50 @@ describe('W8-BUDGET-002: tuple instrumentation contract', () => {
     assertAllRemoved();
   });
 
-  // Pre-dispatch: listener registered before abort fires — auto-removed.
-  it('pre-dispatch {once} listener is auto-removed by abort dispatch', () => {
+  it('pre-dispatch {once} is auto-removed when listener is actually invoked', () => {
     const ctrl = new AbortController(); const s = ctrl.signal;
-    s.addEventListener('abort', () => {}, { once: true });
+    let called = false;
+    s.addEventListener('abort', () => { called = true; }, { once: true });
     ctrl.abort();
+    expect(called).toBe(true);
     assertAllRemoved();
   });
 
-  // Post-abort: listener registered on already-aborted signal — never fires, must be explicitly removed.
-  it('post-abort {once} listener is NOT forgiven — it never fires', () => {
-    const ctrl = new AbortController(); ctrl.abort();
-    const s = ctrl.signal;
-    s.addEventListener('abort', () => {}, { once: true });
+  it('stopImmediatePropagation: skipped {once} listener NOT removed', () => {
+    const ctrl = new AbortController(); const s = ctrl.signal;
+    const cb1 = vi.fn((ev: Event) => { ev.stopImmediatePropagation(); });
+    const cb2 = vi.fn();
+    s.addEventListener('abort', cb1, { once: true });
+    s.addEventListener('abort', cb2, { once: true });
+    ctrl.abort();
+    expect(cb1).toHaveBeenCalled();
+    expect(cb2).not.toHaveBeenCalled();
+    // cb2 was never invoked → tuple remains.
     expect(activeTuples.length).toBe(1);
-    s.removeEventListener('abort', () => {});
-    // Wrong callback → tuple still there.
-    expect(activeTuples.length).toBe(1);
+    // cb2 must be explicitly removed.
+    s.removeEventListener('abort', cb2);
+    assertAllRemoved();
   });
 
-  it('post-abort listener can be explicitly removed with matching callback', () => {
+  it('post-abort registration + repeated abort: listener never fires, tuple not removed', () => {
+    const ctrl = new AbortController();
+    ctrl.abort(); // signal already aborted
+    const s = ctrl.signal;
+    let called = false;
+    s.addEventListener('abort', () => { called = true; }, { once: true });
+    ctrl.abort(); // repeated abort — no dispatch
+    expect(called).toBe(false);
+    // Listener never invoked → tuple remains.
+    expect(activeTuples.length).toBe(1);
+    s.removeEventListener('abort', () => {}); // wrong callback
+    expect(activeTuples.length).toBe(1); // still there
+    // Correct removal.
+    const cb = activeTuples[0].callback;
+    s.removeEventListener('abort', cb as EventListener);
+    assertAllRemoved();
+  });
+
+  it('post-abort + explicit remove with matching callback', () => {
     const ctrl = new AbortController(); ctrl.abort();
     const s = ctrl.signal; const cb = () => {};
     s.addEventListener('abort', cb, { once: true });
@@ -252,7 +276,6 @@ describe('W8-BUDGET-002: tuple instrumentation contract', () => {
 });
 
 // ------- lifecycle tests -------
-
 describe('W8-BUDGET-002: listener lifecycle', () => {
   it('removes abort listener after work succeeds (avatar)', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
