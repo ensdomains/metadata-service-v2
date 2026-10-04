@@ -18,7 +18,7 @@ const PNG_BASE64 =
 
 let timeoutMsValues: number[] = [];
 
-interface ListenerTuple { signal: AbortSignal; type: string; callback: EventListenerOrEventListenerObject; capture: boolean; once: boolean; }
+interface ListenerTuple { signal: AbortSignal; type: string; callback: EventListenerOrEventListenerObject; capture: boolean; once: boolean; wrapper?: EventListener; }
 let activeTuples: ListenerTuple[] = [];
 
 function normCapture(o?: boolean | AddEventListenerOptions): boolean {
@@ -35,8 +35,6 @@ function findTuple(signal: AbortSignal, type: string, cb: EventListenerOrEventLi
 
 const origAdd = AbortSignal.prototype.addEventListener;
 const origRemove = AbortSignal.prototype.removeEventListener;
-// Map original callback → wrapper for {once} listeners.
-const onceWrappers = new WeakMap<EventListenerOrEventListenerObject, EventListener>();
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -53,21 +51,25 @@ beforeEach(() => {
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) {
       if (type === 'abort') {
         const cap = normCapture(options); const once = normOnce(options);
-        if (findTuple(this, type, listener, cap) === -1) {
-          activeTuples.push({ signal: this, type, callback: listener, capture: cap, once });
+        const existing = findTuple(this, type, listener, cap);
+        if (existing !== -1) {
+          // Dedup: pass the wrapper if one exists, so native deduplication works.
+          const eff = activeTuples[existing].wrapper || listener;
+          return origAdd.call(this, type, eff, options);
         }
+        const tuple: ListenerTuple = { signal: this, type, callback: listener, capture: cap, once };
         if (once) {
-          // Wrap so the tuple is removed only when this exact listener is invoked.
-          const signal = this;
-          const wrapped = function (this: AbortSignal, ev: Event) {
-            const idx = findTuple(signal, type, listener, cap);
+          const sig = this;
+          tuple.wrapper = function (this: AbortSignal, ev: Event) {
+            const idx = findTuple(sig, type, listener, cap);
             if (idx !== -1) activeTuples.splice(idx, 1);
             if (typeof listener === 'function') (listener as EventListener).call(this, ev);
             else (listener as EventListenerObject).handleEvent(ev);
-          };
-          onceWrappers.set(listener, wrapped as EventListener);
-          return origAdd.call(this, type, wrapped, options);
+          } as EventListener;
+          activeTuples.push(tuple);
+          return origAdd.call(this, type, tuple.wrapper, options);
         }
+        activeTuples.push(tuple);
       }
       return origAdd.call(this, type, listener, options);
     });
@@ -75,10 +77,12 @@ beforeEach(() => {
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions | boolean) {
       if (type === 'abort') {
         const idx = findTuple(this, type, listener, normCapture(options));
-        if (idx !== -1) activeTuples.splice(idx, 1);
-        // Use the wrapper if one was registered for this {once} listener.
-        const effective = onceWrappers.get(listener) || listener;
-        return origRemove.call(this, type, effective, options);
+        if (idx !== -1) {
+          const t = activeTuples[idx];
+          activeTuples.splice(idx, 1);
+          const effective = t.wrapper || listener;
+          return origRemove.call(this, type, effective, options);
+        }
       }
       return origRemove.call(this, type, listener, options);
     });
@@ -276,20 +280,15 @@ describe('W8-BUDGET-002: tuple instrumentation contract', () => {
 
   // Cross-signal: same callback on two signals; remove from one,
   // dispatch both.  Only the non-removed listener fires.
-  it('cross-signal removal: removed listener zero invocations', () => {
+  it('cross-signal removal: removed listener zero invocations, other fires', () => {
     const ca = new AbortController(); const cbCtrl = new AbortController();
-    let callsA = 0, callsB = 0;
-    const fn = () => { callsA++; };
+    let calls = 0;
+    const fn = () => { calls++; };
     ca.signal.addEventListener('abort', fn, { once: true });
     cbCtrl.signal.addEventListener('abort', fn, { once: true });
     ca.signal.removeEventListener('abort', fn);
     ca.abort(); cbCtrl.abort();
-    expect(callsA).toBe(0); // removed → never invoked
-    // With callback-keyed wrappers, removing on A also passes the wrapper
-    // to native removeEventListener on A, but the wrapper is the same
-    // function object.  Native on B still has the wrapper registered.
-    // The oracle loses track because it uses a single WeakMap key.
-    expect(callsA + callsB).toBe(1); // only B fires
+    expect(calls).toBe(1); // only signal B's listener fired
     assertAllRemoved();
   });
 
