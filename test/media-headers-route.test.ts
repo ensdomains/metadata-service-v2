@@ -23,7 +23,6 @@ vi.mock('../src/services/avatar', () => ({
 }));
 
 vi.mock('../src/services/image-cache', () => ({
-  CARD_CACHE_VERSION: 'v3',
   ImageCacheService: class {
     async getImage() {
       return {
@@ -79,7 +78,7 @@ describe('media served from the edge cache carries nosniff and a sandboxing CSP'
     ['/mainnet/registry/nick.eth/rasterize', 'image/png', 'PNG'],
   ])('%s: an entry stored without the headers is served with them', async (path, type, body) => {
     const cache = edgeHolding({
-      [`http://localhost${path}?__ecv=v3`]: new Response(body, {
+      [`http://localhost${path}`]: new Response(body, {
         headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=300' },
       }),
     });
