@@ -57,7 +57,6 @@ vi.mock('../src/services/rasterize', () => ({
 // test, so an inert fake keeps the tests hermetic while recording the target
 // network. Real signature: (svgCacheKv, storageManager, imageService, avatarService, network, bucket).
 vi.mock('../src/services/image-cache', () => ({
-  CARD_CACHE_VERSION: 'v3',
   ImageCacheService: class {
     private net: string;
     constructor(_kv: unknown, _sm: unknown, _img: unknown, _av: unknown, network: string) {
