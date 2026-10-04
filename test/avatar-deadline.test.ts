@@ -1,7 +1,8 @@
-// W8-BUDGET-002 round-6 oracle: listener lifecycle and cleanup.
-// Proves that the abort listener is removed on every settlement path
-// (success, sync-fail, async-fail) and that initial signal.aborted is
-// handled.  Keeps all prior oracles.
+// W8-BUDGET-002 round-7 oracle: identity-sensitive listener lifecycle.
+// Tracks exact callback identity via add/remove Sets; verifies that
+// every registered abort callback is removed by the product code.
+// A mutant that calls removeEventListener with a different callback
+// (e.g. () => {}) must fail while correct code passes all tests.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
@@ -10,20 +11,21 @@ import { NETWORKS } from '../src/config/networks';
 const MEDIA_URL   = 'https://media.test/avatar/example.png';
 const REDIRECT_URL = 'https://redirect.example/img.png';
 const RPC_URL      = 'https://rpc.test.example';
-
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 let timeoutMsValues: number[] = [];
-let addCalls: string[] = [];       // 'abort' per addEventListener call
-let removeCalls: string[] = [];    // 'abort' per removeEventListener call
+let addedCbs:    Set<EventListenerOrEventListenerObject>;
+let removedCbs:  Set<EventListenerOrEventListenerObject>;
 
 const origAdd = AbortSignal.prototype.addEventListener;
 const origRemove = AbortSignal.prototype.removeEventListener;
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-  timeoutMsValues = []; addCalls = []; removeCalls = [];
+  timeoutMsValues = [];
+  addedCbs = new Set();
+  removedCbs = new Set();
 
   vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
     timeoutMsValues.push(ms);
@@ -32,17 +34,14 @@ beforeEach(() => {
     return ctrl.signal;
   });
 
-  // Instrument addEventListener / removeEventListener — minimal spy
-  const origAdd = AbortSignal.prototype.addEventListener;
-  const origRemove = AbortSignal.prototype.removeEventListener;
   vi.spyOn(AbortSignal.prototype, 'addEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) {
-      if (type === 'abort') addCalls.push('abort');
+      if (type === 'abort') addedCbs.add(listener);
       return origAdd.call(this, type, listener, options);
     });
   vi.spyOn(AbortSignal.prototype, 'removeEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions | boolean) {
-      if (type === 'abort') removeCalls.push('abort');
+      if (type === 'abort') removedCbs.add(listener);
       return origRemove.call(this, type, listener, options);
     });
 
@@ -77,10 +76,10 @@ function makeService(uri: string) {
   const fm = vi.fn(); vi.stubGlobal('fetch', fm);
   return { svc, fetchMock: fm };
 }
-
 function fetchUrls(m: ReturnType<typeof vi.fn>): string[] {
   return m.mock.calls.map(c => typeof c[0] === 'string' ? c[0] : c[0] instanceof URL ? c[0].href : String(c[0]));
 }
+function validPng() { return new Response(Uint8Array.from(atob(PNG_BASE64), c => c.charCodeAt(0)), { status: 200, headers: { 'Content-Type': 'image/png' } }); }
 
 function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   return new Promise<Response>((_, reject) => {
@@ -89,9 +88,14 @@ function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Re
   });
 }
 
-function validPng() { return new Response(Uint8Array.from(atob(PNG_BASE64), c => c.charCodeAt(0)), { status: 200, headers: { 'Content-Type': 'image/png' } }); }
+// Assert every added abort callback was removed (identity match).
+function assertAllRemoved() {
+  for (const cb of addedCbs) {
+    expect(removedCbs.has(cb)).toBe(true);
+  }
+}
 
-// ----- existing oracles (abbreviated, must keep passing) -----
+// ------- prior oracles (compressed, unchanged) -------
 
 describe('W8-BUDGET-002: prior oracles', () => {
   it('entry guard', async () => {
@@ -137,13 +141,13 @@ describe('W8-BUDGET-002: prior oracles', () => {
     const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getAvatarImage('test.eth');}),60_000);
     expectNotDeadline(o.error);
   });
-  it('hanging body, abort wins (avatar)', async () => {
+  it('hanging body abort wins avatar', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockResolvedValue(validPng());
     const mf=await import('../src/services/media-fetch'); vi.spyOn(mf,'readBodyCapped').mockImplementation(()=>new Promise(()=>{}));
     const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getAvatarImage('test.eth');}),10_000);
     expectDeadline(o.error);
   });
-  it('hanging body, abort wins (header)', async () => {
+  it('hanging body abort wins header', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockResolvedValue(validPng());
     const mf=await import('../src/services/media-fetch'); vi.spyOn(mf,'readBodyCapped').mockImplementation(()=>new Promise(()=>{}));
     const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getHeaderImage('test.eth');}),10_000);
@@ -151,111 +155,86 @@ describe('W8-BUDGET-002: prior oracles', () => {
   });
 });
 
-// ----- new listener-lifecycle oracles -----
+// ------- identity-sensitive listener-lifecycle tests -------
 
-describe('W8-BUDGET-002: listener cleanup on every settlement path', () => {
-  it('removes abort listener after work succeeds (avatar)', async () => {
+describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
+  it('removes exact abort callback after work succeeds (avatar)', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
-    const beforeAdd = addCalls.length;
     await b.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
       await svc.getAvatarImage('test.eth');
     });
-    // One abort listener registered and removed.
-    const adds = addCalls.length - beforeAdd;
-    expect(adds).toBeGreaterThanOrEqual(1);
-    expect(removeCalls.length).toBeGreaterThanOrEqual(adds);
+    assertAllRemoved();
   });
 
-  it('removes abort listener after work succeeds (header)', async () => {
+  it('removes exact abort callback after work succeeds (header)', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
-    const beforeAdd = addCalls.length;
     await b.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
       await svc.getHeaderImage('test.eth');
     });
-    const adds = addCalls.length - beforeAdd;
-    expect(adds).toBeGreaterThanOrEqual(1);
-    expect(removeCalls.length).toBeGreaterThanOrEqual(adds);
+    assertAllRemoved();
   });
 
-  it('removes abort listener after synchronous rejection', async () => {
+  it('removes exact abort callback after synchronous rejection', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockRejectedValue(new Error('sync fail'));
     const b = await import('../src/services/request-budget');
-    const beforeAdd = addCalls.length;
     await b.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
       await svc.getAvatarImage('test.eth').catch(() => {});
     });
-    const adds = addCalls.length - beforeAdd;
-    expect(adds).toBeGreaterThanOrEqual(1);
-    expect(removeCalls.length).toBeGreaterThanOrEqual(adds);
+    assertAllRemoved();
   });
 
-  it('removes abort listener after asynchronous (signal-abort) rejection', async () => {
+  it('removes exact abort callback after asynchronous (signal-abort) rejection', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
+    // Hang without registering any listener — the race's abortPromise wins.
+    fm.mockImplementationOnce(() => new Promise<Response>(() => {}));
     const b = await import('../src/services/request-budget');
-    const beforeRemove = removeCalls.length;
     await settle(b.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000);
       return svc.getAvatarImage('test.eth').catch(() => {});
     }), 10_000);
-    // Our listener must have been removed.
-    expect(removeCalls.length - beforeRemove).toBeGreaterThanOrEqual(1);
+    assertAllRemoved();
   });
 
-  it('16 concurrent successes all cleanly return valid images', async () => {
+  it('16 concurrent successes: every added callback removed by identity', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    // Each call must get its own Response — mockResolvedValue shares one.
     fm.mockImplementation(async () => validPng());
     const b = await import('../src/services/request-budget');
-    const beforeAdd = addCalls.length;
-    const beforeRemove = removeCalls.length;
     const results = await b.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 5000);
       return Promise.all(Array.from({ length: 16 }, () => svc.getAvatarImage('test.eth')));
     });
-    // All 16 succeeded (returned valid image objects).
     expect(results).toHaveLength(16);
     for (const r of results) expect(r).not.toBeNull();
-    // Each added listener was removed.
-    const adds = addCalls.length - beforeAdd;
-    const removes = removeCalls.length - beforeRemove;
-    expect(adds).toBeGreaterThanOrEqual(16);
-    expect(removes).toBeGreaterThanOrEqual(adds);
+    // Every callback that was registered must appear in the removed set.
+    assertAllRemoved();
+    expect(addedCbs.size).toBe(16);
   });
-});
 
-describe('W8-BUDGET-002: initial signal.aborted handled', () => {
   it('does not register a listener on an already-aborted signal', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
-
-    // Spy on the created signal to simulate it being already aborted.
+    const b = await import('../src/services/request-budget');
+    // Simulate an already-aborted signal.
     const origTimeout = AbortSignal.timeout;
     vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
       const s = origTimeout(ms);
-      // Immediately abort before the product code can register.
       Object.defineProperty(s, 'aborted', { value: true, configurable: true });
       return s;
     });
-
-    const b = await import('../src/services/request-budget');
-    const beforeAdd = addCalls.length;
     const error = await b.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000);
       return svc.getAvatarImage('test.eth').catch((e: unknown) => e);
     });
-
-    // No listener should be registered on an already-aborted signal.
-    expect(addCalls.length - beforeAdd).toBe(0);
-    // Must still produce RequestDeadlineError.
     expectDeadline(error);
+    // No listener should have been added.
+    expect(addedCbs.size).toBe(0);
   });
 });
