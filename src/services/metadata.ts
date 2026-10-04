@@ -758,6 +758,8 @@ export class MetadataService {
       return cached;
     }
 
+    let response: RegistryHierarchyResponse;
+
     try {
       // Use comprehensive fallback service
       const {
@@ -765,8 +767,6 @@ export class MetadataService {
         source,
         usedFallback,
       } = await this.fallback.getRegistryHierarchy(name);
-
-      let response: RegistryHierarchyResponse;
 
       if (source === "indexerV2") {
         response = this.buildHierarchyResponse(hierarchy as any, name);
@@ -785,8 +785,6 @@ export class MetadataService {
       if (usedFallback) {
         console.warn(`Fallback to ${source} used for hierarchy of ${name}`);
       }
-
-      return response;
     } catch (error) {
       // Try D1 as last resort if available
       if (this.d1) {
@@ -797,7 +795,7 @@ export class MetadataService {
               `Using stale D1 hierarchy data for ${name} due to all other sources failing`,
             );
 
-            const fallbackResponse: RegistryHierarchyResponse = {
+            response = {
               name,
               hierarchy: d1Records.map((record) => ({
                 name: record.name,
@@ -808,28 +806,10 @@ export class MetadataService {
             };
 
             // Cache briefly to avoid repeated D1 queries
-            await this.cache.set(cacheKey, fallbackResponse, {
+            await this.cache.set(cacheKey, response, {
               ttl: CacheTTL.error,
             });
-            return fallbackResponse;
-          }
-
-          // D1 hierarchy is empty (e.g. after migration 003). Trigger a
-          // recovery sync registered with waitUntil so the Worker runtime
-          // keeps the isolate alive for it.
-          if (this.sync) {
-            const hierarchyCount = await this.d1.getHierarchyCount(name);
-            if (hierarchyCount === 0) {
-              const recovery = this.sync
-                .syncHierarchy(name)
-                .catch((err) =>
-                  console.warn(
-                    `Hierarchy recovery sync for ${name} failed:`,
-                    err,
-                  ),
-                );
-              executionCtx?.waitUntil(recovery);
-            }
+            return response;
           }
         } catch (d1Error) {
           console.error(
@@ -845,10 +825,32 @@ export class MetadataService {
       );
 
       // Generate basic hierarchy as last resort
-      const fallbackResponse = this.generateBasicHierarchy(name);
-      await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
-      return fallbackResponse;
+      response = this.generateBasicHierarchy(name);
+      await this.cache.set(cacheKey, response, { ttl: CacheTTL.error });
     }
+
+    // Schedule D1 hierarchy recovery if the usable (fresh) hierarchy is
+    // empty — covers both the success path (e.g. after migration 003)
+    // and the failure path where D1 fallback found nothing.
+    if (this.d1 && this.sync && executionCtx) {
+      const self = this;
+      const recovery = (async () => {
+        try {
+          const hierarchyCount = await self.d1!.getHierarchyCount(name);
+          if (hierarchyCount === 0) {
+            await self.sync!.syncHierarchy(name);
+          }
+        } catch (err) {
+          console.warn(
+            `Hierarchy recovery sync for ${name} failed:`,
+            err,
+          );
+        }
+      })();
+      executionCtx.waitUntil(recovery);
+    }
+
+    return response;
   }
 
   // Get batch metadata
