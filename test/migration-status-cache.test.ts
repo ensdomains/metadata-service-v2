@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MetadataService } from '../src/services/metadata';
 import { FallbackService } from '../src/services/fallback';
-import { D1Service } from '../src/services/d1';
+import { D1Service, type D1MigrationRecord } from '../src/services/d1';
 import { UpstreamError } from '../src/services/errors';
 import { MIGRATION_STATUS } from '../src/types';
 import app from '../src/index';
@@ -75,12 +75,16 @@ describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
   it('AC1/AC2: D1-rescued migration status must carry Cache-Control: public, max-age=30', async () => {
     // Simulate: FallbackService.getMigrationStatus() throws UpstreamError,
     // then D1Service.getMigrationStatus() returns a migrated row.
-    const d1Record = {
+    const d1Record: D1MigrationRecord = {
+      network: 'sepolia',
+      id: '0xstale',
       name: 'stale-migration.eth',
-      status: 'migrated' as const,
+      status: 'migrated',
       owner: '0x1234',
       expiration_date: '2028-01-01T00:00:00Z',
-      registration_date: '2023-01-01T00:00:00Z',
+      migration_date: null,
+      last_updated: 0,
+      sync_version: 1,
     };
 
     vi.spyOn(FallbackService.prototype, 'getMigrationStatus')
@@ -100,17 +104,15 @@ describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
 
     expect(res.status).toBe(200);
 
-    const body = await res.json();
-    expect(body.name).toBe('stale-migration.eth');
-    expect(body.status).toBe('migrated');
+    const body: unknown = await res.json();
+    expect(body).toEqual({
+      name: 'stale-migration.eth',
+      status: 'migrated',
+      owner: '0x1234',
+      expirationDate: '2028-01-01T00:00:00Z',
+    });
 
-    // The finding: degraded D1-fallback responses must receive the short
-    // error TTL, not the normal migration-status TTL.
-    const cacheControl = res.headers.get('Cache-Control') ?? '';
-    expect(cacheControl).toContain('public');
-    expect(cacheControl).toContain('max-age=30');
-    // The normal migration-status preset includes stale-while-revalidate=30.
-    // The degraded response must NOT include it (matching CacheTTL.error).
-    expect(cacheControl).not.toContain('stale-while-revalidate');
+    // Literal header. toContain('max-age=30') also matches max-age=300.
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=30');
   });
 });

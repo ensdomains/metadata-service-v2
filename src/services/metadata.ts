@@ -663,8 +663,13 @@ export class MetadataService {
     }
   }
 
+  // In-process result. degradedByUpstreamFailure is set non-enumerable after a
+  // D1 rescue from UpstreamError and is not part of the public JSON; the route
+  // strips it before c.json. It is on this return type so that strip typechecks.
   // Get migration status (CF cache handles API response caching)
-  async getMigrationStatus(name: string): Promise<MigrationStatusResponse> {
+  async getMigrationStatus(
+    name: string,
+  ): Promise<MigrationStatusResponse & { degradedByUpstreamFailure?: boolean }> {
     if (!isResolvableEnsName(name)) {
       throw new InvalidNameError();
     }
