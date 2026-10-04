@@ -48,7 +48,7 @@ export class StorageManager {
     if (!object) return null;
     if (maxAgeSeconds !== undefined && object.uploaded) {
       const ageSeconds = (Date.now() - object.uploaded.getTime()) / 1000;
-      if (ageSeconds > maxAgeSeconds) return null;
+      if (ageSeconds >= maxAgeSeconds) return null;
     }
     return object.text();
   }
