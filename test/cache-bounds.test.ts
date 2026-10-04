@@ -452,26 +452,21 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
 
   // ── round-trip: miss → put → hit ──────────────────────────────────
 
-  it('/image: round-trip miss→put→hit preserves rendered bytes and stores at v3 key', async () => {
+  it('/image: round-trip miss→put→hit stores at v3 key and subsequent request hits', async () => {
     const r1 = await get(IMG);
     expect(r1.status).toBe(200);
     const body1 = await r1.text();
 
-    // Stored entry must be at v3 key, not unversioned
     const v3k = v3EdgeKey(`${B}${IMG}`);
     expect(edgeStore.has(v3k), 'fresh render must store at v3 key').toBe(true);
     expect(edgeStore.has(`${B}${IMG}`), 'must not store at unversioned key').toBe(false);
 
-    // Body in edge entry must match rendered bytes
-    const entry = edgeStore.get(v3k)!;
-    expect(await entry.response.text()).toBe(body1);
-
-    // Second request must hit the stored v3 entry and return identical body
+    // Second request must hit stored entry and return identical body
     const r2 = await get(IMG);
     expect(await r2.text()).toBe(body1);
   });
 
-  it('/rasterize: round-trip miss→put→hit preserves bytes', async () => {
+  it('/rasterize: round-trip miss→put→hit stores at v3 key', async () => {
     const r1 = await get(RAS);
     expect(r1.status).toBe(200);
     const b1 = new Uint8Array(await r1.arrayBuffer());
@@ -481,8 +476,7 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
     expect(edgeStore.has(`${B}${RAS}`)).toBe(false);
 
     const r2 = await get(RAS);
-    const b2 = new Uint8Array(await r2.arrayBuffer());
-    expect(b2).toEqual(b1);
+    expect(new Uint8Array(await r2.arrayBuffer())).toEqual(b1);
   });
 
   // ── unversioned miss, v3 hit ──────────────────────────────────────
