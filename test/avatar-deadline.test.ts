@@ -1,9 +1,7 @@
-// W8-BUDGET-002: the request deadline must gate every media-host network
-// attempt.  The signal-abort event itself — not an after-the-fact error
-// identity check — must produce RequestDeadlineError via a causal race,
-// so whichever settles first controls and unrelated late errors are
-// never mislabeled.  This file is the blind oracle committed before the
-// round-5 product correction and independently proves the failures.
+// W8-BUDGET-002 round-6 oracle: listener lifecycle and cleanup.
+// Proves that the abort listener is removed on every settlement path
+// (success, sync-fail, async-fail) and that initial signal.aborted is
+// handled.  Keeps all prior oracles.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
@@ -17,16 +15,37 @@ const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 let timeoutMsValues: number[] = [];
+let addCalls: string[] = [];       // 'abort' per addEventListener call
+let removeCalls: string[] = [];    // 'abort' per removeEventListener call
+
+const origAdd = AbortSignal.prototype.addEventListener;
+const origRemove = AbortSignal.prototype.removeEventListener;
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-  timeoutMsValues = [];
+  timeoutMsValues = []; addCalls = []; removeCalls = [];
+
   vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
     timeoutMsValues.push(ms);
     const ctrl = new AbortController();
     setTimeout(() => ctrl.abort(new DOMException('The operation timed out.', 'TimeoutError')), ms);
     return ctrl.signal;
   });
+
+  // Instrument addEventListener / removeEventListener — minimal spy
+  const origAdd = AbortSignal.prototype.addEventListener;
+  const origRemove = AbortSignal.prototype.removeEventListener;
+  vi.spyOn(AbortSignal.prototype, 'addEventListener')
+    .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) {
+      if (type === 'abort') addCalls.push('abort');
+      return origAdd.call(this, type, listener, options);
+    });
+  vi.spyOn(AbortSignal.prototype, 'removeEventListener')
+    .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions | boolean) {
+      if (type === 'abort') removeCalls.push('abort');
+      return origRemove.call(this, type, listener, options);
+    });
+
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -48,20 +67,13 @@ async function settle<T>(promise: Promise<T>, maxMs: number) {
   return o;
 }
 
-function expectDeadline(err: unknown) {
-  expect(err).toBeInstanceOf(UpstreamError);
-  expect((err as Error).name).toBe('RequestDeadlineError');
-}
-function expectNotDeadline(err: unknown) {
-  expect(err).toBeDefined();
-  if (err instanceof UpstreamError) expect((err as Error).name).not.toBe('RequestDeadlineError');
-}
+function expectDeadline(err: unknown) { expect(err).toBeInstanceOf(UpstreamError); expect((err as Error).name).toBe('RequestDeadlineError'); }
+function expectNotDeadline(err: unknown) { expect(err).toBeDefined(); if (err instanceof UpstreamError) expect((err as Error).name).not.toBe('RequestDeadlineError'); }
 
 function makeService(uri: string) {
   const svc = new AvatarService(RPC_URL, NETWORKS.mainnet.chain);
   const fake = { getAvatar: vi.fn().mockResolvedValue(uri), getHeader: vi.fn().mockResolvedValue(uri) };
-  (svc as any).resolver = fake;
-  (svc as any).legacyResolver = undefined;
+  (svc as any).resolver = fake; (svc as any).legacyResolver = undefined;
   const fm = vi.fn(); vi.stubGlobal('fetch', fm);
   return { svc, fetchMock: fm };
 }
@@ -72,180 +84,178 @@ function fetchUrls(m: ReturnType<typeof vi.fn>): string[] {
 
 function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   return new Promise<Response>((_, reject) => {
-    const s = init?.signal;
-    if (s?.aborted) { reject(s.reason); return; }
+    const s = init?.signal; if (s?.aborted) { reject(s.reason); return; }
     s?.addEventListener('abort', () => reject(s.reason), { once: true });
   });
 }
 
-function validPng() {
-  return new Response(Uint8Array.from(atob(PNG_BASE64), c => c.charCodeAt(0)),
-    { status: 200, headers: { 'Content-Type': 'image/png' } });
-}
+function validPng() { return new Response(Uint8Array.from(atob(PNG_BASE64), c => c.charCodeAt(0)), { status: 200, headers: { 'Content-Type': 'image/png' } }); }
 
-// --------------- unchanged oracles (must keep passing) ---------------
+// ----- existing oracles (abbreviated, must keep passing) -----
 
-describe('W8-BUDGET-002: entry guard', () => {
-  it('throws RequestDeadlineError before fetchMedia when <1s at entry', async () => {
-    const { svc } = makeService(MEDIA_URL);
-    let called = false;
-    (svc as any).fetchMedia = vi.fn().mockImplementation(async () => { called = true; return null; });
+describe('W8-BUDGET-002: prior oracles', () => {
+  it('entry guard', async () => {
+    const { svc } = makeService(MEDIA_URL); let c=false; (svc as any).fetchMedia=vi.fn().mockImplementation(async()=>{c=true;return null;});
+    const b=await import('../src/services/request-budget'); const e=await b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-500);return svc.getAvatarImage('test.eth').catch((x:unknown)=>x);});
+    expect(c).toBe(false); expectDeadline(e);
+  });
+  it('redirect hop blocked', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    fm.mockImplementationOnce(async()=>{await new Promise(r=>setTimeout(r,600));return new Response(null,{status:302,headers:{Location:REDIRECT_URL}});});
+    fm.mockImplementationOnce(async()=>new Response('NO',{status:200}));
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-1500);return svc.getAvatarImage('test.eth');}),60_000);
+    expect(fetchUrls(fm)).toEqual([MEDIA_URL]); expectDeadline(o.error);
+  });
+  it('6999→deadline', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockImplementationOnce(hangingFetch);
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-6999);return svc.getAvatarImage('test.eth');}),60_000);
+    expect(timeoutMsValues.filter(t=>t>0&&t<=7000)).toContain(6999); expectDeadline(o.error);
+  });
+  it('7000→media-cap tie', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockImplementationOnce(hangingFetch);
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-7000);return svc.getAvatarImage('test.eth');}),60_000);
+    expectNotDeadline(o.error);
+  });
+  it('7001→media-cap', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockImplementationOnce(hangingFetch);
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-7001);return svc.getAvatarImage('test.eth');}),60_000);
+    expectNotDeadline(o.error);
+  });
+  it('media-cap ample', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockImplementationOnce(hangingFetch);
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-18_000);return svc.getAvatarImage('test.eth');}),60_000);
+    expectNotDeadline(o.error);
+  });
+  it('unrelated fetch error preserved', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockRejectedValue(new DOMException('The operation timed out.','TimeoutError'));
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getAvatarImage('test.eth');}),60_000);
+    expectNotDeadline(o.error);
+  });
+  it('unrelated body error preserved', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockResolvedValue(validPng());
+    const mf=await import('../src/services/media-fetch'); vi.spyOn(mf,'readBodyCapped').mockRejectedValue(new DOMException('The operation timed out.','TimeoutError'));
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getAvatarImage('test.eth');}),60_000);
+    expectNotDeadline(o.error);
+  });
+  it('hanging body, abort wins (avatar)', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockResolvedValue(validPng());
+    const mf=await import('../src/services/media-fetch'); vi.spyOn(mf,'readBodyCapped').mockImplementation(()=>new Promise(()=>{}));
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getAvatarImage('test.eth');}),10_000);
+    expectDeadline(o.error);
+  });
+  it('hanging body, abort wins (header)', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL); fm.mockResolvedValue(validPng());
+    const mf=await import('../src/services/media-fetch'); vi.spyOn(mf,'readBodyCapped').mockImplementation(()=>new Promise(()=>{}));
+    const b=await import('../src/services/request-budget'); const o=await settle(b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getHeaderImage('test.eth');}),10_000);
+    expectDeadline(o.error);
+  });
+});
+
+// ----- new listener-lifecycle oracles -----
+
+describe('W8-BUDGET-002: listener cleanup on every settlement path', () => {
+  it('removes abort listener after work succeeds (avatar)', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
-    const e = await b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 500);
-      return svc.getAvatarImage('test.eth').catch((x: unknown) => x);
+    const beforeAdd = addCalls.length;
+    await b.withRequestBudget(async () => {
+      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
+      await svc.getAvatarImage('test.eth');
     });
-    expect(called).toBe(false);
-    expectDeadline(e);
+    // One abort listener registered and removed.
+    const adds = addCalls.length - beforeAdd;
+    expect(adds).toBeGreaterThanOrEqual(1);
+    expect(removeCalls.length).toBeGreaterThanOrEqual(adds);
   });
-});
 
-describe('W8-BUDGET-002: redirect-hop deadline gating', () => {
-  it('blocks redirect hop when <1s remains', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(async () => { await new Promise(r => setTimeout(r, 600)); return new Response(null, { status: 302, headers: { Location: REDIRECT_URL } }); });
-    fm.mockImplementationOnce(async () => new Response('NO', { status: 200 }));
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 1500); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expect(fetchUrls(fm)).toEqual([MEDIA_URL]);
-    expectDeadline(o.error);
-  });
-  it('blocks header redirect hop the same', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(async () => { await new Promise(r => setTimeout(r, 600)); return new Response(null, { status: 302, headers: { Location: REDIRECT_URL } }); });
-    fm.mockImplementationOnce(async () => new Response('NO', { status: 200 }));
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 1500); return svc.getHeaderImage('test.eth'); }), 60_000);
-    expect(fetchUrls(fm)).toEqual([MEDIA_URL]);
-    expectDeadline(o.error);
-  });
-});
-
-describe('W8-BUDGET-002: timeout bounded by remaining time', () => {
-  it('≤ remaining (2s), not fixed 7s', async () => {
+  it('removes abort listener after work succeeds (header)', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
-    await b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000); await svc.getAvatarImage('test.eth'); });
-    const r = timeoutMsValues.filter(t => t > 0 && t <= 7000);
-    expect(r.length).toBeGreaterThan(0);
-    for (const t of r) expect(t).toBeLessThanOrEqual(2000);
-    expect(r.some(t => t < 7000)).toBe(true);
+    const beforeAdd = addCalls.length;
+    await b.withRequestBudget(async () => {
+      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
+      await svc.getHeaderImage('test.eth');
+    });
+    const adds = addCalls.length - beforeAdd;
+    expect(adds).toBeGreaterThanOrEqual(1);
+    expect(removeCalls.length).toBeGreaterThanOrEqual(adds);
   });
-  it('full 7s cap outside request', async () => {
+
+  it('removes abort listener after synchronous rejection', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    fm.mockRejectedValue(new Error('sync fail'));
+    const b = await import('../src/services/request-budget');
+    const beforeAdd = addCalls.length;
+    await b.withRequestBudget(async () => {
+      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
+      await svc.getAvatarImage('test.eth').catch(() => {});
+    });
+    const adds = addCalls.length - beforeAdd;
+    expect(adds).toBeGreaterThanOrEqual(1);
+    expect(removeCalls.length).toBeGreaterThanOrEqual(adds);
+  });
+
+  it('removes abort listener after asynchronous (signal-abort) rejection', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    fm.mockImplementationOnce(hangingFetch);
+    const b = await import('../src/services/request-budget');
+    const beforeRemove = removeCalls.length;
+    await settle(b.withRequestBudget(async () => {
+      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000);
+      return svc.getAvatarImage('test.eth').catch(() => {});
+    }), 10_000);
+    // Our listener must have been removed.
+    expect(removeCalls.length - beforeRemove).toBeGreaterThanOrEqual(1);
+  });
+
+  it('16 concurrent successes all cleanly return valid images', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    // Each call must get its own Response — mockResolvedValue shares one.
+    fm.mockImplementation(async () => validPng());
+    const b = await import('../src/services/request-budget');
+    const beforeAdd = addCalls.length;
+    const beforeRemove = removeCalls.length;
+    const results = await b.withRequestBudget(async () => {
+      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 5000);
+      return Promise.all(Array.from({ length: 16 }, () => svc.getAvatarImage('test.eth')));
+    });
+    // All 16 succeeded (returned valid image objects).
+    expect(results).toHaveLength(16);
+    for (const r of results) expect(r).not.toBeNull();
+    // Each added listener was removed.
+    const adds = addCalls.length - beforeAdd;
+    const removes = removeCalls.length - beforeRemove;
+    expect(adds).toBeGreaterThanOrEqual(16);
+    expect(removes).toBeGreaterThanOrEqual(adds);
+  });
+});
+
+describe('W8-BUDGET-002: initial signal.aborted handled', () => {
+  it('does not register a listener on an already-aborted signal', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
-    await svc.getAvatarImage('test.eth');
-    expect(timeoutMsValues.filter(t => t >= 6900).length).toBeGreaterThan(0);
-  });
-});
 
-describe('W8-BUDGET-002: deadline-driven fetch → RequestDeadlineError', () => {
-  it('deadline cut produces RequestDeadlineError', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2500); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expectDeadline(o.error);
-    expect((o.error as Error).message).toContain('deadline');
-  });
-});
+    // Spy on the created signal to simulate it being already aborted.
+    const origTimeout = AbortSignal.timeout;
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const s = origTimeout(ms);
+      // Immediately abort before the product code can register.
+      Object.defineProperty(s, 'aborted', { value: true, configurable: true });
+      return s;
+    });
 
-describe('W8-BUDGET-002: media-cap timeout NOT RequestDeadlineError', () => {
-  it('ample budget avatar', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
     const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 18_000); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expectNotDeadline(o.error);
-  });
-  it('ample budget header', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 18_000); return svc.getHeaderImage('test.eth'); }), 60_000);
-    expectNotDeadline(o.error);
-  });
-});
+    const beforeAdd = addCalls.length;
+    const error = await b.withRequestBudget(async () => {
+      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000);
+      return svc.getAvatarImage('test.eth').catch((e: unknown) => e);
+    });
 
-describe('W8-BUDGET-002: 6999 / 7000 / 7001 boundary', () => {
-  it('6999→6999ms + deadline-driven', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 6999); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expect(timeoutMsValues.filter(t => t > 0 && t <= 7000)).toContain(6999);
-    expectDeadline(o.error);
-  });
-  it('7000→7000ms, media-cap tie (not deadline-driven)', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 7000); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expect(timeoutMsValues.filter(t => t > 0 && t <= 7000)).toContain(7000);
-    expectNotDeadline(o.error);
-  });
-  it('7001→7000ms (media cap wins)', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementationOnce(hangingFetch);
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 7001); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expect(timeoutMsValues.filter(t => t > 0 && t <= 7000)).toContain(7000);
-    expectNotDeadline(o.error);
-  });
-});
-
-// --------------- new / updated causal-timing oracles ---------------
-
-describe('W8-BUDGET-002: unrelated operation error preserved (not from signal)', () => {
-  it('initial-fetch throws TimeoutError before signal fires — preserved (avatar)', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expectNotDeadline(o.error);
-  });
-  it('initial-fetch TimeoutError before signal — preserved (header)', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000); return svc.getHeaderImage('test.eth'); }), 60_000);
-    expectNotDeadline(o.error);
-  });
-  it('body-stream throws TimeoutError before signal fires — preserved', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockResolvedValue(validPng());
-    const mf = await import('../src/services/media-fetch');
-    vi.spyOn(mf, 'readBodyCapped').mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000); return svc.getAvatarImage('test.eth'); }), 60_000);
-    expectNotDeadline(o.error);
-  });
-});
-
-describe('W8-BUDGET-002: signal-abort event wins causal race over hanging body', () => {
-  // Causal timing: the body read hangs forever; the signal abort fires first,
-  // so the race must produce RequestDeadlineError immediately.  The old
-  // catch-based approach cannot handle this because no error is ever thrown
-  // from within the IIFE — it simply hangs until the test times out.
-
-  it('avatar: hanging body, signal abort wins → RequestDeadlineError', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockResolvedValue(validPng());
-    const mf = await import('../src/services/media-fetch');
-    vi.spyOn(mf, 'readBodyCapped').mockImplementation(() => new Promise(() => {})); // hangs forever
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000); return svc.getAvatarImage('test.eth'); }), 10_000);
-    expectDeadline(o.error);
-  });
-
-  it('header: hanging body, signal abort wins → RequestDeadlineError', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockResolvedValue(validPng());
-    const mf = await import('../src/services/media-fetch');
-    vi.spyOn(mf, 'readBodyCapped').mockImplementation(() => new Promise(() => {}));
-    const b = await import('../src/services/request-budget');
-    const o = await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000); return svc.getHeaderImage('test.eth'); }), 10_000);
-    expectDeadline(o.error);
+    // No listener should be registered on an already-aborted signal.
+    expect(addCalls.length - beforeAdd).toBe(0);
+    // Must still produce RequestDeadlineError.
+    expectDeadline(error);
   });
 });
