@@ -37,10 +37,10 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // `name` stays first so the per-name invalidation prefix (`svg:${name}:`) still
 // matches across both networks. `network` prevents mainnet/sepolia collisions —
 // the same name renders differently per network (avatar, migration status).
-// Bump when cards rendered by older code must never be served again. v2: cards
-// rendered before the avatar type allowlist could carry markup injected through
-// the avatar's MIME type (WEB-1549).
-const CARD_CACHE_VERSION = 'v2';
+// Bump when cards rendered by older code must never be served again. v3:
+// pre-fix v2 KV entries carried backfill-time createdAt / full TTL and could
+// bypass R2 deadline enforcement (W8-CACHE-004).
+const CARD_CACHE_VERSION = 'v3';
 
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
