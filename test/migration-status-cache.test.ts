@@ -55,14 +55,49 @@ const env = {
   SEPOLIA_RPC_URL: 'https://sepolia.test',
 };
 
-const ctx = {
-  waitUntil: vi.fn(),
-  passThroughOnException: vi.fn(),
-} as unknown as ExecutionContext;
+// Captured edge copy. edgeCachePut stores a clone whose Cache-Control is the
+// edge TTL, then hands the put to waitUntil. Same shape as cache-bounds.test.ts.
+const edgeStore = new Map<string, Response>();
+const priorCaches = (globalThis as { caches?: unknown }).caches;
+
+function installEdgeCache() {
+  edgeStore.clear();
+  (globalThis as { caches: unknown }).caches = {
+    default: {
+      async match(req: RequestInfo | URL) {
+        const key = typeof req === 'string' ? req : req instanceof URL ? req.href : req.url;
+        const hit = edgeStore.get(key);
+        return hit ? hit.clone() : undefined;
+      },
+      async put(req: RequestInfo | URL, res: Response) {
+        const key = typeof req === 'string' ? req : req instanceof URL ? req.href : req.url;
+        edgeStore.set(key, res);
+      },
+      async delete(req: RequestInfo | URL) {
+        const key = typeof req === 'string' ? req : req instanceof URL ? req.href : req.url;
+        return edgeStore.delete(key);
+      },
+    },
+  };
+}
+
+function flushingCtx() {
+  const pending: Promise<unknown>[] = [];
+  return {
+    ctx: {
+      waitUntil(p: Promise<unknown>) {
+        pending.push(p);
+      },
+      passThroughOnException() {},
+    } as unknown as ExecutionContext,
+    flush: () => Promise.all(pending),
+  };
+}
 
 describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    installEdgeCache();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -70,6 +105,9 @@ describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    if (priorCaches === undefined) delete (globalThis as { caches?: unknown }).caches;
+    else (globalThis as { caches?: unknown }).caches = priorCaches;
+    edgeStore.clear();
   });
 
   it('AC1/AC2: D1-rescued migration status must carry Cache-Control: public, max-age=30', async () => {
@@ -97,12 +135,14 @@ describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
 
     // The real getMigrationStatus will call fallback → catch → D1 → return.
     // The route handler applies cache headers from the result.
+    const { ctx, flush } = flushingCtx();
     const res = await app.request(
       '/migration-status/stale-migration.eth?network=sepolia',
       undefined,
       env as unknown as Record<string, unknown>,
       ctx,
     );
+    await flush();
 
     expect(res.status).toBe(200);
 
@@ -116,5 +156,10 @@ describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
 
     // Literal header. toContain('max-age=30') also matches max-age=300.
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=30');
+
+    // Captured edge copy. The default edge TTL is 300; this path must store 30.
+    expect(edgeStore.size).toBe(1);
+    const stored = [...edgeStore.values()][0];
+    expect(stored.headers.get('Cache-Control')).toBe('public, max-age=30');
   });
 });
