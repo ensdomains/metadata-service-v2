@@ -17,6 +17,23 @@ export interface CachedResponse<T> {
 // KV rejects an expirationTtl below 60 seconds (the put throws).
 export const KV_MIN_EXPIRATION_TTL_SECS = 60;
 
+// KV rejects keys longer than 512 bytes. NFC can expand a name that still
+// passes MAX_ENS_NAME_LENGTH, so get/set/delete must not call KV with one.
+export const KV_MAX_KEY_BYTES = 512;
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+function kvKeyWithinLimit(cacheKey: string): boolean {
+  const bytes = utf8ByteLength(cacheKey);
+  if (bytes <= KV_MAX_KEY_BYTES) return true;
+  console.warn(
+    `Cache key exceeds ${KV_MAX_KEY_BYTES} bytes (${bytes}); skipping KV`,
+  );
+  return false;
+}
+
 export class CacheService {
   constructor(private kv: KVNamespace) {}
 
@@ -35,6 +52,7 @@ export class CacheService {
     } = options;
 
     const cacheKey = this.buildKey(namespace, key);
+    if (!kvKeyWithinLimit(cacheKey)) return;
     const response: CachedResponse<T> = {
       data,
       timestamp: Date.now(),
@@ -68,6 +86,7 @@ export class CacheService {
   // Get data from cache
   async get<T>(key: string, namespace: string = "indexer"): Promise<T | null> {
     const cacheKey = this.buildKey(namespace, key);
+    if (!kvKeyWithinLimit(cacheKey)) return null;
     const cached = await this.kv.get(cacheKey);
 
     if (!cached) {
@@ -104,6 +123,7 @@ export class CacheService {
   // Delete cache entry
   async delete(key: string, namespace: string = "indexer"): Promise<void> {
     const cacheKey = this.buildKey(namespace, key);
+    if (!kvKeyWithinLimit(cacheKey)) return;
     await this.kv.delete(cacheKey);
   }
 
@@ -221,12 +241,27 @@ export class CacheService {
   }
 }
 
+// NFC then lowercase, repeated to a fixed point. One pass is not idempotent:
+// U+03AA U+0301 lowercases to a sequence whose NFC is U+0390. The webhook
+// applies canonicalizeName and then CacheKeys, so a single pass makes the
+// purge miss the key the read path wrote. Same two operations as
+// canonicalizeName, not an import: test/indexer.test.ts mocks ../src/utils/ens.
+function canonicalCacheName(name: string): string {
+  let current = name;
+  for (let i = 0; i < 8; i++) {
+    const next = current.normalize("NFC").toLowerCase();
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
 // Cache key generators for internal operations
 export const CacheKeys = {
-  domain: (name: string, network: string) => `ensnode:${network}:domain:${name.normalize("NFC").toLowerCase()}`,
-  domains: (names: string[], network: string) => `ensnode:${network}:batch:${names.map(n => n.normalize("NFC").toLowerCase()).sort().join(",")}`,
-  migrationStatus: (name: string, network: string) => `ensnode:${network}:migration:${name.normalize("NFC").toLowerCase()}`,
-  hierarchy: (name: string, network: string) => `ensnode:${network}:hierarchy:${name.normalize("NFC").toLowerCase()}`,
+  domain: (name: string, network: string) => `ensnode:${network}:domain:${canonicalCacheName(name)}`,
+  domains: (names: string[], network: string) => `ensnode:${network}:batch:${names.map(n => canonicalCacheName(n)).sort().join(",")}`,
+  migrationStatus: (name: string, network: string) => `ensnode:${network}:migration:${canonicalCacheName(name)}`,
+  hierarchy: (name: string, network: string) => `ensnode:${network}:hierarchy:${canonicalCacheName(name)}`,
   health: (network: string) => `ensnode:${network}:health:status`,
 };
 
