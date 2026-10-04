@@ -789,10 +789,12 @@ export class AvatarService {
       const deadlineDriven = Number.isFinite(left) && left < 7000;
       const signal = AbortSignal.timeout(mediaTimeoutMs);
 
-      // Wrap the full fetch + body-consumption so a request-deadline abort
-      // during body streaming surfaces RequestDeadlineError, not a generic
-      // UpstreamError wrapping a raw TimeoutError.
-      const result = await (async (): Promise<AvatarImage | null> => {
+      // The complete fetch + body-consumption, raced against the signal-abort
+      // event when the deadline drives the timeout.  Whichever settles first
+      // controls: normal completion / its own error, or a clean
+      // RequestDeadlineError from the abort event.  Late rejections are
+      // suppressed so unhandled-rejection noise is avoided.
+      const work = (async (): Promise<AvatarImage | null> => {
         const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
           signal,
           headers: {
@@ -829,14 +831,22 @@ export class AvatarService {
           console.warn(`Rejected ${kind} for ${name}: not an allowlisted image`);
         }
         return safe;
-      })().catch((err) => {
-        if (deadlineDriven && signal.aborted && err instanceof DOMException && err.name === 'TimeoutError') {
-          throw new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`);
-        }
-        throw err;
-      });
+      })();
 
-      return result;
+      if (!deadlineDriven) return await work;
+
+      // Race: the signal-abort event itself produces RequestDeadlineError.
+      // No error-identity check — whichever settles first controls.
+      const abortPromise = new Promise<never>((_, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`));
+        }, { once: true });
+      });
+      try {
+        return await Promise.race([work, abortPromise]);
+      } finally {
+        work.catch(() => {}); // suppress late rejection after race settled
+      }
     }
 
     console.warn(`Unsupported ${kind} URI format for ${name}: ${uri}`);
