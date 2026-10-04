@@ -1,0 +1,116 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { MetadataService } from '../src/services/metadata';
+import { FallbackService } from '../src/services/fallback';
+import { D1Service } from '../src/services/d1';
+import { UpstreamError } from '../src/services/errors';
+import { MIGRATION_STATUS } from '../src/types';
+import app from '../src/index';
+
+// Thaw getServices' per-network cache so every test starts fresh. The module-level
+// cache in src/index.ts is a plain Map; clearing its private entries before each
+// test is the only way to re-create MetadataService with the mocks below.
+const _resetServicesCache = () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (app as any)._fullServices?.clear?.();
+};
+
+const env = {
+  METADATA_CACHE: {
+    get: vi.fn().mockResolvedValue(null),
+    put: vi.fn().mockResolvedValue(undefined),
+    delete: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue({ keys: [], list_complete: true, cursor: '' }),
+    getWithMetadata: vi.fn().mockResolvedValue({ value: null, metadata: null }),
+  } as unknown as KVNamespace,
+  ASSET_BUCKET: {
+    get: vi.fn().mockResolvedValue(null),
+    put: vi.fn().mockResolvedValue({ key: 'k', etag: 'e', size: 0 } as unknown as R2Object),
+    delete: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue({ objects: [], truncated: false, cursor: undefined }),
+    head: vi.fn().mockResolvedValue(null),
+    createMultipartUpload: vi.fn(),
+    resumeMultipartUpload: vi.fn(),
+  } as unknown as R2Bucket,
+  SVG_CACHE: {
+    get: vi.fn().mockResolvedValue(null),
+    put: vi.fn().mockResolvedValue(undefined),
+    delete: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue({ keys: [], list_complete: true, cursor: '' }),
+    getWithMetadata: vi.fn().mockResolvedValue({ value: null, metadata: null }),
+  } as unknown as KVNamespace,
+  DB: {
+    prepare: vi.fn().mockReturnValue({
+      bind: vi.fn().mockReturnValue({
+        first: vi.fn().mockResolvedValue(null),
+        all: vi.fn().mockResolvedValue({ results: [], success: true }),
+        run: vi.fn().mockResolvedValue({ success: true }),
+      }),
+    }),
+    dump: vi.fn(),
+    batch: vi.fn().mockResolvedValue([]),
+    exec: vi.fn().mockResolvedValue({ results: [], success: true }),
+    withSession: vi.fn().mockReturnThis(),
+  } as unknown as D1Database,
+  MAINNET_RPC_URL: 'https://mainnet.test',
+  SEPOLIA_RPC_URL: 'https://sepolia.test',
+};
+
+const ctx = {
+  waitUntil: vi.fn(),
+  passThroughOnException: vi.fn(),
+} as unknown as ExecutionContext;
+
+describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('AC1/AC2: D1-rescued migration status must carry Cache-Control: public, max-age=30', async () => {
+    // Simulate: FallbackService.getMigrationStatus() throws UpstreamError,
+    // then D1Service.getMigrationStatus() returns a migrated row.
+    const d1Record = {
+      name: 'stale-migration.eth',
+      status: 'migrated' as const,
+      owner: '0x1234',
+      expiration_date: '2028-01-01T00:00:00Z',
+      registration_date: '2023-01-01T00:00:00Z',
+    };
+
+    vi.spyOn(FallbackService.prototype, 'getMigrationStatus')
+      .mockRejectedValue(new UpstreamError('indexer 502'));
+
+    vi.spyOn(D1Service.prototype, 'getMigrationStatus')
+      .mockResolvedValue(d1Record);
+
+    // The real getMigrationStatus will call fallback → catch → D1 → return.
+    // The route handler applies cache headers from the result.
+    const res = await app.request(
+      '/migration-status/stale-migration.eth?network=sepolia',
+      undefined,
+      env as unknown as Record<string, unknown>,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.name).toBe('stale-migration.eth');
+    expect(body.status).toBe('migrated');
+
+    // The finding: degraded D1-fallback responses must receive the short
+    // error TTL, not the normal migration-status TTL.
+    const cacheControl = res.headers.get('Cache-Control') ?? '';
+    expect(cacheControl).toContain('public');
+    expect(cacheControl).toContain('max-age=30');
+    // The normal migration-status preset includes stale-while-revalidate=30.
+    // The degraded response must NOT include it (matching CacheTTL.error).
+    expect(cacheControl).not.toContain('stale-while-revalidate');
+  });
+});
