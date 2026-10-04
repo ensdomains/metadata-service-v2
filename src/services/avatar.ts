@@ -787,13 +787,14 @@ export class AvatarService {
       const mediaTimeoutMs = Number.isFinite(left) ? Math.min(7000, left) : 7000;
       // The deadline, not the media cap, shortened the timeout.
       const deadlineDriven = Number.isFinite(left) && left < 7000;
+      const signal = AbortSignal.timeout(mediaTimeoutMs);
 
       // Wrap the full fetch + body-consumption so a request-deadline abort
       // during body streaming surfaces RequestDeadlineError, not a generic
       // UpstreamError wrapping a raw TimeoutError.
       const result = await (async (): Promise<AvatarImage | null> => {
         const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
-          signal: AbortSignal.timeout(mediaTimeoutMs),
+          signal,
           headers: {
             'user-agent': 'ENS-Metadata-V2/1.0.0',
           },
@@ -829,7 +830,7 @@ export class AvatarService {
         }
         return safe;
       })().catch((err) => {
-        if (deadlineDriven && err instanceof DOMException && err.name === 'TimeoutError') {
+        if (deadlineDriven && signal.aborted && err instanceof DOMException && err.name === 'TimeoutError') {
           throw new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`);
         }
         throw err;
