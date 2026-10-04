@@ -1,5 +1,43 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebhookService } from '../src/services/webhook';
+
+// Spies on per-network warm/persist path — set up before dynamic app import.
+// vi.mock factories are hoisted above imports and replace the real classes.
+const warmSpies = vi.hoisted(() => ({
+  resolveStatusForImage: vi.fn().mockResolvedValue('unmigrated'),
+  recordMigrationStatus: vi.fn().mockResolvedValue(undefined),
+  getImage: vi.fn().mockResolvedValue({ svg: '<svg></svg>', contentType: 'image/svg+xml', cacheStatus: 'miss', ttlConfig: { softTtl: 300, hardTtl: 3600 }, avatarFailed: false }),
+}));
+
+vi.mock('../src/services/metadata', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/metadata')>();
+  return {
+    ...actual,
+    MetadataService: class extends actual.MetadataService {
+      async resolveStatusForImage(...args: any[]) {
+        warmSpies.resolveStatusForImage(...args as [any, any, any?]);
+        return 'unmigrated' as any;
+      }
+      async recordMigrationStatus(...args: any[]) {
+        warmSpies.recordMigrationStatus(...args as [any, any]);
+        return undefined as any;
+      }
+    },
+  };
+});
+
+vi.mock('../src/services/image-cache', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/image-cache')>();
+  return {
+    ...actual,
+    ImageCacheService: class extends actual.ImageCacheService {
+      async getImage(...args: any[]) {
+        warmSpies.getImage(...args as [any, any, any]);
+        return { svg: '<svg></svg>', contentType: 'image/svg+xml', cacheStatus: 'miss', ttlConfig: { softTtl: 300, hardTtl: 3600 }, avatarFailed: false } as any;
+      }
+    },
+  };
+});
 
 const SECRET = '0'.repeat(64);
 const NOW_SECS = 1_800_000_000;
@@ -159,6 +197,12 @@ describe('webhook replay tolerance configuration', () => {
 describe('webhook replay tolerance via public POST /webhook route', () => {
   const SECRET_HEX = '0'.repeat(64);
   const NAME = 'stale-window.eth';
+
+  beforeEach(() => {
+    warmSpies.resolveStatusForImage.mockClear();
+    warmSpies.recordMigrationStatus.mockClear();
+    warmSpies.getImage.mockClear();
+  });
 
   async function loadApp() {
     vi.resetModules();
@@ -364,9 +408,10 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
     expect.soft(edgePurge).not.toHaveBeenCalled();
+    assertNoWarm();
   });
 
-  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge', async () => {
+  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge, zero warm', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
@@ -381,9 +426,10 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
     expect.soft(edgePurge).not.toHaveBeenCalled();
+    assertNoWarm();
   });
 
-  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge', async () => {
+  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge, zero warm', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
@@ -398,6 +444,7 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
     expect.soft(edgePurge).not.toHaveBeenCalled();
+    assertNoWarm();
   });
 
   // ── acceptance tests ──────────────────────────────────────────────────
@@ -419,6 +466,29 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect.soft(urls.every((u: string) => u.includes(name))).toBe(true);
   }
 
+  function assertNoWarm() {
+    expect.soft(warmSpies.resolveStatusForImage).not.toHaveBeenCalled();
+    expect.soft(warmSpies.recordMigrationStatus).not.toHaveBeenCalled();
+    expect.soft(warmSpies.getImage).not.toHaveBeenCalled();
+  }
+
+  function assertWarm(name: string) {
+    // v2 protocol → targetNetworks = networks with indexerV2ApiVersion='v2'.
+    // In production config only sepolia qualifies; mainnet is v1.
+    const nets = ['sepolia'];
+    for (const net of nets) {
+      expect.soft(warmSpies.resolveStatusForImage)
+        .toHaveBeenCalledWith(net, name, { strict: true });
+      expect.soft(warmSpies.recordMigrationStatus)
+        .toHaveBeenCalledWith(name, 'unmigrated');
+      expect.soft(warmSpies.getImage)
+        .toHaveBeenCalledWith(name, expect.objectContaining({ name, migrationStatus: 'unmigrated' }), expect.any(Object));
+    }
+    expect.soft(warmSpies.resolveStatusForImage).toHaveBeenCalledTimes(1);
+    expect.soft(warmSpies.recordMigrationStatus).toHaveBeenCalledTimes(1);
+    expect.soft(warmSpies.getImage).toHaveBeenCalledTimes(1);
+  }
+
   it('86400 inclusive max: accepts age 121, full purge, bg drained, exact edge purge URLs', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
@@ -436,9 +506,10 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     const settled = await Promise.allSettled(bg);
     expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
     assertEdgePurge(edgePurge, NAME);
+    assertWarm(NAME);
   });
 
-  it('negative unsafe-int fallback: accepts fresh, full purge, bg drained, exact edge purge URLs', async () => {
+  it('negative unsafe-int fallback: accepts fresh, full purge, bg drained, exact edge purge URLs, warm/persist', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
@@ -455,5 +526,6 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     const settled = await Promise.allSettled(bg);
     expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
     assertEdgePurge(edgePurge, NAME);
+    assertWarm(NAME);
   });
 });
