@@ -833,12 +833,13 @@ export class MetadataService {
     // empty — covers both the success path (e.g. after migration 003)
     // and the failure path where D1 fallback found nothing.
     if (this.d1 && this.sync && executionCtx) {
-      const self = this;
+      const d1 = this.d1;
+      const sync = this.sync;
       const recovery = (async () => {
         try {
-          const hierarchyCount = await self.d1!.getHierarchyCount(name);
+          const hierarchyCount = await d1.getHierarchyCount(name);
           if (hierarchyCount === 0) {
-            await self.sync!.syncHierarchy(name);
+            await sync.syncHierarchy(name);
           }
         } catch (err) {
           console.warn(

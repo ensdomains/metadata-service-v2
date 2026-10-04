@@ -281,7 +281,7 @@ export class D1Service {
           last_updated, sync_version
         ) VALUES (
           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE network = ?1 AND id = ?2), 0) + 1
+          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE network = ?1 AND id = ?2 AND root_domain_id = ?8), 0) + 1
         )
       `);
 
@@ -312,7 +312,7 @@ export class D1Service {
     const rootDomainId = namehash(canonicalizeName(name));
     const cutoff = Date.now() - this.readMaxAgeMs;
     const stmt = this.db.prepare(
-      'SELECT COUNT(*) AS cnt FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2 AND last_updated > ?3'
+      'SELECT COUNT(*) AS cnt FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2 AND last_updated >= ?3'
     );
     const result = await stmt.bind(this.network, rootDomainId, cutoff).first<{ cnt: number }>();
     return result?.cnt ?? 0;

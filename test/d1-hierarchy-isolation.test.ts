@@ -466,10 +466,17 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
     const waitUntil = vi.fn((p: Promise<unknown>) => { registeredPromise = p; });
     const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
 
-    try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {}
+    try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {
+      // On earlier HEAD the failure path threw; now returns basic hierarchy.
+    }
 
     // 1. A promise was registered.
     expect(registeredPromise).not.toBeNull();
+
+    // Yield so the recovery IIFE starts executing (calls getHierarchyCount
+    // then syncHierarchy, which returns our deferred syncPromise).
+    await new Promise(r => queueMicrotask(r));
+
     // 2. syncHierarchy was called.
     expect(syncHierarchyMock).toHaveBeenCalledWith('a.eth');
     // 3. D1 is still empty before sync completes (causal ordering).
