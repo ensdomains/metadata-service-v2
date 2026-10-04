@@ -178,59 +178,117 @@ describe('rasterize dimensions (W8-RASTER-001)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  // T1 — Malformed width: w=100a parses as 100 on base → square rewrite to 100×100.
-  // After fix w=100a is rejected → null → hasCustomSize false → default 518×518.
+  // --- malformed values (T1–T3) ---
+
+  // T1 — Malformed width square: w=100a parses as 100 on base → square rewrite.
   it('ignores a malformed width (T1)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=100a&h=100');
     expect(res.status).toBe(200);
-    // Red on base: width="100" (rewritten). Green after fix: width="518" (default).
-    expect(state.rasterized[0]).not.toMatch(/ width="100"/);
-    expect(state.rasterized[0]).toMatch(/ width="518"/);
+    // Root SVG must not carry the attacker value; must be default 518.
+    expect(state.rasterized[0]).not.toMatch(/^<svg width="100"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
   });
 
-  // T2 — Malformed height: h=200b parses as 200 on base → square rewrite to 200×200.
+  // T2 — Malformed height square: h=200b parses as 200 on base → square rewrite.
   it('ignores a malformed height (T2)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=200b');
     expect(res.status).toBe(200);
-    // Red on base: width="200" (rewritten). Green after fix: width="518" (default).
-    expect(state.rasterized[0]).not.toMatch(/ width="200"/);
-    expect(state.rasterized[0]).toMatch(/ width="518"/);
+    expect(state.rasterized[0]).not.toMatch(/^<svg width="200"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
   });
 
-  // T3 — Malformed both (non-square): w=100a→100, h=101b→101. On base options.size
-  // is set to {width:100,height:101}; after fix both are null, no size is supplied.
-  it('ignores two malformed values and supplies no size (T3)', async () => {
+  // T3a — Malformed both (non-square): w=100a→100, h=101b→101 → options.size set on base.
+  it('ignores two malformed non-square values, no size supplied (T3a)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=100a&h=101b');
     expect(res.status).toBe(200);
     // Red on base: getImageOptions.size = {width:100,height:101}.
-    // Green after fix: getImageOptions has no size property.
     expect(state.getImageOptions).not.toHaveProperty('size');
   });
 
-  // T4 — Missing width, clean height: must not supply a partial custom size.
-  it('supplies no custom size when only height is present (T4)', async () => {
+  // T3b — Malformed both (square): w=150x&h=150x both parse to 150 → square rewrite on base.
+  it('ignores two malformed square values (T3b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=150x&h=150x');
+    expect(res.status).toBe(200);
+    // Red on base: root SVG rewritten to width="150".
+    expect(state.rasterized[0]).not.toMatch(/^<svg width="150"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // --- incomplete pairs (T4a, T4b) ---
+
+  // T4a — Missing width, clean height: must not supply a partial custom size.
+  it('supplies no custom size when only height is present (T4a)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?h=200');
     expect(res.status).toBe(200);
-    // Green on base already: outputWidth is null → hasCustomSize is false.
-    // Guards against a future regression that tries to supply a one-param size.
-    expect(state.rasterized[0]).toMatch(/ width="518"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
     expect(state.getImageOptions).not.toHaveProperty('size');
   });
 
-  // T5 — Clean square custom size: pure decimal, within range → applied.
+  // T4b — Missing height, clean width: the reverse incomplete-pair direction.
+  it('supplies no custom size when only width is present (T4b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // --- clean custom sizes (T5) ---
+
+  // T5 — Clean square: pure decimal, within range → applied.
   it('accepts a clean square custom size (T5)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=250&h=250');
     expect(res.status).toBe(200);
-    // Must be rewritten to the requested size.
     expect(state.rasterized[0]).toMatch(/^<svg width="250" height="250"/);
   });
 
-  // T6 — Out-of-range clean values: 99 < 100 → hasCustomSize is already false.
-  it('ignores out-of-range clean values (T6)', async () => {
+  // --- boundary values (T6a–T6d) ---
+
+  // T6a — Below lower bound: 99 < 100 → ignored.
+  it('ignores below-lower-bound values (T6a)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=99');
     expect(res.status).toBe(200);
-    // Green on base, guards against the regex fix accidentally widening the range.
-    expect(state.rasterized[0]).toMatch(/ width="518"/);
+    // Anchored: root SVG, not the background rect.
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
     expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6b — Exact lower bound: 100 → accepted (kills >100 exclusive mutant).
+  it('accepts exact lower bound (T6b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100&h=100');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="100" height="100"/);
+  });
+
+  // T6c — Exact upper bound: 2000 → accepted.
+  it('accepts exact upper bound (T6c)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2000&h=2000');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="2000" height="2000"/);
+  });
+
+  // T6d — Above upper bound: 2001 > 2000 → ignored.
+  it('ignores above-upper-bound values (T6d)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2001&h=2001');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6e — Cross-boundary: one in range, one out → both ignored (no partial size).
+  it('ignores cross-boundary pairs (T6e)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=100');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // --- leading zeros (T7) ---
+
+  // T7 — Leading zeros: pure decimal, /^\d+$/ accepts; parseInt('0100',10)→100.
+  it('accepts leading-zero decimal spellings (T7)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=0100&h=0100');
+    expect(res.status).toBe(200);
+    // Must be accepted as 100×100, killing a /^[1-9]\d*$/ rejection mutant.
+    expect(state.rasterized[0]).toMatch(/^<svg width="100" height="100"/);
   });
 });
