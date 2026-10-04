@@ -517,7 +517,7 @@ describe('no retained timers after settlement', () => {
 
     expectDeadlineError(out.error);
     // After settlement, zero timers should remain. The current product
-    // leaves the nested withMediaTimeout 8s timer dangling.
+    // leaves the media-timeout timer dangling (no outer finally cleanup).
     expect(vi.getTimerCount()).toBe(before);
   });
 
@@ -530,7 +530,7 @@ describe('no retained timers after settlement', () => {
 
     expect(out.error).toBeInstanceOf(UpstreamError);
     expect(out.error).not.toBeInstanceOf(RequestDeadlineError);
-    // raceRequestDeadline already clears its timer; withMediaTimeout must too.
+    // raceRequestDeadline clears its own deadline timer; the media timer must too.
     expect(vi.getTimerCount()).toBe(before);
   });
 
