@@ -11,7 +11,6 @@ import { withRequestBudget } from '../src/services/request-budget';
 // must be killed by the deadline, not left to the fixed 8s media timeout.
 
 const DEADLINE_MS = 25_000;
-const MEDIA_TIMEOUT_MS = 8_000;
 const FIRST_UPSTREAM_ERROR = new UpstreamError('primary failed');
 
 // Never resolves; used to simulate a hung resolver.
@@ -573,12 +572,9 @@ describe('no retained timers after settlement', () => {
 
   it('async rejection (100ms): no pending timers remain', async () => {
     const err = new UpstreamError('async fail');
-    const getAvatar = vi.fn(afterMs(100, Promise.reject(err)));
-    // afterMs returns () => Promise that resolves with the value, so for
-    // rejection we need a function that rejects.
     const rejectAfter = () => new Promise<never>((_, reject) => setTimeout(() => reject(err), 100));
-    const getAvatar2 = vi.fn(rejectAfter);
-    const svc = makeService({ getAvatar: getAvatar2 });
+    const getAvatar = vi.fn(rejectAfter);
+    const svc = makeService({ getAvatar });
 
     const before = vi.getTimerCount();
     const out = await settle(inRequest(10_000, () => svc.getAvatarImage('budget.eth')), 60_000);
