@@ -124,19 +124,11 @@ const DEGRADED_CARD_MAX_AGE_SECS = 60;
 const DEGRADED_CARD_CACHE_CONTROL = `public, max-age=${DEGRADED_CARD_MAX_AGE_SECS}`;
 
 // Client Cache-Control for an NFT card (SVG or PNG): the per-migration-status
-// stale-while-revalidate policy, capped to the remaining R2 lifetime when the
-// data came from an L2 backfill (remainingLifetimeSeconds).  The short TTL
-// for a degraded card is returned unchanged (avatar fetch failure).
+// stale-while-revalidate policy, or the short one above for a degraded card.
 function cardCacheControl(result: ImageCacheResult): string {
   if (result.avatarFailed) return DEGRADED_CARD_CACHE_CONTROL;
   const { softTtl, hardTtl } = result.ttlConfig;
-  const maxAge = result.remainingLifetimeSeconds !== undefined
-    ? Math.max(0, Math.floor(Math.min(softTtl, result.remainingLifetimeSeconds)))
-    : softTtl;
-  const swr = result.remainingLifetimeSeconds !== undefined
-    ? Math.max(0, Math.floor(Math.min(hardTtl - softTtl, result.remainingLifetimeSeconds - maxAge)))
-    : hardTtl - softTtl;
-  return `public, max-age=${maxAge}, stale-while-revalidate=${swr}`;
+  return `public, max-age=${softTtl}, stale-while-revalidate=${hardTtl - softTtl}`;
 }
 
 // L0 edge cache (caches.default) helpers — one consistent mechanism for all GET
@@ -599,14 +591,9 @@ async function handleImage(c: AppContext, network: NetworkName, name: string) {
     },
   });
 
-  // Store in CF edge cache — next identical request returns instantly.  Capped
-  // to remaining R2 lifetime when the data came from an L2 backfill.  A card
+  // Store in CF edge cache — next identical request returns instantly. A card
   // whose avatar lookup failed only briefly (see DEGRADED_CARD_MAX_AGE_SECS).
-  const edgeMaxAge = result.avatarFailed ? DEGRADED_CARD_MAX_AGE_SECS
-    : result.remainingLifetimeSeconds !== undefined
-      ? Math.floor(Math.min(EDGE_CACHE_MAX_AGE_SECS, result.remainingLifetimeSeconds))
-      : EDGE_CACHE_MAX_AGE_SECS;
-  if (edgeMaxAge > 0) edgeCachePut(c, response, edgeMaxAge);
+  edgeCachePut(c, response, result.avatarFailed ? DEGRADED_CARD_MAX_AGE_SECS : EDGE_CACHE_MAX_AGE_SECS);
 
   return response;
 }
@@ -1162,13 +1149,11 @@ app.get(
         },
       });
 
-      // Store in CF edge cache, capped to remaining R2 lifetime for backfill.
-      // A card whose avatar lookup failed only briefly.
-      const edgeMaxAge = result.avatarFailed ? DEGRADED_CARD_MAX_AGE_SECS
-        : result.remainingLifetimeSeconds !== undefined
-          ? Math.floor(Math.min(EDGE_CACHE_MAX_AGE_SECS, result.remainingLifetimeSeconds))
-          : EDGE_CACHE_MAX_AGE_SECS;
-      if (edgeMaxAge > 0) edgeCachePut(c, pngResponse, edgeMaxAge);
+      // Store in CF edge cache with the shared capped TTL — caches.default is
+      // per-colo and unpurgeable by the webhook, so the full softTtl (hours)
+      // must never reach it (see EDGE_CACHE_MAX_AGE_SECS). A card whose avatar
+      // lookup failed only briefly (see DEGRADED_CARD_MAX_AGE_SECS).
+      edgeCachePut(c, pngResponse, result.avatarFailed ? DEGRADED_CARD_MAX_AGE_SECS : EDGE_CACHE_MAX_AGE_SECS);
 
       return pngResponse;
     } catch (error) {
