@@ -20,6 +20,7 @@ vi.mock('../src/services/rasterize', () => ({
   },
 }));
 vi.mock('../src/services/image-cache', () => ({
+  CARD_CACHE_VERSION: 'v3',
   ImageCacheService: class {
     getImage = getImage;
   },

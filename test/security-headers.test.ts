@@ -31,6 +31,7 @@ vi.mock('../src/services/avatar', () => ({
 }));
 
 vi.mock('../src/services/image-cache', () => ({
+  CARD_CACHE_VERSION: 'v3',
   ImageCacheService: class {
     async getImage() {
       return {
