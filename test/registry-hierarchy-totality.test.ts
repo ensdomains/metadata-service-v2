@@ -105,6 +105,10 @@ function expectPlaceholderHierarchy(body: unknown, name: string) {
 // ---- tests -------------------------------------------------------------------
 
 describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
+  beforeEach(() => {
+    getHierarchy.mockReset();
+  });
+
   it('returns 200 placeholder for definitive NotFoundError with normal cache headers', async () => {
     getHierarchy.mockRejectedValueOnce(
       new NotFoundError('not in any source', { definitive: true }),
