@@ -37,7 +37,7 @@ import type {
   MetadataResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
-import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
+import { NotFoundError, UpstreamError, RequestDeadlineError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
@@ -727,9 +727,32 @@ app.get(
       edgeCachePut(c, res);
       return res;
     } catch (error) {
-      if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
-        const errorCacheHeaders = CachePresets.error();
-        Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
+      // W3-ROUTES-010: the registry-hierarchy route must stay total — return
+      // a 200 root-first zero-owner placeholder when the hierarchy service
+      // itself reports absence, outage, or deadline after a successful expiry
+      // check. Only DomainExpiredError still reaches httpError.
+      if (error instanceof DomainExpiredError) {
+        return httpError(c, error, "Failed to resolve registry hierarchy");
+      }
+      if (
+        error instanceof NotFoundError ||
+        error instanceof UpstreamError
+      ) {
+        // Definitive absence → normal caching. Outage/deadline/non-definitive
+        // miss → short-lived 30s caching so the error is not cached as healthy.
+        const definitive =
+          error instanceof NotFoundError && error.definitive === true;
+        const cacheHeaders = definitive
+          ? CachePresets.hierarchy(name)
+          : CachePresets.error();
+        Object.entries(cacheHeaders).forEach(([key, value]) =>
+          c.header(key, value),
+        );
+
+        const placeholder = metadataService.generateBasicHierarchy(name);
+        const res = c.json(placeholder);
+        edgeCachePut(c, res);
+        return res;
       }
       return httpError(c, error, "Failed to resolve registry hierarchy");
     }

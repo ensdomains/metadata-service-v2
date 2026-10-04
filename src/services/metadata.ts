@@ -1156,8 +1156,11 @@ export class MetadataService {
     };
   }
 
-  // Generate basic hierarchy as fallback
-  private generateBasicHierarchy(name: string): RegistryHierarchyResponse {
+  // Generate basic hierarchy as fallback (zero-owner placeholder, root-first).
+  // Public: the registry-hierarchy route calls it when every data source fails
+  // (NotFoundError, UpstreamError, RequestDeadlineError) so the route stays
+  // total — never 404 or 503.
+  generateBasicHierarchy(name: string): RegistryHierarchyResponse {
     const parts = name.split(".");
     const hierarchy: Array<{
       name: string;
