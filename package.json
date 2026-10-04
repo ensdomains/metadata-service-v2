@@ -1,7 +1,6 @@
 {
   "name": "ens-metadata-v2",
   "version": "2.0.0",
-  "exports": "./src/index.ts",
   "description": "ENS Metadata Service V2 - Cloudflare Workers implementation for ENS v1 and v2 on Ethereum",
   "main": "src/index.ts",
   "type": "module",
