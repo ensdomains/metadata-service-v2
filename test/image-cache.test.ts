@@ -399,4 +399,41 @@ describe('ImageCacheService', () => {
       expect(firstCallKey).toBe(secondCallKey);
     });
   });
+
+  describe('W8-CACHE-004: R2 TTL enforcement on binding reads', () => {
+    it('should treat an R2 object older than r2MaxAge as a miss and fall through to L3 origin', async () => {
+      // KV miss — L1 empty
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+
+      // R2 has a stale object: uploaded 3,600,001 ms ago (past the unmigrated
+      // r2MaxAge of 3600 s). On the baseline, getSvgByKey does not check the
+      // uploaded timestamp and returns the bytes anyway — this is W8-CACHE-004.
+      const staleUploaded = new Date(Date.now() - 3_600_001);
+      vi.mocked(r2Bucket.get).mockResolvedValue({
+        text: vi.fn().mockResolvedValue('<svg>Expired R2 SVG</svg>'),
+        arrayBuffer: vi.fn(),
+        body: null,
+        bodyUsed: false,
+        blob: vi.fn(),
+        json: vi.fn(),
+        uploaded: staleUploaded,
+      } as unknown as R2ObjectBody);
+
+      const result = await imageCacheService.getImage('ttl.eth', defaultOptions, executionCtx);
+
+      // After the fix: must fall through to L3 origin, not return stale R2 bytes.
+      // On the baseline (before the fix): cacheStatus is 'stale' and svg is the
+      // expired R2 content — this test FAILS, which is the TDD red step.
+      expect(result.cacheStatus).toBe('miss');
+      expect(result.svg).not.toBe('<svg>Expired R2 SVG</svg>');
+
+      // The expired R2 bytes must never be backfilled into KV
+      await Promise.all(waitUntilPromises);
+      const putCalls = (svgCacheKv.put as Mock).mock.calls;
+      for (const call of putCalls) {
+        const putValue = typeof call[1] === 'string' ? call[1] : '';
+        expect(putValue).not.toContain('Expired R2 SVG');
+      }
+    });
+  });
 });
