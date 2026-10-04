@@ -24,6 +24,10 @@ export interface ImageCacheResult {
   // lookup failed (not because the name has none). Such a card is not written
   // to KV/R2, and routes must not cache it for long either.
   avatarFailed: boolean;
+  // When set (R2 backfill), the remaining R2 authoritative lifetime in
+  // seconds.  Routes must cap downstream Cache-Control and edge max-age
+  // to this value so stale bytes never outlive the R2 deadline.
+  remainingLifetimeSeconds?: number;
 }
 
 // Compute SHA-256 hex digest of an ArrayBuffer
@@ -126,7 +130,12 @@ export class ImageCacheService {
             console.error(`[image-cache] KV backfill failed for ${cacheKey}:`, err),
           ),
         );
-        return { svg: r2Result.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
+        // Compute remaining R2 lifetime so routes can cap downstream TTLs.
+        // Conservative floor — never let a client or edge cache outlive
+        // the authoritative R2 deadline.
+        const r2Age = (Date.now() - r2Result.uploadedAtMs) / 1000;
+        const remaining = Math.floor(Math.max(0, ttlConfig.r2MaxAge - r2Age));
+        return { svg: r2Result.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false, remainingLifetimeSeconds: remaining };
       }
     } catch (err) {
       console.error(`[image-cache] R2 read error for ${cacheKey}:`, err);
