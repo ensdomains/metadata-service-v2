@@ -232,16 +232,44 @@ describe('rasterize dimensions (W8-RASTER-001)', () => {
     expect(state.getImageOptions).not.toHaveProperty('size');
   });
 
-  // --- clean custom sizes (T5) ---
+  // --- clean custom sizes: square + non-square (T5) ---
 
-  // T5 — Clean square: pure decimal, within range → applied.
-  it('accepts a clean square custom size (T5)', async () => {
+  // T5a — Clean square: pure decimal, within range → applied (rewrite).
+  it('accepts a clean square custom size (T5a)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=250&h=250');
     expect(res.status).toBe(200);
     expect(state.rasterized[0]).toMatch(/^<svg width="250" height="250"/);
   });
 
-  // --- boundary values (T6a–T6d) ---
+  // T5b — Valid non-square: options.size set, no SVG rewrite.
+  it('accepts a valid non-square custom size (T5b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=300');
+    expect(res.status).toBe(200);
+    // Non-square: options.size is set but SVG is left at default (mock ignores size).
+    expect(state.getImageOptions).toHaveProperty('size');
+    expect(state.getImageOptions!.size).toEqual({ width: 200, height: 300 });
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // T5c — Extreme spread low-high: kills square-only (outputWidth===outputHeight) mutant.
+  it('accepts 100×2000 non-square (T5c)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100&h=2000');
+    expect(res.status).toBe(200);
+    expect(state.getImageOptions).toHaveProperty('size');
+    expect(state.getImageOptions!.size).toEqual({ width: 100, height: 2000 });
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // T5d — Extreme spread high-low: kills square-only mutant in reverse direction.
+  it('accepts 2000×100 non-square (T5d)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2000&h=100');
+    expect(res.status).toBe(200);
+    expect(state.getImageOptions).toHaveProperty('size');
+    expect(state.getImageOptions!.size).toEqual({ width: 2000, height: 100 });
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // --- boundary values (T6a–T6e) ---
 
   // T6a — Below lower bound: 99 < 100 → ignored.
   it('ignores below-lower-bound values (T6a)', async () => {
@@ -277,6 +305,38 @@ describe('rasterize dimensions (W8-RASTER-001)', () => {
   // T6e — Cross-boundary: one in range, one out → both ignored (no partial size).
   it('ignores cross-boundary pairs (T6e)', async () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=100');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6f — Valid width, height below lower bound → ignores pair (kills height-only mutant).
+  it('ignores valid width with too-low height (T6f)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=99');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6g — Valid height, width below lower bound → ignores pair (kills width-only mutant).
+  it('ignores valid height with too-low width (T6g)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=200');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6h — Valid width, height above upper bound → ignores pair (kills height-only mutant).
+  it('ignores valid width with too-high height (T6h)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=2001');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6i — Valid height, width above upper bound → ignores pair (kills width-only mutant).
+  it('ignores valid height with too-high width (T6i)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2001&h=200');
     expect(res.status).toBe(200);
     expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
     expect(state.getImageOptions).not.toHaveProperty('size');
