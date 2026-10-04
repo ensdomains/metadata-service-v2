@@ -116,6 +116,8 @@ const EDGE_CACHE_MAX_AGE_SECS = 300;
 // refuses mean no record, not a failure (avatar.ts), and never degrade a card.
 const DEGRADED_CARD_MAX_AGE_SECS = 60;
 const DEGRADED_CARD_CACHE_CONTROL = `public, max-age=${DEGRADED_CARD_MAX_AGE_SECS}`;
+const DEGRADED_METADATA_MAX_AGE_SECS = 30;
+const DEGRADED_METADATA_CACHE_CONTROL = `public, max-age=${DEGRADED_METADATA_MAX_AGE_SECS}`;
 
 // Client Cache-Control for an NFT card (SVG or PNG): the per-migration-status
 // stale-while-revalidate policy, or the short one above for a degraded card.
@@ -515,7 +517,7 @@ async function handleMetadata(
   const url = new URL(c.req.url);
   const baseUrl = `${url.protocol}//${url.host}`;
 
-  const { metadata, cacheStatus, ttlConfig } = await metadataCacheService.get(
+  const { metadata, cacheStatus, ttlConfig, degraded } = await metadataCacheService.get(
     network,
     registryType,
     name,
@@ -526,15 +528,21 @@ async function handleMetadata(
       name,
       baseUrl,
       c.executionCtx,
+      { includeProvenance: true },
     ),
   );
 
   c.header('X-Cache-Status', cacheStatus);
-  c.header('Cache-Control', `public, max-age=${ttlConfig.softTtl}, stale-while-revalidate=${ttlConfig.hardTtl - ttlConfig.softTtl}`);
+  c.header(
+    'Cache-Control',
+    degraded
+      ? DEGRADED_METADATA_CACHE_CONTROL
+      : `public, max-age=${ttlConfig.softTtl}, stale-while-revalidate=${ttlConfig.hardTtl - ttlConfig.softTtl}`,
+  );
   const res = c.json(metadata);
-  // L0 edge: store with the per-status Cache-Control set above (gives metadata
-  // the edge hop it previously lacked, without breaking SWR).
-  edgeCachePut(c, res);
+  // L0 edge: degraded D1 rescues get the same short bound as clients; healthy
+  // metadata keeps the normal per-colo cap.
+  edgeCachePut(c, res, degraded ? DEGRADED_METADATA_MAX_AGE_SECS : EDGE_CACHE_MAX_AGE_SECS);
   return res;
 }
 
@@ -894,6 +902,7 @@ app.post("/batch-metadata", async (c) => {
             name,
             baseUrl,
             c.executionCtx,
+            { includeProvenance: true },
           )),
         );
         return { metadata };

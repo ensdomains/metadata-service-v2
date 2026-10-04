@@ -5,7 +5,7 @@ import { MIGRATION_STATUS } from '../types';
 import { canonicalizeName } from '../utils/ens';
 import { SUPPORTED_NETWORKS } from '../config/networks';
 import { NotFoundError } from './errors';
-import { DomainExpiredError } from './metadata';
+import { DomainExpiredError, type MetadataResolution } from './metadata';
 
 interface MetadataCacheEntry {
   metadata: MetadataResponse;
@@ -25,6 +25,22 @@ export interface MetadataCacheResult {
   metadata: MetadataResponse;
   cacheStatus: MetadataCacheStatus;
   ttlConfig: TtlConfig;
+  degraded: boolean;
+}
+
+type MetadataFetchResult = MetadataResponse | MetadataResolution;
+
+function unpackFetchResult(result: MetadataFetchResult): {
+  metadata: MetadataResponse;
+  degraded: boolean;
+} {
+  if ('metadata' in result && 'provenance' in result) {
+    return {
+      metadata: result.metadata,
+      degraded: result.provenance === 'degraded-d1',
+    };
+  }
+  return { metadata: result, degraded: false };
 }
 
 function buildCacheKey(network: string, registryType: string, identifier: string): string {
@@ -60,7 +76,7 @@ export class MetadataCacheService {
     registryType: string,
     identifier: string,
     executionCtx: ExecutionContext,
-    fetchMetadata: () => Promise<MetadataResponse>,
+    fetchMetadata: () => Promise<MetadataFetchResult>,
   ): Promise<MetadataCacheResult> {
     const cacheKey = buildCacheKey(network, registryType, identifier);
     const start = Date.now();
@@ -75,7 +91,7 @@ export class MetadataCacheService {
 
         if (ageSeconds < entry.softTtl) {
           console.log(`[metadata-cache] HIT ${identifier} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
-          return { metadata: entry.metadata, cacheStatus: 'hit', ttlConfig };
+          return { metadata: entry.metadata, cacheStatus: 'hit', ttlConfig, degraded: false };
         }
 
         // Stale — return immediately, revalidate in background
@@ -85,27 +101,31 @@ export class MetadataCacheService {
             console.error(`[metadata-cache] background revalidate failed for ${identifier}:`, err),
           ),
         );
-        return { metadata: entry.metadata, cacheStatus: 'stale', ttlConfig };
+        return { metadata: entry.metadata, cacheStatus: 'stale', ttlConfig, degraded: false };
       }
     } catch (err) {
       console.error(`[metadata-cache] KV read error for ${cacheKey}:`, err);
     }
 
     // --- Cache miss: fetch from origin ---
-    const metadata = await fetchMetadata();
+    const { metadata, degraded } = unpackFetchResult(await fetchMetadata());
     const migrationStatus = extractMigrationStatus(metadata);
     const ttlConfig = getTtlConfig(migrationStatus);
 
-    console.log(`[metadata-cache] MISS ${identifier} (${Date.now() - start}ms) → writing to KV`);
+    if (degraded) {
+      console.log(`[metadata-cache] MISS ${identifier} (${Date.now() - start}ms) → degraded D1 response, skipping KV write`);
+    } else {
+      console.log(`[metadata-cache] MISS ${identifier} (${Date.now() - start}ms) → writing to KV`);
 
-    // Write back in background
-    executionCtx.waitUntil(
-      this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig).catch((err) =>
-        console.error(`[metadata-cache] KV write failed for ${cacheKey}:`, err),
-      ),
-    );
+      // Write back in background only when the origin result is healthy.
+      executionCtx.waitUntil(
+        this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig).catch((err) =>
+          console.error(`[metadata-cache] KV write failed for ${cacheKey}:`, err),
+        ),
+      );
+    }
 
-    return { metadata, cacheStatus: 'miss', ttlConfig };
+    return { metadata, cacheStatus: 'miss', ttlConfig, degraded };
   }
 
   // Invalidate all metadata cache entries for a domain. Keys are deterministic
@@ -128,10 +148,13 @@ export class MetadataCacheService {
 
   private async revalidate(
     cacheKey: string,
-    fetchMetadata: () => Promise<MetadataResponse>,
+    fetchMetadata: () => Promise<MetadataFetchResult>,
   ): Promise<void> {
     try {
-      const metadata = await fetchMetadata();
+      const { metadata, degraded } = unpackFetchResult(await fetchMetadata());
+      // Keep the existing stale healthy entry rather than replacing it with a
+      // last-resort D1 rescue while live resolution is incomplete.
+      if (degraded) return;
       const migrationStatus = extractMigrationStatus(metadata);
       const ttlConfig = getTtlConfig(migrationStatus);
       await this.writeKv(cacheKey, metadata, migrationStatus, ttlConfig);
