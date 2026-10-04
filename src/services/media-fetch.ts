@@ -160,7 +160,12 @@ export async function fetchMediaUrl(
     beforeEachFetch?.();
     const response = await fetch(current.toString(), { ...request, redirect: 'manual' });
 
-    const location = response.status >= 300 && response.status < 400 ? response.headers.get('Location') : null;
+    const isRedirect = response.status === 301
+      || response.status === 302
+      || response.status === 303
+      || response.status === 307
+      || response.status === 308;
+    const location = isRedirect ? response.headers.get('Location') : null;
     if (!location) return response;
 
     // Release the redirect body before following it.
