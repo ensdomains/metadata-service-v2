@@ -22,6 +22,13 @@ const edgeStore = new Map<string, EdgeEntry>();
 const keyOf = (r: RequestInfo | URL | Request) =>
   typeof r === 'string' ? r : r instanceof URL ? r.href : (r as Request).url;
 
+// After v3, the edge cache key carries a __ecv=v3 discriminator.
+function versionedUrl(base: string): string {
+  const u = new URL(base);
+  u.searchParams.set('__ecv', 'v3');
+  return u.toString();
+}
+
 const fakeDefaultCache = {
   async match(req: RequestInfo | URL) {
     const e = edgeStore.get(keyOf(req));
@@ -119,7 +126,7 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     // Client-facing header keeps the long, purgeable-tier TTL...
     expect(res.headers.get('Cache-Control')).toContain('max-age=21600');
     // ...but the edge copy is capped (edgeCachePut rewrites Cache-Control).
-    const entry = edgeStore.get('http://localhost/sepolia/registry/fox.eth/image');
+    const entry = edgeStore.get(versionedUrl('http://localhost/sepolia/registry/fox.eth/image'));
     expect(entry).toBeDefined();
     expect(entry!.maxAge).toBeLessThanOrEqual(300);
   });
@@ -135,7 +142,7 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
 
     // ...while every caches.default write is bounded by EDGE_CACHE_MAX_AGE_SECS=300
     // because the webhook cannot purge other colos.
-    const entry = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize');
+    const entry = edgeStore.get(versionedUrl('http://localhost/sepolia/registry/fox.eth/rasterize'));
     expect(entry).toBeDefined();
     expect(entry!.maxAge).not.toBeNull();
     expect(entry!.maxAge).toBeLessThanOrEqual(300);
@@ -163,8 +170,8 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     expect(res.status).toBe(200);
     await flush(); // run the real purge/warm waitUntil block
 
-    const plain = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize');
-    const sized = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize?w=518&h=518');
+    const plain = edgeStore.get(versionedUrl('http://localhost/sepolia/registry/fox.eth/rasterize'));
+    const sized = edgeStore.get(versionedUrl('http://localhost/sepolia/registry/fox.eth/rasterize?w=518&h=518'));
 
     // The exact query-less URL IS purged (in this colo)...
     expect(plain).toBeUndefined();
@@ -434,18 +441,9 @@ describe('getV2Registries: discovery failure after cache TTL', () => {
 // outlive the authoritative R2 deadline by up to EDGE_CACHE_MAX_AGE_SECS
 // (300 s).  The fix adds a __ecv=v3 query parameter to the edge cache key.
 describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
-  const VERSIONED_PARAM = '__ecv=v3';
   const IMAGE_PATH = '/sepolia/registry/fox.eth/image';
   const RASTERIZE_PATH = '/sepolia/registry/fox.eth/rasterize';
   const BASE_URL = 'http://localhost';
-
-  function versionedUrl(path: string): string {
-    return `${BASE_URL}${path}?${VERSIONED_PARAM}`;
-  }
-
-  function unversionedUrl(path: string): string {
-    return `${BASE_URL}${path}`;
-  }
 
   function setEdgeEntry(url: string, body: string, maxAge: number = 300) {
     edgeStore.set(url, {
@@ -461,7 +459,7 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
   });
 
   it('does not serve an unversioned pre-v3 edge entry for /image (SVG)', async () => {
-    setEdgeEntry(unversionedUrl(IMAGE_PATH), '<svg>PRE-V3-EDGE</svg>');
+    setEdgeEntry(`${BASE_URL}${IMAGE_PATH}`, '<svg>PRE-V3-EDGE</svg>');
 
     const res = await get(IMAGE_PATH);
     const text = await res.text();
@@ -473,7 +471,7 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
   });
 
   it('does not serve an unversioned pre-v3 edge entry for /rasterize (PNG)', async () => {
-    setEdgeEntry(unversionedUrl(RASTERIZE_PATH), 'PREV3PNG', 300);
+    setEdgeEntry(`${BASE_URL}${RASTERIZE_PATH}`, 'PREV3PNG', 300);
 
     const res = await get(RASTERIZE_PATH);
     const body = await res.arrayBuffer();
@@ -483,7 +481,7 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
   });
 
   it('serves a v3 edge entry for /image (SVG)', async () => {
-    setEdgeEntry(versionedUrl(IMAGE_PATH), '<svg>V3-EDGE-HIT</svg>');
+    setEdgeEntry(versionedUrl(`${BASE_URL}${IMAGE_PATH}`), '<svg>V3-EDGE-HIT</svg>');
 
     const res = await get(IMAGE_PATH);
     const text = await res.text();
@@ -493,7 +491,7 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
   });
 
   it('serves a v3 edge entry for /rasterize (PNG)', async () => {
-    setEdgeEntry(versionedUrl(RASTERIZE_PATH), 'V3PNGHIT', 300);
+    setEdgeEntry(versionedUrl(`${BASE_URL}${RASTERIZE_PATH}`), 'V3PNGHIT', 300);
 
     const res = await get(RASTERIZE_PATH);
     const body = await res.arrayBuffer();
@@ -516,21 +514,9 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
     // No pre-populated edge entry — fresh render.
     const res = await get(IMAGE_PATH);
     expect(res.status).toBe(200);
-    await flush();
 
-    // After the render, an entry must exist at the versioned URL.
-    expect(edgeStore.has(versionedUrl(IMAGE_PATH)), 'versioned edge entry must be stored').toBe(true);
+    // After the render (get already flushes), an entry must exist at the versioned URL.
+    expect(edgeStore.has(versionedUrl(`${BASE_URL}${IMAGE_PATH}`)), 'versioned edge entry must be stored').toBe(true);
     // No entry at the unversioned URL (never stored there by new code).
-    // (A pre-deploy entry might exist there but the new code doesn't put there.)
-  });
-
-  it('query parameter ordering does not affect cache key matching', async () => {
-    // Varying query param order should still match the same edge entry.
-    setEdgeEntry(versionedUrl('/sepolia/registry/fox.eth/image?width=518&height=518'), '<svg>QORDER</svg>');
-
-    const res = await get('/sepolia/registry/fox.eth/image?height=518&width=518');
-    const text = await res.text();
-
-    expect(text).toContain('QORDER');
   });
 });

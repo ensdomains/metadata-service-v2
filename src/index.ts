@@ -21,7 +21,7 @@ import { runD1Retention } from "./services/d1";
 import { ImageGenerationService } from "./services/image";
 import { AvatarService } from "./services/avatar";
 import { parseIpfsGateway } from "./services/ipfs-gateway";
-import { ImageCacheService, type ImageCacheResult } from "./services/image-cache";
+import { ImageCacheService, type ImageCacheResult, CARD_CACHE_VERSION } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
 import { withRequestBudget } from "./services/request-budget";
@@ -103,6 +103,16 @@ function getCfCache(): Cache | null {
 // after this short window a colo re-fetches and picks up the purged-fresh data.
 const EDGE_CACHE_MAX_AGE_SECS = 300;
 
+// Build an edge-cache key URL that includes the cache generation discriminator
+// so pre-deploy v2 edge entries (stored under the plain request URL) never match
+// after a version bump.  The discriminator is appended as a query parameter
+// (__ecv) and is internal — clients never see it.
+function edgeCacheKeyUrl(url: string): string {
+  const u = new URL(url);
+  u.searchParams.set('__ecv', CARD_CACHE_VERSION);
+  return u.toString();
+}
+
 // How long an NFT card rendered without its avatar because the avatar lookup
 // failed (RPC, CCIP gateway or media host outage, timeout) is cached, by clients
 // and in the edge cache. The card is kept out of KV/R2 (ImageCacheService). A
@@ -132,7 +142,7 @@ function cardCacheControl(result: ImageCacheResult): string {
 async function edgeCacheMatch(c: AppContext): Promise<Response | null> {
   const cfCache = getCfCache();
   if (!cfCache) return null;
-  const cached = await cfCache.match(c.req.url);
+  const cached = await cfCache.match(edgeCacheKeyUrl(c.req.url));
   return cached ? new Response(cached.body, cached) : null;
 }
 
@@ -145,7 +155,7 @@ function edgeCachePut(c: AppContext, response: Response, maxAgeSecs: number = ED
     const headers = new Headers(clone.headers);
     headers.set('Cache-Control', `public, max-age=${maxAgeSecs}`);
     const edgeCopy = new Response(clone.body, { status: clone.status, statusText: clone.statusText, headers });
-    c.executionCtx.waitUntil(cfCache.put(c.req.url, edgeCopy));
+    c.executionCtx.waitUntil(cfCache.put(edgeCacheKeyUrl(c.req.url), edgeCopy));
   }
 }
 
@@ -1077,7 +1087,7 @@ app.get(
       // L0: Cloudflare edge cache for rasterized PNGs
       const cfCache = getCfCache();
       if (cfCache) {
-        const cached = await cfCache.match(c.req.url);
+        const cached = await cfCache.match(edgeCacheKeyUrl(c.req.url));
         if (cached) return withMediaSecurityHeaders(new Response(cached.body, cached));
       }
 
@@ -1212,7 +1222,9 @@ const handleWebhook = async (c: AppContext) => {
             for (const net of SUPPORTED_NETWORKS) {
               for (const rt of ['registry', 'namewrapper']) {
                 for (const kind of ['image', 'rasterize']) {
-                  purges.push(cfCache.delete(new Request(`${origin}/${net}/${rt}/${name}/${kind}`)));
+                  const base = `${origin}/${net}/${rt}/${name}/${kind}`;
+                  purges.push(cfCache.delete(new Request(base)));
+                  purges.push(cfCache.delete(new Request(edgeCacheKeyUrl(base))));
                 }
               }
             }
