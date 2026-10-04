@@ -716,7 +716,7 @@ app.get(
     try {
       await metadataService.checkExpiry(name);
 
-      const hierarchy = await metadataService.getRegistryHierarchy(name);
+      const hierarchy = await metadataService.getRegistryHierarchy(name, c.executionCtx);
 
       const cacheHeaders = CachePresets.hierarchy(name);
       Object.entries(cacheHeaders).forEach(([key, value]) => {

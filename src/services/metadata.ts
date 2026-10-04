@@ -742,7 +742,10 @@ export class MetadataService {
   }
 
   // Get registry hierarchy
-  async getRegistryHierarchy(name: string): Promise<RegistryHierarchyResponse> {
+  async getRegistryHierarchy(
+    name: string,
+    executionCtx?: Pick<ExecutionContext, 'waitUntil'>,
+  ): Promise<RegistryHierarchyResponse> {
     if (!isResolvableEnsName(name)) {
       throw new InvalidNameError();
     }
@@ -809,6 +812,24 @@ export class MetadataService {
               ttl: CacheTTL.error,
             });
             return fallbackResponse;
+          }
+
+          // D1 hierarchy is empty (e.g. after migration 003). Trigger a
+          // recovery sync registered with waitUntil so the Worker runtime
+          // keeps the isolate alive for it.
+          if (this.sync) {
+            const hierarchyCount = await this.d1.getHierarchyCount(name);
+            if (hierarchyCount === 0) {
+              const recovery = this.sync
+                .syncHierarchy(name)
+                .catch((err) =>
+                  console.warn(
+                    `Hierarchy recovery sync for ${name} failed:`,
+                    err,
+                  ),
+                );
+              executionCtx?.waitUntil(recovery);
+            }
           }
         } catch (d1Error) {
           console.error(

@@ -305,6 +305,18 @@ export class D1Service {
     return (result.results || []).filter((record) => this.isFresh(record));
   }
 
+  // Count hierarchy rows for a domain without fetching them all.
+  // Used by syncDomain and getRegistryHierarchy to detect post-migration
+  // empty hierarchies so they can trigger a backfill.
+  async getHierarchyCount(name: string): Promise<number> {
+    const rootDomainId = namehash(canonicalizeName(name));
+    const stmt = this.db.prepare(
+      'SELECT COUNT(*) AS cnt FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2'
+    );
+    const result = await stmt.bind(this.network, rootDomainId).first<{ cnt: number }>();
+    return result?.cnt ?? 0;
+  }
+
   // Batch operations. All rows go in one db.batch() (one round trip and one
   // transaction), not one awaited statement per domain. The batch is atomic:
   // if it fails, none of the rows is stored.

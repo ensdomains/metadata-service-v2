@@ -236,6 +236,7 @@ describe('getRegistryHierarchy D1 fallback triggers syncHierarchy via waitUntil'
     // D1 hierarchy is empty (post-migration state).
     s.d1 = {
       getHierarchy: vi.fn().mockResolvedValue([]),
+      getHierarchyCount: vi.fn().mockResolvedValue(0),
     } as unknown as D1Service;
 
     // syncHierarchy mock — will be awaited through waitUntil.
