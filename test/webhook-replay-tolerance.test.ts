@@ -153,51 +153,94 @@ describe('webhook replay tolerance configuration', () => {
   });
 });
 
+// ── public POST /webhook route tests ──────────────────────────────────────
+
 describe('webhook replay tolerance via public POST /webhook route', () => {
   const SECRET_HEX = '0'.repeat(64);
+  const NAME = 'stale-window.eth';
 
   async function loadApp() {
     vi.resetModules();
     return (await import('../src/index')).default;
   }
 
-  async function signBody(secretHex: string, ts: number, body: string): Promise<string> {
+  async function signBody(ts: number, body: string): Promise<string> {
     const key = await crypto.subtle.importKey(
-      'raw',
-      hexToBytes(secretHex) as BufferSource,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign'],
+      'raw', hexToBytes(SECRET_HEX) as BufferSource,
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
     );
     const sig = await crypto.subtle.sign(
-      'HMAC',
-      key,
+      'HMAC', key,
       new TextEncoder().encode(`${ts}.${body}`) as BufferSource,
     );
-    const hex = [...new Uint8Array(sig)]
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
+    const hex = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
     return `sha256=${hex}`;
   }
 
+  const BATCH_PFX = 'indexer:batch:';
+  const BATCH_KEY = 'indexer:batch:recent-names';
+  const SVG_PFX = `svg:${NAME}:`;
+  const SVG_KEY = `svg:${NAME}:native:518:518`;
+  const AVATAR_PFX = `avatars/${NAME}:`;
+  const AVATAR_KEY = `avatars/${NAME}:mainnet`;
+  const SVG_R2_PFX = `svg/svg:${NAME}:`;
+  const SVG_R2_KEY = `svg/svg:${NAME}:518:518`;
+
+  const INTERNAL_KEYS = [
+    `indexer:ensnode:mainnet:domain:${NAME}`,
+    `indexer:ensnode:mainnet:migration:${NAME}`,
+    `indexer:ensnode:mainnet:hierarchy:${NAME}`,
+    `indexer:ensnode:sepolia:domain:${NAME}`,
+    `indexer:ensnode:sepolia:migration:${NAME}`,
+    `indexer:ensnode:sepolia:hierarchy:${NAME}`,
+  ];
+  const META_KEYS = [
+    `meta:mainnet:registry:${NAME}`,
+    `meta:mainnet:namewrapper:${NAME}`,
+    `meta:sepolia:registry:${NAME}`,
+    `meta:sepolia:namewrapper:${NAME}`,
+  ];
+
   function makeFakesAndEnv(overrides: Record<string, unknown>) {
+    const metadataList = vi.fn(async (args: { prefix?: string }) => {
+      if (args?.prefix === BATCH_PFX) {
+        return { keys: [{ name: BATCH_KEY }], list_complete: true };
+      }
+      return { keys: [] as { name: string }[], list_complete: true };
+    });
     const metadataKv = {
       delete: vi.fn(async () => {}),
-      list: vi.fn(async () => ({ keys: [] as { name: string }[], list_complete: true })),
+      list: metadataList,
       get: vi.fn(async () => null),
       put: vi.fn(async () => {}),
       getWithMetadata: vi.fn(async () => ({ value: null, metadata: null })),
     };
+    const svgList = vi.fn(async (args: { prefix?: string }) => {
+      if (args?.prefix === SVG_PFX) {
+        return { keys: [{ name: SVG_KEY }], list_complete: true };
+      }
+      return { keys: [] as { name: string }[], list_complete: true };
+    });
     const svgKv = {
       delete: vi.fn(async () => {}),
-      list: vi.fn(async () => ({ keys: [] as { name: string }[], list_complete: true })),
+      list: svgList,
       get: vi.fn(async () => null),
       put: vi.fn(async () => {}),
       getWithMetadata: vi.fn(async () => ({ value: null, metadata: null })),
     };
+    const r2List = vi.fn(async (args: { prefix?: string }) => {
+      const pfx = args?.prefix ?? '';
+      if (pfx === AVATAR_PFX) {
+        return { objects: [{ key: AVATAR_KEY }], truncated: false, cursor: undefined };
+      }
+      if (pfx === SVG_R2_PFX) {
+        return { objects: [{ key: SVG_R2_KEY }], truncated: false, cursor: undefined };
+      }
+      return { objects: [] as { key: string }[], truncated: false, cursor: undefined };
+    });
     const r2 = {
       delete: vi.fn(async () => {}),
-      list: vi.fn(async () => ({ objects: [] as { key: string }[], truncated: false, cursor: undefined })),
+      list: r2List,
       get: vi.fn(async () => null),
       put: vi.fn(async () => ({ key: '', etag: '', size: 0, httpMetadata: {} })),
       head: vi.fn(async () => null),
@@ -206,7 +249,16 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       METADATA_CACHE: metadataKv,
       SVG_CACHE: svgKv,
       ASSET_BUCKET: r2,
-      DB: { prepare: vi.fn(() => ({ bind: vi.fn(() => ({ first: vi.fn(async () => null), all: vi.fn(async () => ({ results: [], success: true })), run: vi.fn(async () => ({ success: true })) })) })), batch: vi.fn() },
+      DB: {
+        prepare: vi.fn(() => ({
+          bind: vi.fn(() => ({
+            first: vi.fn(async () => null),
+            all: vi.fn(async () => ({ results: [], success: true })),
+            run: vi.fn(async () => ({ success: true })),
+          })),
+        })),
+        batch: vi.fn(),
+      },
       ENSNODE_MAINNET_URL: 'https://api.ensnode.test/graphql',
       ENSNODE_SEPOLIA_V2_URL: 'https://api.sepolia.ensnode.test/graphql',
       MAINNET_RPC_URL: 'https://mainnet.test.rpc',
@@ -226,14 +278,40 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       tx_hash: '0xabc',
       log_index: 0,
       contract_address: '0xdef',
-      name: 'stale-window.eth',
+      name: NAME,
       namehash: '0x123',
       data: '{}',
       timestamp: ts,
     });
   }
 
-  function assertNoPurge(mocks: ReturnType<typeof makeFakesAndEnv>['mocks']) {
+  async function postWebhook(
+    app: Awaited<ReturnType<typeof loadApp>>,
+    env: Record<string, unknown>,
+    ts: number,
+  ) {
+    const body = makeBody(ts);
+    const sig = await signBody(ts, body);
+    const bg: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => { bg.push(p); },
+      passThroughOnException: vi.fn(),
+    };
+    const res = await app.request('/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Timestamp': String(ts),
+        'X-Webhook-Signature': sig,
+      },
+      body,
+    }, env, ctx as unknown as ExecutionContext);
+    return { res, bg };
+  }
+
+  type Mocks = ReturnType<typeof makeFakesAndEnv>['mocks'];
+
+  function assertNoPurge(mocks: Mocks) {
     expect.soft(mocks.metadataKv.delete).not.toHaveBeenCalled();
     expect.soft(mocks.metadataKv.list).not.toHaveBeenCalled();
     expect.soft(mocks.svgKv.delete).not.toHaveBeenCalled();
@@ -242,95 +320,108 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect.soft(mocks.r2.list).not.toHaveBeenCalled();
   }
 
-  it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS has a garbage suffix that parseInt would accept', async () => {
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const ts = nowSecs - 121;
-    const body = makeBody(ts);
-    const sig = await signBody(SECRET_HEX, ts, body);
+  function assertFullPurge(mocks: Mocks) {
+    // Internal (6) + metadata (4) + batch key (1) = 11 KV deletes
+    expect.soft(mocks.metadataKv.delete).toHaveBeenCalledTimes(11);
+    for (const k of INTERNAL_KEYS) {
+      expect.soft(mocks.metadataKv.delete).toHaveBeenCalledWith(k);
+    }
+    for (const k of META_KEYS) {
+      expect.soft(mocks.metadataKv.delete).toHaveBeenCalledWith(k);
+    }
+    expect.soft(mocks.metadataKv.list).toHaveBeenCalledWith(
+      expect.objectContaining({ prefix: BATCH_PFX }),
+    );
+    expect.soft(mocks.metadataKv.delete).toHaveBeenCalledWith(BATCH_KEY);
+    expect.soft(mocks.svgKv.list).toHaveBeenCalledWith(
+      expect.objectContaining({ prefix: SVG_PFX }),
+    );
+    expect.soft(mocks.svgKv.delete).toHaveBeenCalledWith(SVG_KEY);
+    expect.soft(mocks.r2.list).toHaveBeenCalledWith(
+      expect.objectContaining({ prefix: AVATAR_PFX }),
+    );
+    expect.soft(mocks.r2.list).toHaveBeenCalledWith(
+      expect.objectContaining({ prefix: SVG_R2_PFX }),
+    );
+    expect.soft(mocks.r2.delete).toHaveBeenCalledWith(AVATAR_KEY);
+    expect.soft(mocks.r2.delete).toHaveBeenCalledWith(SVG_R2_KEY);
+  }
 
+  // ── stale-envelope rejection tests ────────────────────────────────────
+
+  it('300junk-garbage tolerance: rejects 121s-old, zero purge, zero background work', async () => {
+    const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '300junk',
     });
     const app = await loadApp();
-
-    const res = await app.request('/webhook', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Webhook-Timestamp': String(ts),
-        'X-Webhook-Signature': sig,
-      },
-      body,
-    }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
+    const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
+    expect.soft(bg).toHaveLength(0);
   });
 
-  it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS is one above the maximum accepted tolerance', async () => {
+  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero background work', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
-    const ts = nowSecs - 121;
-    const body = makeBody(ts);
-    const sig = await signBody(SECRET_HEX, ts, body);
-
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '86401',
     });
     const app = await loadApp();
-
-    const res = await app.request('/webhook', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Webhook-Timestamp': String(ts),
-        'X-Webhook-Signature': sig,
-      },
-      body,
-    }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
+    const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
+    expect.soft(bg).toHaveLength(0);
   });
 
-  it('accepts and executes every purge path for a fresh correctly-signed envelope whose toleranceSecs falls back to the 120s default', async () => {
+  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero background work', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
-    const ts = nowSecs;
-    const body = makeBody(ts);
-    const sig = await signBody(SECRET_HEX, ts, body);
+    const { env, mocks } = makeFakesAndEnv({
+      WEBHOOK_SECRET: SECRET_HEX,
+      WEBHOOK_TOLERANCE_SECS: '999999999999999999999',
+    });
+    const app = await loadApp();
+    const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
+    expect.soft(res.status).toBe(401);
+    assertNoPurge(mocks);
+    expect.soft(bg).toHaveLength(0);
+  });
+
+  // ── acceptance tests ──────────────────────────────────────────────────
+
+  it('86400 inclusive max: accepts age 121, full prefix-correct purge + waitUntil work', async () => {
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const { env, mocks } = makeFakesAndEnv({
+      WEBHOOK_SECRET: SECRET_HEX,
+      WEBHOOK_TOLERANCE_SECS: '86400',
+    });
+    const app = await loadApp();
+    const { res, bg } = await postWebhook(app, env, nowSecs - 121);
+
+    expect.soft(res.status).toBe(200);
+    assertFullPurge(mocks);
+    expect.soft(bg.length).toBeGreaterThanOrEqual(1);
+    const settled = await Promise.allSettled(bg);
+    expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
+  });
+
+  it('negative unsafe-int fallback: accepts fresh request, full prefix-correct purge + waitUntil work', async () => {
+    const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '-9007199254740993',
     });
-    mocks.svgKv.list.mockResolvedValue({
-      keys: [{ name: 'svg:stale-window.eth:native:518:518' }],
-      list_complete: true,
-    });
-    mocks.r2.list.mockResolvedValue({
-      objects: [{ key: 'avatars/stale-window.eth:mainnet' }],
-      truncated: false,
-      cursor: undefined,
-    });
     const app = await loadApp();
-
-    const res = await app.request('/webhook', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Webhook-Timestamp': String(ts),
-        'X-Webhook-Signature': sig,
-      },
-      body,
-    }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
+    const { res, bg } = await postWebhook(app, env, nowSecs);
 
     expect.soft(res.status).toBe(200);
-    expect.soft(mocks.metadataKv.delete).toHaveBeenCalledTimes(10);
-    expect.soft(mocks.metadataKv.list).toHaveBeenCalledTimes(1);
-    expect.soft(mocks.svgKv.list).toHaveBeenCalledTimes(1);
-    expect.soft(mocks.svgKv.delete).toHaveBeenCalledTimes(1);
-    expect.soft(mocks.r2.list).toHaveBeenCalledTimes(2);
-    expect.soft(mocks.r2.delete).toHaveBeenCalledTimes(2);
+    assertFullPurge(mocks);
+    expect.soft(bg.length).toBeGreaterThanOrEqual(1);
+    const settled = await Promise.allSettled(bg);
+    expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
   });
 });
