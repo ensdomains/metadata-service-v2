@@ -24,8 +24,14 @@ Files changed:
 
 - `src/utils/storage.ts`: `getSvgByKey` returns `{ svg: string; uploadedAtMs: number } | null`. When `maxAgeSeconds` is supplied, objects at or past the boundary are rejected (`>=`, RFC 9111). Missing or invalid `uploaded` fails closed (returns `null`) when `maxAgeSeconds` is supplied. Undefined `maxAgeSeconds` is backward-compatible unbounded.
 - `src/services/image-cache.ts`: L2 R2 lookup passes `ttlConfig.r2MaxAge` to `getSvgByKey`. On L2 hit, `writeKv` receives the absolute `uploadedAtMs` timestamp and computes an absolute KV `expiration` deadline at `floor(uploadedAtMs/1000) + r2MaxAge` — immune to body-latency clock drift. `createdAt` is set to the authoritative `uploadedAtMs`. `softTtl` is floored to the remaining integer lifetime (conservative). Backfill is skipped when `remaining < 60` s (Cloudflare KV minimum). Fresh L3 origin writes are unchanged (relative `expirationTtl`). `CARD_CACHE_VERSION` bumped `v2` → `v3` so pre-fix v2 KV entries (backfill-time `createdAt` / full TTL) are never served after deploy — they miss and fall through to authoritative L2/L3.
-- `test/image-cache.test.ts`: 47 focused tests across 8 TDD rounds: TTL boundaries (fresh/exact/expired per status), r2MaxAge 0, undefined backward compat, backfill lifetime capping with absolute `expiration` assertions, 60 s boundary (±1 ms), migrationStatus serialization, missing/invalid uploaded fail-closed, legacy v2 isolation (unmigrated/migrated/native), fresh-generation L1 hit, read/write key consistency. Frozen `Date.now()` via captured spy handle with deterministic `afterAll` sentinel (identity comparison, no timing assumptions). All pre-existing project tests preserved.
-- `test/avatar-embed-security.test.ts`: cache-key version expectation updated `:v2` → `:v3`.
+- `test/image-cache.test.ts`: 47 focused tests across 9 TDD rounds:
+- `test/cache-bounds.test.ts`: 7 edge cache discriminator tests (unversioned miss, v3 hit, storage, public URL)
+- `test/avatar-outage-routes.test.ts`: edge cache assertions updated for versioned keys
+- `test/media-headers-route.test.ts`: edge cache key updated
+- `test/security-headers.test.ts`: CARD_CACHE_VERSION added to mock
+- `test/rasterize-svg-avatar.test.ts`: same
+- `test/image-size-validation.test.ts`: same
+- `test/webhook-warming.test.ts`: same
 
 ## Decisions
 
@@ -35,7 +41,7 @@ Files changed:
 - **KV backfill lifetime capping**: R2→L1 backfill caps `softTtl` and sets absolute `expiration` to the remaining R2 lifetime. Backfill is skipped when remaining < 60 s (Cloudflare KV minimum `expirationTtl`). `createdAt` preserves the authoritative R2 upload time, not `Date.now()`.
 - **Conservative integer semantics**: `softTtl` floored to integer. `expiration` floored at `uploadedAtMs / 1000`. This prevents fractional-second lifetime extension.
 - **60 s boundary**: `remaining < 60` correctly allows backfill at exactly 60 s. Tests at 60 s, 59.999 s, and 60.001 s kill `<=` and off-by-one mutants.
-- **Cache generation bump**: `CARD_CACHE_VERSION` bumped `v2` → `v3`. Pre-fix v2 KV entries carry backfill-time `createdAt` and full TTL; without the bump they remain L1 hits after deploy and bypass R2 deadline enforcement. Old v2 keys become invisible to new reads and expire on their own TTL or via the version-agnostic invalidation prefix — no explicit old-key deletion required.
+- **Cache generation bump**: `CARD_CACHE_VERSION` bumped `v2` → `v3`. Pre-fix v2 KV entries carry backfill-time `createdAt` and full TTL; without the bump they remain L1 hits after deploy and bypass R2 deadline enforcement. The same `v3` discriminator is applied to the edge cache (`caches.default`) as `__ecv=v3` query parameter, so pre-deploy v2 SVG/PNG edge entries never match after deploy.
 - **Default behavior**: When `maxAgeSeconds` is not passed, `getSvgByKey` returns the object regardless of age (backward-compatible).
 
 ## Showing each criterion
@@ -56,4 +62,5 @@ Files changed:
 - [x] T004 [AC2] Add TTL boundary tests: fresh (TTL-1ms L2 hit), exact (== TTL L3 miss), expired (> TTL L3 miss) across unmigrated/migrated/native; r2MaxAge 0; undefined maxAge backward compat (RED at `0e3d09a`, `915bad3`, `18e0ae2`; GREEN at `e439edd`, `36621af`, `539ae7c`)
 - [x] T005 [AC2] Add backfill lifetime capping tests: absolute `expiration` assertion, 60 s boundary ±1 ms, migrationStatus serialization, hardTtl/softTtl capping, no-write + full-TTL + off-by-one + no-backdate mutants (GREEN at `539ae7c`)
 - [x] T006 [AC3] Run `pnpm run test` and verify all tests pass (58 files, 47 image-cache tests + afterAll sentinel)
-- [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts` version expectation
+- [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 KV isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts` version expectation
+- [x] T008 [AC4] Add edge cache discrimination tests and apply `__ecv=v3` to all caches.default match/put/purge paths (RED at `78d2f81`, GREEN at `42997ff`); update all vi.mock exports and edge cache assertions
