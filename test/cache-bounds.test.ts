@@ -246,21 +246,21 @@ describe('L0 edge-cache TTL: remaining R2 lifetime cap (P2)', () => {
 
   // ── remaining < 60 s ─────────────────────────────────────────────
 
-  it('/image: remaining 59.999s caps client max-age to 59, skips edge put', async () => {
+  it('/image: remaining 59.999s caps client max-age to 59, edge capped at 59', async () => {
     overrideGetImage(59.999);
     const res = await get(IMG);
     expect(res.status).toBe(200);
     expect(clientMaxAge(res)).toBe(59);
-    // Edge put must be skipped — too close to expiry for useful caching
-    expect(edgeMaxAge(v3EdgeKey(`http://localhost${IMG}`))).toBeNull();
+    const ema = edgeMaxAge(v3EdgeKey(`http://localhost${IMG}`));
+    expect(ema).toBe(59);
   });
 
-  it('/rasterize: remaining 59.999s caps client max-age to 59, skips edge put', async () => {
+  it('/rasterize: remaining 59.999s caps client max-age to 59, edge capped at 59', async () => {
     overrideGetImage(59.999);
     const res = await get(RAS);
     expect(res.status).toBe(200);
     expect(clientMaxAge(res)).toBe(59);
-    expect(edgeMaxAge(v3EdgeKey(`http://localhost${RAS}`))).toBeNull();
+    expect(edgeMaxAge(v3EdgeKey(`http://localhost${RAS}`))).toBe(59);
   });
 
   // ── remaining ~0 ──────────────────────────────────────────────────
