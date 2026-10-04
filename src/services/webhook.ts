@@ -299,16 +299,14 @@ export class WebhookService {
   // namespace outgrows a page (which production traffic does almost immediately).
   private async invalidateMetadataCache(domainName: string): Promise<void> {
     if (!this.metadataCacheKv) return;
-    try {
-      const keys = SUPPORTED_NETWORKS.flatMap((network) =>
-        (['registry', 'namewrapper'] as const).map(
-          (registryType) => `meta:${network}:${registryType}:${domainName}`,
-        ),
-      );
-      await Promise.all(keys.map((k) => this.metadataCacheKv!.delete(k)));
-    } catch (err) {
-      console.warn(`[webhook] failed to invalidate metadata cache for ${domainName}:`, err);
-    }
+    // Purge success requires every exact key to be deleted. A rejection must
+    // propagate so handleWebhook returns 500 and the delivery can be retried.
+    const keys = SUPPORTED_NETWORKS.flatMap((network) =>
+      (['registry', 'namewrapper'] as const).map(
+        (registryType) => `meta:${network}:${registryType}:${domainName}`,
+      ),
+    );
+    await Promise.all(keys.map((k) => this.metadataCacheKv!.delete(k)));
   }
 
   // Invalidate image caches (SVG KV entries + R2 avatar/SVG assets).
