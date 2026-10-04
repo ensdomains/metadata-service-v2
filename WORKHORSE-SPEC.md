@@ -2,13 +2,10 @@
 
 ## Summary
 
-Fix a T3 runtime-validation gap in `src/services/webhook.ts`: the `validatePayload` method checks
-`event_type`, `timestamp`, and the presence of `name`/`namehash`, but never validates that the
-remaining identity fields (`block_number`, `tx_hash`, `log_index`, `contract_address`, `data`,
-`protocol`) match their documented primitive types. This lets a malicious or malformed payload
-with `block_number: null` pass validation, trigger full cache invalidation (KV deletes, R2
-purges, batch-cache flush), return 200, and thus amplify an unauthenticated request into
-cache-churn without ever validating the fields the interface declares.
+Fix a T3 runtime-validation gap in `src/services/webhook.ts`: `validatePayload` never checks
+that `block_number` is a number. A fully shaped payload with `block_number: null` passes
+validation, triggers cache invalidation, and returns 200. This ticket is that field only.
+Other identity fields are other tickets and are not part of this change.
 
 The fix is TDD: write a focused regression test that fails on the current main baseline, then
 add the missing type checks to `validatePayload` so the test passes and the project gate stays
@@ -31,7 +28,7 @@ green.
 | Constraint | How this plan meets it |
 |---|---|
 | TDD: failing test first | Step 1 is a single commit adding the regression test; run `pnpm run test` to show it fails on the baseline, record that run |
-| Fix only W8-WEBHOOK-002 | The fix adds type checks for the fields the interface declares, in `validatePayload` only |
+| Fix only W8-WEBHOOK-002 | The fix checks `block_number` is a number, in `validatePayload` only. It does not check other identity fields. |
 | No cherry-picks from testing-campaign | Every line is freshly authored |
 | One independent PR against main | Branch `WEB-1694` from BASE, no other changes |
 | `pnpm run test` passes at head | Verified after the fix commit |
@@ -40,8 +37,8 @@ green.
 
 | File | Change |
 |---|---|
-| `test/webhook.test.ts` | Add regression tests under the existing `payload validation` describe block: `block_number: null` produces 400, each identity field with wrong type produces 400 |
-| `src/services/webhook.ts` | Extend `validatePayload` to check `block_number` (number), `tx_hash` (string), `log_index` (number), `contract_address` (string), `data` (string), `protocol` (`'v1'` or `'v2'`) |
+| `test/webhook.test.ts` | Add the regression under the existing `payload validation` describe block: `block_number: null` produces 400 and does not invalidate caches |
+| `src/services/webhook.ts` | Extend `validatePayload` to check `block_number` is a number |
 
 ## Complexity tracking
 
@@ -49,12 +46,9 @@ None. Every constraint in the ticket's direction is met as stated.
 
 ## Decisions
 
-1. **Which fields to validate**: All identity fields in the `EnsNameEvent` interface that the
-   `processWebhookEvent` path reads or that the interface declares with a primitive type:
-   `block_number: number`, `tx_hash: string`, `log_index: number`, `contract_address: string`,
-   `data: string`, `protocol: 'v1' | 'v2'`. The `name` and `namehash` fields are already
-   checked (name for string-or-null, namehash only for presence); `event_type` and `timestamp`
-   are already checked too.
+1. **Which fields to validate**: Only `block_number`, which this finding names. It must be a
+   number. A landing correction removed checks for other identity fields; those belong to other
+   tickets and must not ship in this branch.
 
 2. **Error message per field**: One generic `"Missing or invalid <field>"` per field, matching
    the existing pattern in `validatePayload`.
@@ -80,5 +74,5 @@ None. Every constraint in the ticket's direction is met as stated.
 ## Tasks
 
 - [ ] T001 [P] [AC1] Add the focused regression test in `test/webhook.test.ts` under the `payload validation` describe block: a test case that sends a valid event with `block_number: null` and expects 400. Run `pnpm run test` and record the failing output.
-- [ ] T002 [P] [AC2] [AC3] [AC4] Extend `validatePayload` in `src/services/webhook.ts` to check: `block_number` is a number, `tx_hash` is a string, `log_index` is a number, `contract_address` is a string, `data` is a string, `protocol` is `'v1'` or `'v2'`. Return 400 with `"Missing or invalid <field>"` for any violation.
+- [ ] T002 [P] [AC2] [AC3] [AC4] Extend `validatePayload` in `src/services/webhook.ts` to check that `block_number` is a number. Return 400 with `"Missing or invalid block_number"` otherwise. Do not add checks for other identity fields.
 - [ ] T003 [AC2] [AC3] Run `pnpm run test` on the fix commit and verify the regression test passes and the full suite is green.

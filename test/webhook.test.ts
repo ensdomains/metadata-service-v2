@@ -313,10 +313,10 @@ describe('WebhookService (zigens contract)', () => {
       expect(res.status).toBe(400);
     });
 
-    // W8-WEBHOOK-002: identity fields must match their documented primitive
-    // shapes before any purge/warming side effects. The minimized finding is
-    // a fully shaped unauthenticated-dev event for red-team.eth with
-    // block_number: null — that must 400 and must not touch caches.
+    // W8-WEBHOOK-002: block_number must be a number before any purge or
+    // warming. The minimized finding is a fully shaped unauthenticated-dev
+    // event for red-team.eth with block_number: null — that must 400 and
+    // must not touch caches.
     it('rejects block_number: null with 400 and does not invalidate caches', async () => {
       const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
       const body = JSON.stringify(validEvent({ name: 'red-team.eth', block_number: null }));
@@ -330,19 +330,11 @@ describe('WebhookService (zigens contract)', () => {
       expect(fakes.storageManager.deleteByPrefix).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ['block_number', '100'],
-      ['tx_hash', null],
-      ['log_index', null],
-      ['contract_address', 123],
-      ['data', {}],
-      ['protocol', null],
-      ['protocol', 'v3'],
-    ] as const)('rejects a wrong-typed %s with 400 and does not invalidate caches', async (field, value) => {
+    it('rejects a string block_number with 400 and does not invalidate caches', async () => {
       const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
-      const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ [field]: value }))));
+      const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ block_number: '100' }))));
       expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({ error: `Missing or invalid ${field}` });
+      expect(await res.json()).toEqual({ error: 'Missing or invalid block_number' });
       expect(fakes.cache.delete).not.toHaveBeenCalled();
       expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
     });
