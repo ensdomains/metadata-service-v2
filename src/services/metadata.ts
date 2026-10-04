@@ -41,6 +41,24 @@ export class DomainExpiredError extends Error {
   }
 }
 
+/** Private (non-JSON) marker: a D1-rescued migration-status value after a
+ *  non-definitive live miss. Symbol keys are excluded from JSON.stringify. */
+const DEGRADED_MIGRATION_STATUS = Symbol('degradedMigrationStatus');
+
+/** True when a migration-status value came from D1 after an inconclusive live miss. */
+export function isDegradedMigrationStatus(
+  response: MigrationStatusResponse,
+): boolean {
+  return (response as MigrationStatusResponse & { [DEGRADED_MIGRATION_STATUS]?: true })[DEGRADED_MIGRATION_STATUS] === true;
+}
+
+function markDegradedMigrationStatus(
+  response: MigrationStatusResponse,
+): MigrationStatusResponse {
+  Object.defineProperty(response, DEGRADED_MIGRATION_STATUS, { value: true });
+  return response;
+}
+
 export interface BlockchainEnvironment {
   MAINNET_RPC_URL: string;
   SEPOLIA_RPC_URL: string;
@@ -710,6 +728,12 @@ export class MetadataService {
               owner: d1Record.owner ?? undefined,
               expirationDate: d1Record.expiration_date ?? undefined,
             };
+
+            // A non-definitive live miss means the primary was skipped or
+            // unavailable: the D1 row is a rescue, not a healthy success.
+            if (error instanceof NotFoundError && !error.definitive) {
+              return markDegradedMigrationStatus(fallbackResponse);
+            }
 
             return fallbackResponse;
           }
