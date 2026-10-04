@@ -1,8 +1,9 @@
-// W8-BUDGET-002 round-7 oracle: identity-sensitive listener lifecycle.
-// Tracks exact callback identity via add/remove Sets; verifies that
-// every registered abort callback is removed by the product code.
-// A mutant that calls removeEventListener with a different callback
-// (e.g. () => {}) must fail while correct code passes all tests.
+// W8-BUDGET-002 round-8 oracle: tuple-identity listener lifecycle.
+// Tracks exact `(signal identity, type, callback identity, normalized
+// capture)` tuples.  Uses an active-set approach: every addEventListener
+// records a tuple; removeEventListener deletes the matching tuple.
+// After the operation, the active set must be empty.  Wrong-signal,
+// wrong-capture, and wrong-callback mutants all fail independently.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
@@ -15,17 +16,31 @@ const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 let timeoutMsValues: number[] = [];
-let addedCbs:    Set<EventListenerOrEventListenerObject>;
-let removedCbs:  Set<EventListenerOrEventListenerObject>;
+
+// Active-set tracking: every addEventListener('abort', ...) records a tuple;
+// every removeEventListener('abort', ...) with matching (signal ===, type,
+// callback ===, capture ===) deletes it.  After a lifecycle operation the
+// array must be empty — no stale listeners.
+interface ListenerTuple {
+  signal: AbortSignal;
+  type: string;
+  callback: EventListenerOrEventListenerObject;
+  capture: boolean;
+}
+let activeTuples: ListenerTuple[] = [];
+
+function normCapture(o?: boolean | AddEventListenerOptions): boolean {
+  if (o === true) return true;
+  if (o === false || o === undefined) return false;
+  return (o as AddEventListenerOptions).capture === true;
+}
 
 const origAdd = AbortSignal.prototype.addEventListener;
 const origRemove = AbortSignal.prototype.removeEventListener;
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-  timeoutMsValues = [];
-  addedCbs = new Set();
-  removedCbs = new Set();
+  timeoutMsValues = []; activeTuples = [];
 
   vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
     timeoutMsValues.push(ms);
@@ -36,12 +51,19 @@ beforeEach(() => {
 
   vi.spyOn(AbortSignal.prototype, 'addEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) {
-      if (type === 'abort') addedCbs.add(listener);
+      if (type === 'abort') {
+        activeTuples.push({ signal: this, type, callback: listener, capture: normCapture(options) });
+      }
       return origAdd.call(this, type, listener, options);
     });
   vi.spyOn(AbortSignal.prototype, 'removeEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions | boolean) {
-      if (type === 'abort') removedCbs.add(listener);
+      if (type === 'abort') {
+        const cap = normCapture(options);
+        const idx = activeTuples.findIndex(t =>
+          t.signal === this && t.type === type && t.callback === listener && t.capture === cap);
+        if (idx !== -1) activeTuples.splice(idx, 1);
+      }
       return origRemove.call(this, type, listener, options);
     });
 
@@ -88,14 +110,11 @@ function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Re
   });
 }
 
-// Assert every added abort callback was removed (identity match).
 function assertAllRemoved() {
-  for (const cb of addedCbs) {
-    expect(removedCbs.has(cb)).toBe(true);
-  }
+  expect(activeTuples.length).toBe(0);
 }
 
-// ------- prior oracles (compressed, unchanged) -------
+// ------- prior oracles (unchanged, compressed) -------
 
 describe('W8-BUDGET-002: prior oracles', () => {
   it('entry guard', async () => {
@@ -155,10 +174,10 @@ describe('W8-BUDGET-002: prior oracles', () => {
   });
 });
 
-// ------- identity-sensitive listener-lifecycle tests -------
+// ------- tuple-identity lifecycle tests -------
 
-describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
-  it('removes exact abort callback after work succeeds (avatar)', async () => {
+describe('W8-BUDGET-002: listener lifecycle — tuple identity', () => {
+  it('removes exact tuple after work succeeds (avatar)', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
@@ -169,7 +188,7 @@ describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
     assertAllRemoved();
   });
 
-  it('removes exact abort callback after work succeeds (header)', async () => {
+  it('removes exact tuple after work succeeds (header)', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
@@ -180,7 +199,7 @@ describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
     assertAllRemoved();
   });
 
-  it('removes exact abort callback after synchronous rejection', async () => {
+  it('removes exact tuple after synchronous rejection', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockRejectedValue(new Error('sync fail'));
     const b = await import('../src/services/request-budget');
@@ -191,9 +210,8 @@ describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
     assertAllRemoved();
   });
 
-  it('removes exact abort callback after asynchronous (signal-abort) rejection', async () => {
+  it('removes exact tuple after asynchronous (signal-abort) rejection', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    // Hang without registering any listener — the race's abortPromise wins.
     fm.mockImplementationOnce(() => new Promise<Response>(() => {}));
     const b = await import('../src/services/request-budget');
     await settle(b.withRequestBudget(async () => {
@@ -203,7 +221,7 @@ describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
     assertAllRemoved();
   });
 
-  it('16 concurrent successes: every added callback removed by identity', async () => {
+  it('16 concurrent successes: all tuples removed', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockImplementation(async () => validPng());
     const b = await import('../src/services/request-budget');
@@ -213,16 +231,13 @@ describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
     });
     expect(results).toHaveLength(16);
     for (const r of results) expect(r).not.toBeNull();
-    // Every callback that was registered must appear in the removed set.
     assertAllRemoved();
-    expect(addedCbs.size).toBe(16);
   });
 
   it('does not register a listener on an already-aborted signal', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
-    // Simulate an already-aborted signal.
     const origTimeout = AbortSignal.timeout;
     vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
       const s = origTimeout(ms);
@@ -234,7 +249,6 @@ describe('W8-BUDGET-002: listener lifecycle — callback identity', () => {
       return svc.getAvatarImage('test.eth').catch((e: unknown) => e);
     });
     expectDeadline(error);
-    // No listener should have been added.
-    expect(addedCbs.size).toBe(0);
+    assertAllRemoved(); // no tuple was ever registered
   });
 });
