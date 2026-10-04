@@ -428,3 +428,145 @@ describe('getV2Registries: discovery failure after cache TTL', () => {
     expect(exec).toHaveBeenCalledTimes(2);
   });
 });
+
+// P2: edge cache (caches.default) must carry a v3 discriminator so pre-deploy
+// v2 SVG/PNG entries miss after deployment.  The discriminator is appended as
+// __ecv=v3 query parameter on every internal match/put/purge and must never
+// reach the client-visible URL or headers.
+const EDGE_DISCRIMINATOR = '__ecv=v3';
+function v3EdgeKey(base: string): string {
+  const u = new URL(base);
+  u.searchParams.set('__ecv', 'v3');
+  return u.toString();
+}
+
+describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
+  const IMG  = '/sepolia/registry/fox.eth/image';
+  const RAS  = '/sepolia/registry/fox.eth/rasterize';
+  const BASE = 'http://localhost';
+
+  function set(key: string, body: string, ct = 'image/svg+xml', maxAge = 300) {
+    edgeStore.set(key, {
+      response: new Response(body, {
+        headers: { 'Content-Type': ct, 'Cache-Control': `public, max-age=${maxAge}` },
+      }),
+      maxAge,
+    });
+  }
+
+  async function triggerPurge(name: string) {
+    const { ctx, flush } = makeAppCtx();
+    const res = await app.request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, protocol: 'v2', type: 'update' }),
+      },
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    await flush();
+  }
+
+  beforeEach(() => { edgeStore.clear(); });
+
+  // ── match unversioned miss / v3 hit ────────────────────────────────
+
+  it('/image: unversioned pre-v3 edge entry misses', async () => {
+    set(`${BASE}${IMG}`, '<svg>PRE-V3-EDGE</svg>');
+    const res = await get(IMG);
+    expect(await res.text()).not.toContain('PRE-V3-EDGE');
+    expect(res.status).toBe(200);
+  });
+
+  it('/image: v3 edge entry hits', async () => {
+    set(v3EdgeKey(`${BASE}${IMG}`), '<svg>V3-HIT</svg>');
+    const res = await get(IMG);
+    expect(await res.text()).toContain('V3-HIT');
+    expect(res.status).toBe(200);
+  });
+
+  it('/rasterize: unversioned pre-v3 edge entry misses', async () => {
+    set(`${BASE}${RAS}`, 'PREV3PNG', 'image/png');
+    const res = await get(RAS);
+    expect(new TextDecoder().decode(await res.arrayBuffer())).not.toBe('PREV3PNG');
+    expect(res.status).toBe(200);
+  });
+
+  it('/rasterize: v3 edge entry hits', async () => {
+    set(v3EdgeKey(`${BASE}${RAS}`), 'V3PNGHIT', 'image/png');
+    const res = await get(RAS);
+    expect(new TextDecoder().decode(await res.arrayBuffer())).toBe('V3PNGHIT');
+    expect(res.status).toBe(200);
+  });
+
+  // ── put/store ──────────────────────────────────────────────────────
+
+  it('/image: fresh render stores under the v3 edge key', async () => {
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(edgeStore.has(v3EdgeKey(`${BASE}${IMG}`)), 'fresh render must store at v3 key').toBe(true);
+    expect(edgeStore.has(`${BASE}${IMG}`), 'must not store at unversioned key').toBe(false);
+  });
+
+  it('/rasterize: fresh render stores under the v3 edge key', async () => {
+    const res = await get(RAS);
+    expect(res.status).toBe(200);
+    expect(edgeStore.has(v3EdgeKey(`${BASE}${RAS}`)), 'fresh render must store at v3 key').toBe(true);
+    expect(edgeStore.has(`${BASE}${RAS}`), 'must not store at unversioned key').toBe(false);
+  });
+
+  // ── purge ──────────────────────────────────────────────────────────
+
+  it('webhook purge deletes v3 entries (image + rasterize)', async () => {
+    set(v3EdgeKey(`${BASE}/sepolia/registry/fox.eth/image`), 'x');
+    set(v3EdgeKey(`${BASE}/sepolia/registry/fox.eth/rasterize`), 'x');
+    set(v3EdgeKey(`${BASE}/sepolia/namewrapper/fox.eth/image`), 'x');
+    set(v3EdgeKey(`${BASE}/sepolia/namewrapper/fox.eth/rasterize`), 'x');
+
+    await triggerPurge('fox.eth');
+
+    expect(edgeStore.has(v3EdgeKey(`${BASE}/sepolia/registry/fox.eth/image`)), 'registry image purged').toBe(false);
+    expect(edgeStore.has(v3EdgeKey(`${BASE}/sepolia/registry/fox.eth/rasterize`)), 'registry rasterize purged').toBe(false);
+    expect(edgeStore.has(v3EdgeKey(`${BASE}/sepolia/namewrapper/fox.eth/image`)), 'namewrapper image purged').toBe(false);
+    expect(edgeStore.has(v3EdgeKey(`${BASE}/sepolia/namewrapper/fox.eth/rasterize`)), 'namewrapper rasterize purged').toBe(false);
+  });
+
+  it('webhook purge also deletes legacy unversioned entries for transition', async () => {
+    set(`${BASE}/sepolia/registry/fox.eth/image`, 'x');
+    set(`${BASE}/sepolia/registry/fox.eth/rasterize`, 'x');
+
+    await triggerPurge('fox.eth');
+
+    expect(edgeStore.has(`${BASE}/sepolia/registry/fox.eth/image`), 'legacy image purged').toBe(false);
+    expect(edgeStore.has(`${BASE}/sepolia/registry/fox.eth/rasterize`), 'legacy rasterize purged').toBe(false);
+  });
+
+  // ── query ordering / duplicates ────────────────────────────────────
+
+  it('/image: edge key preserves query parameters', async () => {
+    const res = await get('/sepolia/registry/fox.eth/image?width=518&height=518');
+    expect(res.status).toBe(200);
+    // Entry must be stored with width/height in the key (v3-keyed).
+    const url = v3EdgeKey(`${BASE}/sepolia/registry/fox.eth/image?width=518&height=518`);
+    expect(edgeStore.has(url), 'edge entry must include width/height params').toBe(true);
+  });
+
+  // ── public surface ─────────────────────────────────────────────────
+
+  it('client-visible response has no __ecv in URL, body, or headers', async () => {
+    // Pre-populate a v3 edge hit so we test the hit path too.
+    set(v3EdgeKey(`${BASE}${IMG}`), '<svg>PUB</svg>');
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain('__ecv');
+    // No __ecv in headers
+    for (const [k] of res.headers.entries()) {
+      expect(k).not.toContain('__ecv');
+      expect(res.headers.get(k)).not.toContain('__ecv');
+    }
+  });
+});
