@@ -239,6 +239,9 @@ function envSecsToMs(name: string, value: string | undefined, minSecs = 1): numb
 // the next cron run would delete almost every D1 row.
 const MIN_D1_RETENTION_SECS = 24 * 60 * 60;
 
+// Values above 100 MiB are operator slips that would disable the resource cap.
+const MAX_AVATAR_BYTES_LIMIT = 100 * 1024 * 1024;
+
 function getImageServices(env: Env, network: NetworkName): ImageServices {
   const cached = _imageServices.get(network);
   if (cached) return cached;
@@ -246,7 +249,7 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
   // Invalid/garbage value → undefined → AvatarService uses its built-in default.
   const maxAvatarBytesValue = env.MAX_AVATAR_BYTES ?? '';
   const parsedMax = /^\s*\d+\s*$/.test(maxAvatarBytesValue) ? Number(maxAvatarBytesValue) : NaN;
-  const maxAvatarBytes = Number.isFinite(parsedMax) && Number.isSafeInteger(parsedMax) && parsedMax > 0 ? parsedMax : undefined;
+  const maxAvatarBytes = Number.isFinite(parsedMax) && Number.isSafeInteger(parsedMax) && parsedMax > 0 && parsedMax <= MAX_AVATAR_BYTES_LIMIT ? parsedMax : undefined;
   // v2 universal resolver (when configured for this network) so native-v2 names'
   // avatar/header records resolve; AvatarService ignores the unset placeholder.
   const universalResolverV2 = NETWORKS[network].v2?.universalResolver;
