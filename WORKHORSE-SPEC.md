@@ -56,6 +56,4 @@ Files changed:
 - [x] T004 [AC2] Add TTL boundary tests: fresh (TTL-1ms L2 hit), exact (== TTL L3 miss), expired (> TTL L3 miss) across unmigrated/migrated/native; r2MaxAge 0; undefined maxAge backward compat (RED at `0e3d09a`, `915bad3`, `18e0ae2`; GREEN at `e439edd`, `36621af`, `539ae7c`)
 - [x] T005 [AC2] Add backfill lifetime capping tests: absolute `expiration` assertion, 60 s boundary ±1 ms, migrationStatus serialization, hardTtl/softTtl capping, no-write + full-TTL + off-by-one + no-backdate mutants (GREEN at `539ae7c`)
 - [x] T006 [AC3] Run `pnpm run test` and verify all tests pass (58 files, 47 image-cache tests + afterAll sentinel)
-- [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 KV isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts`
-- [x] T008 [AC4] TTL reapply after round-7 revert: RED `f2c8cc0` (8 fails), GREEN `ec36450` — absolute expiration, fail-closed, conservative ints
-- [x] T009 [AC4] Edge discriminator after round-9 revert: RED `d57f153` (14 fails, all pre-existing test updates included), GREEN `b9e50be` — shared __ecv=v3 on match/put/purge
+- [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts` version expectation
