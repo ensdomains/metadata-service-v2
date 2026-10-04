@@ -229,7 +229,7 @@ function envSecsToMs(name: string, value: string | undefined, minSecs = 1): numb
   if (value === undefined || value.trim() === '') return undefined;
   const secs = /^\s*\d+\s*$/.test(value) ? Number(value) : NaN;
   const milliseconds = secs * 1000;
-  if (!(secs >= minSecs) || !Number.isFinite(milliseconds)) {
+  if (!(secs >= minSecs) || secs > MAX_ENV_SECS || !Number.isSafeInteger(milliseconds)) {
     console.warn(`[config] ignoring ${name}=${JSON.stringify(value)}: expected whole seconds, at least ${minSecs}`);
     return undefined;
   }
@@ -239,6 +239,9 @@ function envSecsToMs(name: string, value: string | undefined, minSecs = 1): numb
 // A retention below a day is taken for a unit slip (seconds meant as days):
 // the next cron run would delete almost every D1 row.
 const MIN_D1_RETENTION_SECS = 24 * 60 * 60;
+// Ten years in seconds: any duration above this is impractically large and
+// produces a negative cutoff that silently disables D1 retention and freshness.
+const MAX_ENV_SECS = 10 * 365 * 24 * 60 * 60;
 
 function getImageServices(env: Env, network: NetworkName): ImageServices {
   const cached = _imageServices.get(network);
