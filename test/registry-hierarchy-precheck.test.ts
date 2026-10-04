@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import { NotFoundError } from '../src/services/errors';
+import { CONTRACTS } from '../src/services/blockchain';
 import { createMockEnv } from './mocks/hono-env';
 
 // W3-ROUTES-009: registry hierarchy must remain total and degraded when its
@@ -74,8 +75,10 @@ describe('W3-ROUTES-009: registry-hierarchy precheck non-definitive miss', () =>
     expect(hierarchy.length).toBeGreaterThanOrEqual(2);
     expect(hierarchy[0].name).toBe('eth');
     expect(hierarchy[0].owner).toBe('0x0000000000000000000000000000000000000000');
+    expect(hierarchy[0].resolver).toBe(CONTRACTS.mainnet.resolver);
     expect(hierarchy[1].name).toBe('precheck-non-definitive.eth');
     expect(hierarchy[1].owner).toBe('0x0000000000000000000000000000000000000000');
+    expect(hierarchy[1].resolver).toBe(CONTRACTS.mainnet.resolver);
 
     // AC: literal client Cache-Control: public, max-age=30
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=30');
@@ -87,8 +90,21 @@ describe('W3-ROUTES-009: registry-hierarchy precheck non-definitive miss', () =>
     expect(checkExpiryCalled).toBe(true);
     expect(getRegistryHierarchyCalled).toBe(false);
 
-    // AC: captured-edge Cache-Control — edgeCachePut should have been called
+    // AC: captured-edge Cache-Control is the same literal 30s header, not the
+    // healthy hierarchy TTL, and the stored body keeps the default resolver.
     const cfCache = (globalThis as unknown as { caches: { default: { put: ReturnType<typeof vi.fn> } } }).caches.default;
     expect(cfCache.put).toHaveBeenCalled();
+    const edge = cfCache.put.mock.calls.at(-1)?.[1] as Response;
+    expect(edge.headers.get('Cache-Control')).toBe('public, max-age=30');
+    const edgeBody = await edge.json() as { hierarchy: Array<{ resolver: string }> };
+    expect(edgeBody.hierarchy[0].resolver).toBe(CONTRACTS.mainnet.resolver);
+    expect(edgeBody.hierarchy[1].resolver).toBe(CONTRACTS.mainnet.resolver);
+
+    const sepolia = await req('/registry-hierarchy/precheck-non-definitive.eth?network=sepolia');
+    expect(sepolia.status).toBe(200);
+    const sepoliaBody = await sepolia.json() as { hierarchy: Array<{ owner: string; resolver: string }> };
+    expect(sepoliaBody.hierarchy[0].owner).toBe('0x0000000000000000000000000000000000000000');
+    expect(sepoliaBody.hierarchy[0].resolver).toBe(CONTRACTS.sepolia.resolver);
+    expect(sepoliaBody.hierarchy[1].resolver).toBe(CONTRACTS.sepolia.resolver);
   });
 });
