@@ -81,12 +81,29 @@ function makeService(uri: string): {
   return { svc, fetchMock };
 }
 
+// Helper: extract URL strings from mock call args.
+function fetchUrls(mock: ReturnType<typeof vi.fn>): string[] {
+  return mock.mock.calls.map((c) =>
+    typeof c[0] === 'string' ? c[0] : c[0] instanceof URL ? c[0].href : String(c[0]),
+  );
+}
+
+// A fetch mock that respects the abort signal — hangs until the signal fires.
+function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return new Promise<Response>((_, reject) => {
+    const signal = init?.signal;
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
+
 describe('W8-BUDGET-002: entry guard (existing)', () => {
   it('throws RequestDeadlineError before fetchMedia when less than 1s remains at entry', async () => {
     const { svc } = makeService(MEDIA_URL);
 
-    // Mock fetchMedia on the instance to track whether it is called.
-    // The guard must throw before fetchMedia starts.
     let fetchMediaCalled = false;
     (svc as unknown as { fetchMedia: typeof svc['fetchMedia'] }).fetchMedia = vi
       .fn()
@@ -111,25 +128,16 @@ describe('W8-BUDGET-002: redirect-hop deadline gating', () => {
   it('throws RequestDeadlineError before a redirect hop when less than 1s remains', async () => {
     const { svc, fetchMock } = makeService(MEDIA_URL);
 
-    // First fetch: returns 302 to REDIRECT_URL after 600ms latency.
-    // Second fetch (redirect hop): should not be reached.
     fetchMock.mockImplementationOnce(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 600));
-      return new Response(null, {
-        status: 302,
-        headers: { Location: REDIRECT_URL },
-      });
+      return new Response(null, { status: 302, headers: { Location: REDIRECT_URL } });
     });
-    // If reached, record it so the test can fail meaningfully.
     fetchMock.mockImplementationOnce(async () => {
       return new Response('SHOULD NOT REACH', { status: 200 });
     });
 
     const budget = await import('../src/services/request-budget');
 
-    // Start with 1500ms remaining. The 600ms first hop leaves 900ms — below
-    // the 1000ms minimum for a new attempt. The next hop must not start.
-    // Let the promise reject naturally — settle captures rejections in .error.
     const out = await settle(
       budget.withRequestBudget(async () => {
         vi.setSystemTime(Date.now() + budget.REQUEST_DEADLINE_MS - 1500);
@@ -138,14 +146,7 @@ describe('W8-BUDGET-002: redirect-hop deadline gating', () => {
       60_000,
     );
 
-    // Only the initial URL must have been fetched.
-    const urls = fetchMock.mock.calls.map((c: [RequestInfo | URL, ...unknown[]]) =>
-      typeof c[0] === 'string' ? c[0] : c[0] instanceof URL ? c[0].href : String(c[0]),
-    );
-    expect(urls).toEqual([MEDIA_URL]);
-
-    // The error must be RequestDeadlineError, not a generic UpstreamError
-    // or a response from the redirect URL.
+    expect(fetchUrls(fetchMock)).toEqual([MEDIA_URL]);
     expectDeadlineError(out.error);
   });
 
@@ -170,10 +171,7 @@ describe('W8-BUDGET-002: redirect-hop deadline gating', () => {
       60_000,
     );
 
-    const urls = fetchMock.mock.calls.map((c: [RequestInfo | URL, ...unknown[]]) =>
-      typeof c[0] === 'string' ? c[0] : c[0] instanceof URL ? c[0].href : String(c[0]),
-    );
-    expect(urls).toEqual([MEDIA_URL]);
+    expect(fetchUrls(fetchMock)).toEqual([MEDIA_URL]);
     expectDeadlineError(out.error);
   });
 });
@@ -182,7 +180,6 @@ describe('W8-BUDGET-002: fetch timeout bounded by remaining request time', () =>
   it('uses a timeout ≤ remaining request time, not the fixed 7s cap', async () => {
     const { svc, fetchMock } = makeService(MEDIA_URL);
 
-    // Return a valid PNG immediately so the fetch completes.
     const bytes = Uint8Array.from(atob(PNG_BASE64), (c) => c.charCodeAt(0));
     fetchMock.mockResolvedValue(new Response(bytes, {
       status: 200,
@@ -191,23 +188,16 @@ describe('W8-BUDGET-002: fetch timeout bounded by remaining request time', () =>
 
     const budget = await import('../src/services/request-budget');
 
-    // Inside a request with only 2000ms remaining. The fetch timeout must be
-    // min(7000, 2000) = 2000, not 7000.
     await budget.withRequestBudget(async () => {
       vi.setSystemTime(Date.now() + budget.REQUEST_DEADLINE_MS - 2000);
       await svc.getAvatarImage('test.eth');
     });
 
-    // Collect AbortSignal.timeout values that belong to the media fetch
-    // (non-zero, ≤ the 7s cap). Inside the request the value must be ≤ 2000.
     const relevant = timeoutMsValues.filter((t) => t > 0 && t <= 7000);
     expect(relevant.length).toBeGreaterThan(0);
-
-    // No timeout should exceed the remaining request time (2000ms).
     for (const t of relevant) {
       expect(t).toBeLessThanOrEqual(2000);
     }
-    // At least one timeout must be strictly less than the fixed 7000ms cap.
     expect(relevant.some((t) => t < 7000)).toBe(true);
   });
 
@@ -220,31 +210,18 @@ describe('W8-BUDGET-002: fetch timeout bounded by remaining request time', () =>
       headers: { 'Content-Type': 'image/png' },
     }));
 
-    // Outside a request: no budget, timeout should be the full 7s.
     await svc.getAvatarImage('test.eth');
 
     const relevant = timeoutMsValues.filter((t) => t > 0 && t <= 7000);
-    // The timeout should be 7000 (or very close).
     expect(relevant.some((t) => t >= 6900)).toBe(true);
   });
 });
 
 describe('W8-BUDGET-002: deadline exhaustion surfaces RequestDeadlineError', () => {
-  it('throws RequestDeadlineError, not a generic UpstreamError, when the fetch runs past the deadline', async () => {
+  it('throws RequestDeadlineError when a deadline-driven timeout cuts the fetch', async () => {
     const { svc, fetchMock } = makeService(MEDIA_URL);
 
-    // The fetch hangs but respects the abort signal — the bounded timeout
-    // fires and the signal aborts the fetch.
-    fetchMock.mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) => {
-      return new Promise<Response>((_, reject) => {
-        const signal = init?.signal;
-        if (signal?.aborted) {
-          reject(signal.reason);
-          return;
-        }
-        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-      });
-    });
+    fetchMock.mockImplementationOnce(hangingFetch);
 
     const budget = await import('../src/services/request-budget');
 
@@ -256,9 +233,99 @@ describe('W8-BUDGET-002: deadline exhaustion surfaces RequestDeadlineError', () 
       60_000,
     );
 
-    // The error must be RequestDeadlineError specifically.
     expectDeadlineError(out.error);
-    // The error message must reference the deadline, not a generic timeout.
     expect((out.error as Error).message).toContain('deadline');
+  });
+});
+
+describe('W8-BUDGET-002: media-cap timeout distinct from request-deadline timeout', () => {
+  it('does NOT convert a media-cap timeout to RequestDeadlineError when budget is ample (avatar)', async () => {
+    const { svc, fetchMock } = makeService(MEDIA_URL);
+
+    fetchMock.mockImplementationOnce(hangingFetch);
+
+    const budget = await import('../src/services/request-budget');
+
+    const out = await settle(
+      budget.withRequestBudget(async () => {
+        vi.setSystemTime(Date.now() + budget.REQUEST_DEADLINE_MS - 18_000);
+        return svc.getAvatarImage('test.eth');
+      }),
+      60_000,
+    );
+
+    expect(out.error).toBeDefined();
+    expect((out.error as Error).name).not.toBe('RequestDeadlineError');
+  });
+
+  it('does NOT convert a media-cap timeout for header either', async () => {
+    const { svc, fetchMock } = makeService(MEDIA_URL);
+
+    fetchMock.mockImplementationOnce(hangingFetch);
+
+    const budget = await import('../src/services/request-budget');
+
+    const out = await settle(
+      budget.withRequestBudget(async () => {
+        vi.setSystemTime(Date.now() + budget.REQUEST_DEADLINE_MS - 18_000);
+        return svc.getHeaderImage('test.eth');
+      }),
+      60_000,
+    );
+
+    expect(out.error).toBeDefined();
+    expect((out.error as Error).name).not.toBe('RequestDeadlineError');
+  });
+});
+
+describe('W8-BUDGET-002: deadline-driven timeout during body streaming', () => {
+  it('converts a deadline-driven TimeoutError during body read to RequestDeadlineError (avatar)', async () => {
+    const { svc, fetchMock } = makeService(MEDIA_URL);
+
+    const bytes = Uint8Array.from(atob(PNG_BASE64), (c) => c.charCodeAt(0));
+    fetchMock.mockResolvedValue(new Response(bytes, {
+      status: 200,
+      headers: { 'Content-Type': 'image/png' },
+    }));
+
+    vi.spyOn(await import('../src/services/media-fetch'), 'readBodyCapped')
+      .mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
+
+    const budget = await import('../src/services/request-budget');
+
+    const out = await settle(
+      budget.withRequestBudget(async () => {
+        vi.setSystemTime(Date.now() + budget.REQUEST_DEADLINE_MS - 2000);
+        return svc.getAvatarImage('test.eth');
+      }),
+      60_000,
+    );
+
+    expectDeadlineError(out.error);
+  });
+
+  it('converts a deadline-driven TimeoutError during body read for header too', async () => {
+    const { svc, fetchMock } = makeService(MEDIA_URL);
+
+    const bytes = Uint8Array.from(atob(PNG_BASE64), (c) => c.charCodeAt(0));
+    fetchMock.mockResolvedValue(new Response(bytes, {
+      status: 200,
+      headers: { 'Content-Type': 'image/png' },
+    }));
+
+    vi.spyOn(await import('../src/services/media-fetch'), 'readBodyCapped')
+      .mockRejectedValue(new DOMException('The operation timed out.', 'TimeoutError'));
+
+    const budget = await import('../src/services/request-budget');
+
+    const out = await settle(
+      budget.withRequestBudget(async () => {
+        vi.setSystemTime(Date.now() + budget.REQUEST_DEADLINE_MS - 2000);
+        return svc.getHeaderImage('test.eth');
+      }),
+      60_000,
+    );
+
+    expectDeadlineError(out.error);
   });
 });
