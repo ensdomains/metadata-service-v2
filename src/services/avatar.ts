@@ -19,7 +19,7 @@ import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayS
 import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
-import { timeLeftForAttempt } from './request-budget';
+import { raceRequestDeadline, timeLeftForAttempt } from './request-budget';
 import { toSafeImage } from './media-safety';
 import { DEFAULT_IPFS_GATEWAY, toLiveGatewayUrl } from './ipfs-gateway';
 
@@ -673,9 +673,15 @@ export class AvatarService {
   private async lookup<T>(work: () => Promise<T | null>, what: string, name: string): Promise<T | null> {
     const scope: OutageScope = {};
     let result: T | null;
-    timeLeftForAttempt(what);
+    const timeLeft = timeLeftForAttempt(what);
     try {
-      result = await runInOutageScope(scope, () => this.withMediaTimeout(work(), `${what} timed out for ${name}`));
+      result = await runInOutageScope(scope, () =>
+        raceRequestDeadline(
+          this.withMediaTimeout(work(), `${what} timed out for ${name}`),
+          timeLeft,
+          what,
+        ),
+      );
     } catch (error) {
       if (isDefinitiveMiss(error, scope.outage !== undefined)) {
         console.warn(`${what} found no usable record for ${name}:`, error);
