@@ -50,7 +50,7 @@ describe('every name-taking route rejects a name over the label cap with 400', (
 
   beforeEach(() => {
     checkExpiry = vi.spyOn(MetadataService.prototype, 'checkExpiry')
-      .mockRejectedValue(new NotFoundError('stub: reached the service'));
+      .mockRejectedValue(new NotFoundError('stub: reached the service', { definitive: true }));
     avatarStubs = [
       vi.spyOn(AvatarService.prototype, 'getAvatarImage').mockResolvedValue(null),
       vi.spyOn(AvatarService.prototype, 'getHeaderImage').mockResolvedValue(null),
