@@ -140,4 +140,35 @@ describe('W8-EXPIRY-001 in-flight eviction', () => {
     await expect(second).resolves.toBeUndefined();
     expect(getV2Registration).toHaveBeenCalledTimes(2);
   });
+
+  it('unrelated eviction does not invalidate an in-flight v1 read for a different name', async () => {
+    const firstRead = deferred<bigint>();
+    const expiry = stableFuture();
+    const getExpiry = vi.fn(() => firstRead.promise);
+    const svc = makeService('mainnet', {
+      isV2Configured: vi.fn().mockReturnValue(false),
+      getV2Registration: vi.fn(),
+      getExpiry,
+    });
+
+    const first = svc.checkExpiry(NAME);
+    expect(getExpiry).toHaveBeenCalledTimes(1);
+
+    // Evict an unrelated name while a.eth's read is in flight.
+    svc.evictExpiryVerdict({ name: 'unrelated.eth' });
+    firstRead.resolve(expiry);
+    await expect(first).resolves.toBeUndefined();
+
+    // The next checkExpiry for a.eth must be a cache hit — the unrelated
+    // eviction must not have invalidated this name's in-flight fill.
+    let secondRead = false;
+    const second = svc.checkExpiry(NAME).then(() => {
+      secondRead = true;
+    });
+    await flush();
+
+    // Already settled — no second chain read needed, isLive returns true.
+    expect(secondRead).toBe(true);
+    expect(getExpiry).toHaveBeenCalledTimes(1);
+  });
 });
