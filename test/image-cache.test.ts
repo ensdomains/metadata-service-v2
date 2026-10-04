@@ -629,6 +629,118 @@ describe('ImageCacheService', () => {
       });
     });
 
+    // ── R2 backfill lifetime capping ───────────────────────────────
+    // When an L2 R2 hit backfills KV, the KV entry must not extend
+    // the data lifetime beyond the original R2 authoritative deadline.
+    // Without capping, writeKv resets createdAt and uses full hardTtl,
+    // so stale bytes can circulate for r2MaxAge + hardTtl instead of
+    // r2MaxAge (e.g., unmigrated 90 min instead of 60 min).
+
+    describe('R2 backfill lifetime capping', () => {
+      function assertL2Backfill(r2AgeMs: number, expectedSoftTtl: number, expectedExpirationTtl: number) {
+        const kvCalls = (svgCacheKv.put as Mock).mock.calls;
+        expect(kvCalls.length, 'KV: expected backfill put').toBeGreaterThan(0);
+        const entry = JSON.parse(kvCalls[0][1] as string);
+        const kvOptions = kvCalls[0][2] as { expirationTtl?: number } | undefined;
+
+        // createdAt must be back-dated to the R2 upload time, not Date.now().
+        // The product code computes: createdAt = Date.now() - r2AgeSeconds * 1000.
+        // With frozen Date.now(), that equals fixedNow - r2AgeMs exactly.
+        const expectedCreatedAt = fixedNow - r2AgeMs;
+        expect(entry.createdAt, 'createdAt must reflect R2 upload age').toBe(expectedCreatedAt);
+
+        // softTtl and expirationTtl capped to remaining lifetime
+        expect(entry.softTtl, 'softTtl must be capped to remaining lifetime').toBe(expectedSoftTtl);
+        expect(kvOptions?.expirationTtl, 'expirationTtl must be capped to remaining lifetime').toBe(expectedExpirationTtl);
+      }
+
+      // ── unmigrated: skip backfill near expiry ──
+
+      it('skips KV backfill when remaining lifetime is below 60s (Cloudflare minimum)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        // R2 object 1 ms before expiry: remaining = 0.001 s < 60 s
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Near-Expiry R2</svg>', 3600 * 1000 - 1));
+
+        const result = await imageCacheService.getImage('near.eth', defaultOptions, executionCtx);
+
+        // Still served from L2 (age < r2MaxAge), but backfill must be skipped
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Near-Expiry R2</svg>');
+        await Promise.all(waitUntilPromises);
+        const kvCalls = (svgCacheKv.put as Mock).mock.calls;
+        expect(kvCalls.length, 'KV backfill must be skipped when remaining < 60s').toBe(0);
+      });
+
+      // ── unmigrated: cap hardTtl when remaining < full hardTtl ──
+
+      it('caps expirationTtl to remaining lifetime when R2 is older than hardTtl but within softTtl range', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        // R2 at 3000 s age: remaining = 600 s.  softTtl=300 < 600 → stays 300.
+        // hardTtl=1800 > 600 → capped to 600.
+        const r2AgeMs = 3000 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Midlife R2</svg>', r2AgeMs));
+
+        const result = await imageCacheService.getImage('mid.eth', defaultOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Midlife R2</svg>');
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(r2AgeMs, 300, 600);
+      });
+
+      // ── unmigrated: cap softTtl when remaining < softTtl ──
+
+      it('caps both softTtl and expirationTtl when remaining is below configured softTtl', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        // R2 at 3500 s age: remaining = 100 s.  Both softTtl=300 and hardTtl=1800
+        // exceed 100 → both capped to 100.
+        const r2AgeMs = 3500 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Late-Life R2</svg>', r2AgeMs));
+
+        const result = await imageCacheService.getImage('late.eth', defaultOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Late-Life R2</svg>');
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(r2AgeMs, 100, 100);
+      });
+
+      // ── migrated: cap hardTtl when remaining < full hardTtl ──
+
+      it('caps migrated expirationTtl to remaining lifetime', async () => {
+        const migratedOptions = { name: 'mig.eth', migrationStatus: 'migrated' as const };
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        // R2 at 50000 s age: remaining = 36400 s.
+        // softTtl=21600 < 36400 → stays 21600.
+        // hardTtl=86400 > 36400 → capped to 36400.
+        const r2AgeMs = 50000 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Mig Midlife R2</svg>', r2AgeMs));
+
+        const result = await imageCacheService.getImage('mig.eth', migratedOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Mig Midlife R2</svg>');
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(r2AgeMs, 21600, 36400);
+      });
+
+      // ── native: same TTL as migrated, separate config path ──
+
+      it('caps native expirationTtl to remaining lifetime (separate config path)', async () => {
+        const nativeOptions = { name: 'nat.eth', migrationStatus: 'native' as const };
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        const r2AgeMs = 50000 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Nat Midlife R2</svg>', r2AgeMs));
+
+        const result = await imageCacheService.getImage('nat.eth', nativeOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Nat Midlife R2</svg>');
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(r2AgeMs, 21600, 36400);
+      });
+    });
+
     // Guaranteed by vitest lifecycle to run after every per-test afterEach
     // in this describe block, regardless of execution order.  No timing
     // assumptions: identity comparison against the original function
