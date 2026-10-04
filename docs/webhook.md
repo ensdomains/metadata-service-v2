@@ -65,6 +65,7 @@ Validation enforced by the receiver:
 
 - `event_type` — non-empty string (required)
 - `timestamp` — number (required)
+- `contract_address` — string (required)
 - **`name` OR `namehash` must be present**
 - if `name` is present it must be a well-formed ENS name
 
