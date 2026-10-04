@@ -182,6 +182,50 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
   });
 });
 
+describe('downstream TTL: R2 absolute deadline cap (P2)', () => {
+  const IMG = '/sepolia/registry/fox.eth/image';
+  const RAS = '/sepolia/registry/fox.eth/rasterize';
+  const B = 'http://localhost';
+  let now: number; let ns: any = null, is: any = null, as: any = null;
+
+  function r2(upMs: number) { return { text: vi.fn().mockResolvedValue('<svg w="518" h="518"></svg>'), arrayBuffer: vi.fn(), body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(), uploaded: new Date(upMs) } as any; }
+  function cMax(r: Response) { const m = /max-age=(\d+)/.exec(r.headers.get('Cache-Control') ?? ''); return m ? Number(m[1]) : -1; }
+  function eMax(p: string) { const e = edgeStore.get(v3EdgeKey(`${B}${p}`)); return e ? e.maxAge : null; }
+
+  beforeEach(async () => {
+    edgeStore.clear(); now = Date.now(); ns = vi.spyOn(Date, 'now').mockReturnValue(now);
+    vi.mocked(ImageCacheService.prototype.getImage).mockRestore();
+    ({ ImageGenerationService: is = class{} } = await import('../src/services/image') as any);
+    ({ AvatarService: as = class{} } = await import('../src/services/avatar') as any);
+    (is as any).prototype.generateDomainImage = vi.fn().mockResolvedValue({ svg: '<svg w="518" h="518"></svg>' });
+    (as as any).prototype.getAvatarImage = vi.fn().mockResolvedValue(null);
+  });
+  afterEach(() => { ns?.mockRestore(); ns = null; delete (is as any)?.prototype?.generateDomainImage; delete (as as any)?.prototype?.getAvatarImage;
+    vi.spyOn(ImageCacheService.prototype, 'getImage').mockImplementation(async function (this: ImageCacheService, _n: any, o: any) {
+      return { svg: '<svg width="518" height="518"></svg>', contentType: 'image/svg+xml', cacheStatus: 'MISS', ttlConfig: this.getTtlConfig((o as any).migrationStatus ?? 'unmigrated') } as any;
+    });
+  });
+
+  function sR2(ms: number) { (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null); (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(r2(ms)); }
+
+  it('/image: ~300s remaining caps client 300 edge 300', async () => { sR2(now - (86_400_000 - 300_000)); const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(300); expect(eMax(IMG)).toBe(300); });
+  it('/image: ~59.999s remaining caps client 59 edge 59', async () => { sR2(now - (86_400_000 - 59_999)); const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(59); expect(eMax(IMG)).toBe(59); });
+  it('/image: ~1ms remaining caps client 0 no edge put', async () => { sR2(now - (86_400_000 - 1)); const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(0); expect(eMax(IMG)).toBeNull(); });
+
+  it('/rasterize: 300.001s nominal + 2ms raster delay → client 299 edge 299', async () => {
+    sR2(now - (86_400_000 - 300_001));
+    const { RasterizeService: RS } = await import('../src/services/rasterize');
+    const o = RS.prototype.rasterize; RS.prototype.rasterize = async function (this: any, ...a: any[]) { ns?.mockReturnValue(now + 2); return (o as any).apply(this, a); };
+    try { const r = await get(RAS); expect(r.status).toBe(200); expect(cMax(r)).toBe(299); expect(eMax(RAS)).toBe(299); }
+    finally { RS.prototype.rasterize = o; ns?.mockReturnValue(now); }
+  });
+
+  it('/image: fresh origin MISS keeps full client 21600 edge 300', async () => {
+    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null); (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
+    const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(21600); expect(eMax(IMG)).toBe(300);
+  });
+});
+
 // ---- SWR revalidation verdicts (metadata-cache) --------------------------------
 
 // In-memory KV double (only what MetadataCacheService touches).
