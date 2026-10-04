@@ -273,6 +273,66 @@ describe('W8-BUDGET-002: tuple instrumentation contract', () => {
     s.removeEventListener('abort', cb);
     assertAllRemoved();
   });
+
+  // Cross-signal: same callback on two signals; remove from one,
+  // dispatch both.  Only the non-removed listener fires.
+  it('cross-signal removal: removed listener zero invocations', () => {
+    const ca = new AbortController(); const cbCtrl = new AbortController();
+    let callsA = 0, callsB = 0;
+    const fn = () => { callsA++; };
+    ca.signal.addEventListener('abort', fn, { once: true });
+    cbCtrl.signal.addEventListener('abort', fn, { once: true });
+    ca.signal.removeEventListener('abort', fn);
+    ca.abort(); cbCtrl.abort();
+    expect(callsA).toBe(0); // removed → never invoked
+    // With callback-keyed wrappers, removing on A also passes the wrapper
+    // to native removeEventListener on A, but the wrapper is the same
+    // function object.  Native on B still has the wrapper registered.
+    // The oracle loses track because it uses a single WeakMap key.
+    expect(callsA + callsB).toBe(1); // only B fires
+    assertAllRemoved();
+  });
+
+  // Capture-specific: same callback, capture false+true; remove one;
+  // dispatch.  Only the retained listener fires (exactly once).
+  it('capture-specific removal: only retained invokes', () => {
+    const ctrl = new AbortController();
+    let calls = 0;
+    const cb = () => { calls++; };
+    ctrl.signal.addEventListener('abort', cb, { once: true });         // capture false
+    ctrl.signal.addEventListener('abort', cb, { once: true, capture: true } as any);
+    ctrl.signal.removeEventListener('abort', cb); // remove capture:false
+    ctrl.abort();
+    expect(calls).toBe(1); // only capture:true listener fired
+    assertAllRemoved();
+  });
+
+  // Stale wrapper: register {once}, remove it, re-register non-once,
+  // remove again, then dispatch.  Non-once listener never fires.
+  it('stale once wrapper then non-once re-registration, zero invocations', () => {
+    const ctrl = new AbortController();
+    let calls = 0;
+    const cb = () => { calls++; };
+    ctrl.signal.addEventListener('abort', cb, { once: true });
+    ctrl.signal.removeEventListener('abort', cb);
+    ctrl.signal.addEventListener('abort', cb); // non-once
+    ctrl.signal.removeEventListener('abort', cb);
+    ctrl.abort();
+    expect(calls).toBe(0); // removed before abort
+    assertAllRemoved();
+  });
+
+  // Duplicate {once}: native deduplicates — exactly one invocation.
+  it('duplicate {once}: native one invocation', () => {
+    const ctrl = new AbortController();
+    let calls = 0;
+    const cb = () => { calls++; };
+    ctrl.signal.addEventListener('abort', cb, { once: true });
+    ctrl.signal.addEventListener('abort', cb, { once: true });
+    ctrl.abort();
+    expect(calls).toBe(1);
+    assertAllRemoved();
+  });
 });
 
 // ------- lifecycle tests -------
@@ -315,7 +375,7 @@ describe('W8-BUDGET-002: listener lifecycle', () => {
   });
   it('initial-aborted', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockResolvedValue(validPng());
+    fm.mockRejectedValue(new Error('work rejected'));
     const b = await import('../src/services/request-budget');
     const origTo = AbortSignal.timeout;
     vi.spyOn(AbortSignal,'timeout').mockImplementation((ms:number)=>{const s=origTo(ms);Object.defineProperty(s,'aborted',{value:true,configurable:true});return s;});
