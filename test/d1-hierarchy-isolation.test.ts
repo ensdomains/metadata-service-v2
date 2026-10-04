@@ -58,7 +58,7 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
   }
 
   it('getHierarchy("a.eth") returns the intact root-first [eth, a.eth] hierarchy after b.eth is stored', async () => {
-    const { db } = sqliteD1();
+    const { db } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
     const d1 = new D1Service(db, 'mainnet');
 
     // Store a.eth with its hierarchy.
@@ -78,7 +78,7 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
   });
 
   it('getHierarchy("b.eth") returns the intact root-first [eth, b.eth] hierarchy', async () => {
-    const { db } = sqliteD1();
+    const { db } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
     const d1 = new D1Service(db, 'mainnet');
 
     await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
@@ -91,7 +91,7 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
   });
 
   it('storing the same domain twice replaces, not duplicates, its hierarchy', async () => {
-    const { db } = sqliteD1();
+    const { db } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
     const d1 = new D1Service(db, 'mainnet');
 
     await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
