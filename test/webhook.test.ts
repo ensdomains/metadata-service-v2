@@ -312,5 +312,16 @@ describe('WebhookService (zigens contract)', () => {
       const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ name: 'noTld' }))));
       expect(res.status).toBe(400);
     });
+
+    it('rejects namehash: false with 400 and does not invalidate caches', async () => {
+      const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
+      const body = JSON.stringify(validEvent({ name: 'red-team.eth', namehash: false }));
+      const res = await svc.handleWebhook(makeCtx(body));
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Missing or invalid namehash' });
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+      expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
+    });
   });
 });
