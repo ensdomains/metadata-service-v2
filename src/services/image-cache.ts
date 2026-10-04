@@ -42,8 +42,6 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // bypass R2 deadline enforcement (W8-CACHE-004).
 const CARD_CACHE_VERSION = 'v3';
 
-export { CARD_CACHE_VERSION };
-
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
   // prefix (`svg:${name}:`) still matches across both networks.

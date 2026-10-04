@@ -15,12 +15,6 @@ import { createMockEnv } from './mocks/hono-env';
 // ---- fake caches.default (per-colo L0 edge cache) -----------------------------
 const edgeStore = new Map<string, Response>();
 const keyOf = (r: RequestInfo | URL) => (typeof r === 'string' ? r : r instanceof URL ? r.href : r.url);
-
-function versionedUrl(base: string): string {
-  const u = new URL(base);
-  u.searchParams.set('__ecv', 'v3');
-  return u.toString();
-}
 (globalThis as unknown as { caches: unknown }).caches = {
   default: {
     async match(req: RequestInfo | URL) {
@@ -163,7 +157,7 @@ describe('NFT card routes', () => {
     expect(await res.text()).toBe('<svg data-avatar="no"/>');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
     expect(cardWrites()).toEqual({ kv: 0, r2: 0 });
-    expect(edgeStore.get(versionedUrl('http://localhost/mainnet/registry/slow.eth/image'))?.headers.get('Cache-Control')).toBe('public, max-age=60');
+    expect(edgeStore.get('http://localhost/mainnet/registry/slow.eth/image')?.headers.get('Cache-Control')).toBe('public, max-age=60');
     // Looked up once: the image service does not repeat the failed lookup.
     expect(getAvatar).toHaveBeenCalledTimes(1);
   });
@@ -176,7 +170,7 @@ describe('NFT card routes', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=21600, stale-while-revalidate=64800');
     expect(cardWrites()).toEqual({ kv: 1, r2: 1 });
-    expect(edgeStore.has(versionedUrl('http://localhost/mainnet/registry/none.eth/image'))).toBe(true);
+    expect(edgeStore.has('http://localhost/mainnet/registry/none.eth/image')).toBe(true);
     expect(getAvatar).toHaveBeenCalledTimes(1);
   });
 
@@ -189,7 +183,7 @@ describe('NFT card routes', () => {
     expect(res.headers.get('Content-Type')).toBe('image/png');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=60');
     expect(cardWrites()).toEqual({ kv: 0, r2: 0 });
-    expect(edgeStore.get(versionedUrl('http://localhost/mainnet/registry/down.eth/rasterize'))?.headers.get('Cache-Control')).toBe('public, max-age=60');
+    expect(edgeStore.get('http://localhost/mainnet/registry/down.eth/rasterize')?.headers.get('Cache-Control')).toBe('public, max-age=60');
   });
 
   it('/image: during an outage the degraded card is served from the edge, so the failing upstream is not asked again', async () => {
