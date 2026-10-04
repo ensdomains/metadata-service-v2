@@ -785,48 +785,57 @@ export class AvatarService {
       // service's own hostnames); a blocked URL throws and degrades to "none".
       const left = remainingRequestTime();
       const mediaTimeoutMs = Number.isFinite(left) ? Math.min(7000, left) : 7000;
-      const inBudget = Number.isFinite(left);
-      const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
-        signal: AbortSignal.timeout(mediaTimeoutMs),
-        headers: {
-          'user-agent': 'ENS-Metadata-V2/1.0.0',
-        },
-      }, undefined, () => timeLeftForAttempt(`${kind} fetch for ${name}`)).catch((err) => {
-        if (inBudget && err instanceof DOMException && err.name === 'TimeoutError') {
+      // The deadline, not the media cap, shortened the timeout.
+      const deadlineDriven = Number.isFinite(left) && left < 7000;
+
+      // Wrap the full fetch + body-consumption so a request-deadline abort
+      // during body streaming surfaces RequestDeadlineError, not a generic
+      // UpstreamError wrapping a raw TimeoutError.
+      const result = await (async (): Promise<AvatarImage | null> => {
+        const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
+          signal: AbortSignal.timeout(mediaTimeoutMs),
+          headers: {
+            'user-agent': 'ENS-Metadata-V2/1.0.0',
+          },
+        }, undefined, () => timeLeftForAttempt(`${kind} fetch for ${name}`));
+
+        if (!response.ok) {
+          console.warn(`Failed to fetch ${kind} for ${name}: ${response.status}`);
+          // A failing or throttling host (5xx, 429) may serve the image later;
+          // any other status (404, 410, 403, ...) is the record's problem.
+          if (isOutageStatus(response.status)) {
+            throw new UpstreamError(`${kind} host answered ${response.status} for ${name}`);
+          }
+          return null;
+        }
+
+        // Cap the size: a user-controlled URL could serve an arbitrarily large body
+        // (memory/DoS, and an avatar gets base64-embedded into the SVG). Reject early
+        // on a declared oversize, then bound the actual bytes.
+        const declared = Number(response.headers.get('Content-Length') ?? '');
+        if (Number.isFinite(declared) && declared > this.maxAvatarBytes) {
+          console.warn(`${kind} for ${name} too large (Content-Length ${declared})`);
+          return null;
+        }
+
+        const arrayBuffer = await readBodyCapped(response, this.maxAvatarBytes);
+        if (!arrayBuffer) {
+          console.warn(`${kind} for ${name} too large (over ${this.maxAvatarBytes} bytes)`);
+          return null;
+        }
+        const safe = toSafeImage(Buffer.from(arrayBuffer));
+        if (!safe) {
+          console.warn(`Rejected ${kind} for ${name}: not an allowlisted image`);
+        }
+        return safe;
+      })().catch((err) => {
+        if (deadlineDriven && err instanceof DOMException && err.name === 'TimeoutError') {
           throw new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`);
         }
         throw err;
       });
 
-      if (!response.ok) {
-        console.warn(`Failed to fetch ${kind} for ${name}: ${response.status}`);
-        // A failing or throttling host (5xx, 429) may serve the image later;
-        // any other status (404, 410, 403, ...) is the record's problem.
-        if (isOutageStatus(response.status)) {
-          throw new UpstreamError(`${kind} host answered ${response.status} for ${name}`);
-        }
-        return null;
-      }
-
-      // Cap the size: a user-controlled URL could serve an arbitrarily large body
-      // (memory/DoS, and an avatar gets base64-embedded into the SVG). Reject early
-      // on a declared oversize, then bound the actual bytes.
-      const declared = Number(response.headers.get('Content-Length') ?? '');
-      if (Number.isFinite(declared) && declared > this.maxAvatarBytes) {
-        console.warn(`${kind} for ${name} too large (Content-Length ${declared})`);
-        return null;
-      }
-
-      const arrayBuffer = await readBodyCapped(response, this.maxAvatarBytes);
-      if (!arrayBuffer) {
-        console.warn(`${kind} for ${name} too large (over ${this.maxAvatarBytes} bytes)`);
-        return null;
-      }
-      const safe = toSafeImage(Buffer.from(arrayBuffer));
-      if (!safe) {
-        console.warn(`Rejected ${kind} for ${name}: not an allowlisted image`);
-      }
-      return safe;
+      return result;
     }
 
     console.warn(`Unsupported ${kind} URI format for ${name}: ${uri}`);
