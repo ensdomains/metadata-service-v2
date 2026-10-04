@@ -190,7 +190,10 @@ export class WebhookService {
       if (!Number.isFinite(ts)) {
         return { valid: false, error: 'Invalid webhook timestamp', status: 401 };
       }
-      const tolerance = this.config.toleranceSecs ?? DEFAULT_TOLERANCE_SECS;
+      const configuredTolerance = this.config.toleranceSecs;
+      const tolerance = typeof configuredTolerance === "number" && Number.isFinite(configuredTolerance)
+        ? configuredTolerance
+        : DEFAULT_TOLERANCE_SECS;
       const nowSecs = Math.floor(Date.now() / 1000);
       if (Math.abs(nowSecs - ts) > tolerance) {
         return { valid: false, error: 'Webhook timestamp outside tolerance window', status: 401 };

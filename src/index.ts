@@ -299,6 +299,12 @@ function getServices(env: Env, network: NetworkName): FullServices {
 
   const storageManager = new StorageManager(env.ASSET_BUCKET);
 
+  const parsedWebhookTolerance = env.WEBHOOK_TOLERANCE_SECS
+    ? parseInt(env.WEBHOOK_TOLERANCE_SECS, 10)
+    : undefined;
+  const webhookToleranceSecs = Number.isFinite(parsedWebhookTolerance)
+    ? parsedWebhookTolerance
+    : undefined;
   const webhookService = new WebhookService(
     cacheService,
     {
@@ -306,7 +312,7 @@ function getServices(env: Env, network: NetworkName): FullServices {
       secret: env.WEBHOOK_SECRET,
       // Fail-closed by default: no secret ⇒ reject. Opt out only for local dev.
       allowUnauthenticated: env.WEBHOOK_ALLOW_UNAUTHENTICATED === 'true',
-      toleranceSecs: env.WEBHOOK_TOLERANCE_SECS ? parseInt(env.WEBHOOK_TOLERANCE_SECS, 10) : undefined,
+      toleranceSecs: webhookToleranceSecs,
     },
     env.SVG_CACHE,
     storageManager,
