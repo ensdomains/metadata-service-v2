@@ -228,11 +228,12 @@ function getIndexerV2Url(env: Env, network: NetworkName): string {
 function envSecsToMs(name: string, value: string | undefined, minSecs = 1): number | undefined {
   if (value === undefined || value.trim() === '') return undefined;
   const secs = /^\s*\d+\s*$/.test(value) ? Number(value) : NaN;
-  if (!(secs >= minSecs)) {
+  const milliseconds = secs * 1000;
+  if (!(secs >= minSecs) || !Number.isFinite(milliseconds)) {
     console.warn(`[config] ignoring ${name}=${JSON.stringify(value)}: expected whole seconds, at least ${minSecs}`);
     return undefined;
   }
-  return secs * 1000;
+  return milliseconds;
 }
 
 // A retention below a day is taken for a unit slip (seconds meant as days):
