@@ -120,7 +120,7 @@ export class ImageCacheService {
         console.log(`[image-cache] L2 HIT ${name} (${Date.now() - start}ms) → backfilling L1`);
         // Backfill L1 in background, capping KV lifetime to remaining R2 TTL
         executionCtx.waitUntil(
-          this.writeKv(cacheKey, r2Result.svg, '', params.migrationStatus, ttlConfig, r2Result.ageSeconds).catch((err) =>
+          this.writeKv(cacheKey, r2Result.svg, '', params.migrationStatus, ttlConfig, r2Result.uploadedAtMs).catch((err) =>
             console.error(`[image-cache] KV backfill failed for ${cacheKey}:`, err),
           ),
         );
@@ -275,45 +275,52 @@ export class ImageCacheService {
   }
 
   // Write SVG to KV.
-  // When r2AgeSeconds is provided, the data is being backfilled from an R2
-  // object of that age.  The KV entry's createdAt is back-dated so L1 age
-  // checks reflect the true data age, and softTtl / expirationTtl are capped
-  // to the remaining R2 lifetime.  Backfill is skipped entirely when the
-  // remaining lifetime is below Cloudflare KV's 60 s minimum expirationTtl.
+  // When uploadedAtMs is provided (R2 backfill), the KV entry uses an
+  // absolute `expiration` deadline at uploadedAtMs + r2MaxAge, immune to
+  // clock drift between the R2 read and this write.  createdAt is set to
+  // the authoritative upload time.  softTtl is capped to the remaining
+  // lifetime.  Backfill is skipped when remaining < 60 s (Cloudflare KV
+  // minimum).  Fresh L3 origin writes omit uploadedAtMs and use relative
+  // expirationTtl as before.
   private async writeKv(
     cacheKey: string,
     svg: string,
     avatarHash: string,
     migrationStatus: string,
     ttlConfig: TtlConfig,
-    r2AgeSeconds?: number,
+    uploadedAtMs?: number,
   ): Promise<void> {
-    let softTtl = ttlConfig.softTtl;
-    let hardTtl = ttlConfig.hardTtl;
-    let createdAt = Date.now();
-
-    if (r2AgeSeconds !== undefined && r2AgeSeconds >= 0) {
-      const remaining = Math.max(0, ttlConfig.r2MaxAge - r2AgeSeconds);
-      // Cloudflare KV minimum expirationTtl is 60 s.  If the remaining
-      // lifetime is below that floor, skip backfill rather than silently
-      // extending the lifetime through the floor.
+    if (uploadedAtMs !== undefined) {
+      // R2 backfill: compute remaining lifetime from the authoritative
+      // upload timestamp right now, not a stale pre-await sample.
+      const ageSeconds = (Date.now() - uploadedAtMs) / 1000;
+      const remaining = Math.max(0, ttlConfig.r2MaxAge - ageSeconds);
       if (remaining < 60) return;
-      softTtl = Math.max(1, Math.min(ttlConfig.softTtl, remaining));
-      hardTtl = Math.min(ttlConfig.hardTtl, remaining);
-      // Back-date createdAt so L1 age checks reflect the true data age
-      // rather than resetting it to zero.
-      createdAt = Date.now() - r2AgeSeconds * 1000;
+
+      const entry: SvgCacheEntry = {
+        svg,
+        createdAt: uploadedAtMs,
+        softTtl: Math.max(1, Math.floor(Math.min(ttlConfig.softTtl, remaining))),
+        avatarHash,
+        migrationStatus,
+      };
+      // Absolute expiration — immune to body-latency clock drift.
+      await this.svgCacheKv.put(cacheKey, JSON.stringify(entry), {
+        expiration: Math.floor(uploadedAtMs / 1000) + ttlConfig.r2MaxAge,
+      });
+      return;
     }
 
+    // Fresh L3 origin: use relative TTLs as before.
     const entry: SvgCacheEntry = {
       svg,
-      createdAt,
-      softTtl,
+      createdAt: Date.now(),
+      softTtl: ttlConfig.softTtl,
       avatarHash,
       migrationStatus,
     };
     await this.svgCacheKv.put(cacheKey, JSON.stringify(entry), {
-      expirationTtl: hardTtl,
+      expirationTtl: ttlConfig.hardTtl,
     });
   }
 
