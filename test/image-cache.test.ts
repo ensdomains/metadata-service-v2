@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { ImageCacheService } from '../src/services/image-cache';
 import { StorageManager } from '../src/utils/storage';
 import { ImageGenerationService } from '../src/services/image';
@@ -401,39 +401,178 @@ describe('ImageCacheService', () => {
   });
 
   describe('W8-CACHE-004: R2 TTL enforcement on binding reads', () => {
-    it('should treat an R2 object older than r2MaxAge as a miss and fall through to L3 origin', async () => {
-      // KV miss — L1 empty
-      (svgCacheKv.get as Mock).mockResolvedValue(null);
+    // Freeze Date.now() so boundary tests are deterministic across the mock
+    // setup (uploaded timestamp) and the product code (age calculation).
+    // Without this, a single-millisecond clock advance can push age just
+    // past the boundary and hide the > vs >= bug.
+    let fixedNow: number;
 
-      // R2 has a stale object: uploaded 3,600,001 ms ago (past the unmigrated
-      // r2MaxAge of 3600 s). On the baseline, getSvgByKey does not check the
-      // uploaded timestamp and returns the bytes anyway — this is W8-CACHE-004.
-      const staleUploaded = new Date(Date.now() - 3_600_001);
-      vi.mocked(r2Bucket.get).mockResolvedValue({
-        text: vi.fn().mockResolvedValue('<svg>Expired R2 SVG</svg>'),
+    function r2Object(text: string, ageMs: number): R2ObjectBody {
+      return {
+        text: vi.fn().mockResolvedValue(text),
         arrayBuffer: vi.fn(),
         body: null,
         bodyUsed: false,
         blob: vi.fn(),
         json: vi.fn(),
-        uploaded: staleUploaded,
-      } as unknown as R2ObjectBody);
+        uploaded: new Date(fixedNow - ageMs),
+      } as unknown as R2ObjectBody;
+    }
 
-      const result = await imageCacheService.getImage('ttl.eth', defaultOptions, executionCtx);
+    beforeEach(() => {
+      fixedNow = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    });
 
-      // After the fix: must fall through to L3 origin, not return stale R2 bytes.
-      // On the baseline (before the fix): cacheStatus is 'stale' and svg is the
-      // expired R2 content — this test FAILS, which is the TDD red step.
-      expect(result.cacheStatus).toBe('miss');
-      expect(result.svg).not.toBe('<svg>Expired R2 SVG</svg>');
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
 
-      // The expired R2 bytes must never be backfilled into KV
-      await Promise.all(waitUntilPromises);
-      const putCalls = (svgCacheKv.put as Mock).mock.calls;
-      for (const call of putCalls) {
-        const putValue = typeof call[1] === 'string' ? call[1] : '';
-        expect(putValue).not.toContain('Expired R2 SVG');
-      }
+    // ── unmigrated (r2MaxAge 3600 s) ──────────────────────────────────
+
+    describe('unmigrated (r2MaxAge 3600 s)', () => {
+      it('serves an R2 object 1 ms before r2MaxAge from L2 (age < maxAge)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Fresh R2</svg>', 3600 * 1000 - 1));
+
+        const result = await imageCacheService.getImage('fresh.eth', defaultOptions, executionCtx);
+
+        // Within TTL window — must serve from L2, backfill KV
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Fresh R2</svg>');
+      });
+
+      it('rejects an R2 object at exactly r2MaxAge and falls through to L3 (age == maxAge, RFC 9111 stale)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Exact-Boundary R2</svg>', 3600 * 1000));
+
+        const result = await imageCacheService.getImage('exact.eth', defaultOptions, executionCtx);
+
+        // RFC 9111: Age == max-age is stale — must fall through to L3
+        // BUG (> vs >=): the current > operator serves this object. This
+        // assertion is the RED phase of the TDD correction.
+        expect(result.cacheStatus).toBe('miss');
+        expect(result.svg).not.toBe('<svg>Exact-Boundary R2</svg>');
+
+        // No KV backfill of stale bytes
+        await Promise.all(waitUntilPromises);
+        for (const call of (svgCacheKv.put as Mock).mock.calls) {
+          expect(typeof call[1] === 'string' ? call[1] : '').not.toContain('Exact-Boundary R2');
+        }
+      });
+
+      it('rejects an R2 object 1 ms past r2MaxAge and falls through to L3 (age > maxAge)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Expired R2</svg>', 3600 * 1000 + 1));
+
+        const result = await imageCacheService.getImage('ttl.eth', defaultOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('miss');
+        expect(result.svg).not.toBe('<svg>Expired R2</svg>');
+
+        await Promise.all(waitUntilPromises);
+        for (const call of (svgCacheKv.put as Mock).mock.calls) {
+          expect(typeof call[1] === 'string' ? call[1] : '').not.toContain('Expired R2');
+        }
+      });
+    });
+
+    // ── migrated (r2MaxAge 86400 s) ───────────────────────────────────
+
+    describe('migrated (r2MaxAge 86400 s)', () => {
+      const migratedOptions = { name: 'mig.eth', migrationStatus: 'migrated' as const };
+
+      it('serves an R2 object 1 ms before r2MaxAge from L2 (age < maxAge)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Mig Fresh R2</svg>', 86400 * 1000 - 1));
+
+        const result = await imageCacheService.getImage('mig.eth', migratedOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('stale');
+        expect(result.svg).toBe('<svg>Mig Fresh R2</svg>');
+      });
+
+      it('rejects an R2 object at exactly r2MaxAge and falls through to L3 (age == maxAge, RFC 9111 stale)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Mig Exact-Boundary R2</svg>', 86400 * 1000));
+
+        const result = await imageCacheService.getImage('mig.eth', migratedOptions, executionCtx);
+
+        // BUG (> vs >=): this fails with the current operator
+        expect(result.cacheStatus).toBe('miss');
+        expect(result.svg).not.toBe('<svg>Mig Exact-Boundary R2</svg>');
+
+        await Promise.all(waitUntilPromises);
+        for (const call of (svgCacheKv.put as Mock).mock.calls) {
+          expect(typeof call[1] === 'string' ? call[1] : '').not.toContain('Mig Exact-Boundary R2');
+        }
+      });
+
+      it('rejects an R2 object 1 ms past r2MaxAge and falls through to L3 (age > maxAge)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Mig Expired R2</svg>', 86400 * 1000 + 1));
+
+        const result = await imageCacheService.getImage('mig.eth', migratedOptions, executionCtx);
+
+        expect(result.cacheStatus).toBe('miss');
+        expect(result.svg).not.toBe('<svg>Mig Expired R2</svg>');
+
+        await Promise.all(waitUntilPromises);
+        for (const call of (svgCacheKv.put as Mock).mock.calls) {
+          expect(typeof call[1] === 'string' ? call[1] : '').not.toContain('Mig Expired R2');
+        }
+      });
+    });
+
+    // ── native (r2MaxAge 86400 s) — same TTL as migrated, separate config path ─
+
+    describe('native (r2MaxAge 86400 s)', () => {
+      const nativeOptions = { name: 'nat.eth', migrationStatus: 'native' as const };
+
+      it('rejects an R2 object at exactly r2MaxAge and falls through to L3 (age == maxAge, RFC 9111 stale)', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Nat Exact-Boundary R2</svg>', 86400 * 1000));
+
+        const result = await imageCacheService.getImage('nat.eth', nativeOptions, executionCtx);
+
+        // BUG (> vs >=): this fails with the current operator
+        expect(result.cacheStatus).toBe('miss');
+        expect(result.svg).not.toBe('<svg>Nat Exact-Boundary R2</svg>');
+
+        await Promise.all(waitUntilPromises);
+        for (const call of (svgCacheKv.put as Mock).mock.calls) {
+          expect(typeof call[1] === 'string' ? call[1] : '').not.toContain('Nat Exact-Boundary R2');
+        }
+      });
+    });
+
+    // ── r2MaxAge 0 (degenerate boundary) ─────────────────────────────
+
+    describe('r2MaxAge 0 (degenerate boundary)', () => {
+      it('rejects an R2 object uploaded at this instant when maxAgeSeconds is 0 (age 0 >= 0)', async () => {
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Zero-Age R2</svg>', 0));
+
+        // BUG (> vs >=): age 0 > 0 is false, so the current operator
+        // serves this object. >= rejects it correctly.
+        const svg = await storage.getSvgByKey('zero-test', 0);
+
+        expect(svg).toBeNull();
+      });
+    });
+
+    // ── undefined maxAgeSeconds (backward compatibility) ──────────────
+
+    describe('undefined maxAgeSeconds (backward compatibility)', () => {
+      it('serves an R2 object regardless of age when maxAgeSeconds is not passed', async () => {
+        // Object uploaded 10 000 s ago — far past any configured TTL
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Ancient R2</svg>', 10_000_000));
+
+        const svg = await storage.getSvgByKey('ancient-test');
+
+        // Undefined maxAgeSeconds means unbounded — serve regardless of age.
+        // This is the default path for callers that do not enforce TTL.
+        expect(svg).toBe('<svg>Ancient R2</svg>');
+      });
     });
   });
 });
