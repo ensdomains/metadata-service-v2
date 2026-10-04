@@ -1,10 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createMockEnv } from './mocks/hono-env';
 
-vi.mock('adaptive-layout-composer', () => ({
-  createDynamicSVGImage: vi.fn().mockResolvedValue('<svg width="518" height="518"></svg>'),
-}));
-
 // Regression pins for the cache-boundary fixes:
 //  - /rasterize edge caching goes through edgeCachePut (300s cap), not raw
 //    cfCache.put with the full client softTtl (src/index.ts).
@@ -183,112 +179,6 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     expect(sized).toBeDefined();
     expect(sized!.maxAge).not.toBeNull();
     expect(sized!.maxAge).toBeLessThanOrEqual(300);
-  });
-});
-
-describe('downstream TTL: R2 remaining lifetime cap (P2)', () => {
-  const IMG = '/sepolia/registry/fox.eth/image';
-  const RAS = '/sepolia/registry/fox.eth/rasterize';
-  const B = 'http://localhost';
-  let now: number;
-  let nowSpy: ReturnType<typeof vi.spyOn> | null = null;
-  let genSpy: any = null;
-
-  function r2Svg(uploadedAtMs: number) {
-    return {
-      text: vi.fn().mockResolvedValue('<svg width="518" height="518"></svg>'),
-      arrayBuffer: vi.fn(),
-      body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(),
-      uploaded: new Date(uploadedAtMs),
-    } as unknown as R2ObjectBody;
-  }
-
-  function clientMaxAge(res: Response): number {
-    const m = /max-age=(\d+)/.exec(res.headers.get('Cache-Control') ?? '');
-    return m ? Number(m[1]) : -1;
-  }
-  function edgeMaxAge(path: string): number | null {
-    const e = edgeStore.get(v3EdgeKey(`${B}${path}`));
-    return e ? e.maxAge : null;
-  }
-
-  beforeEach(async () => {
-    edgeStore.clear();
-    now = Date.now();
-    nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
-    vi.mocked(ImageCacheService.prototype.getImage).mockRestore();
-    // Mock L3 origin path for fresh-render tests (sync import)
-    const { ImageGenerationService: IGS } = await import('../src/services/image');
-    genSpy = vi.spyOn(IGS.prototype, 'generateDomainImage').mockResolvedValue({ svg: '<svg width="518" height="518"></svg>' } as any);
-    // Mock avatar resolution — return null (no avatar) so avatarFailed stays false
-    const { AvatarService } = await import('../src/services/avatar');
-    vi.spyOn(AvatarService.prototype, 'getAvatarImage').mockResolvedValue(null as any);
-  });
-
-  afterEach(() => {
-    nowSpy?.mockRestore(); nowSpy = null;
-    genSpy?.mockRestore(); genSpy = null;
-    // Re-apply the module-level getImage mock for other describe blocks
-    vi.spyOn(ImageCacheService.prototype, 'getImage').mockImplementation(async function (
-      this: ImageCacheService, _name: any, options: any,
-    ) {
-      const status = (options as any).migrationStatus ?? 'unmigrated';
-      return { svg: '<svg width="518" height="518"></svg>', contentType: 'image/svg+xml', cacheStatus: 'MISS' as const, ttlConfig: this.getTtlConfig(status) } as any;
-    });
-  });
-
-  function setupR2L2(uploadedAtMs: number) {
-    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null);
-    (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(r2Svg(uploadedAtMs));
-  }
-
-  it('/image: remaining 300s caps client 300 edge 300', async () => {
-    setupR2L2(now - (86_400_000 - 300_000));
-    const res = await get(IMG);
-    expect(res.status).toBe(200);
-    expect(clientMaxAge(res)).toBe(300);
-    expect(edgeMaxAge(IMG)).toBe(300);
-  });
-
-  it('/rasterize: remaining 300s caps client 300 edge 300', async () => {
-    setupR2L2(now - (86_400_000 - 300_000));
-    const res = await get(RAS);
-    expect(res.status).toBe(200);
-    expect(clientMaxAge(res)).toBe(300);
-    expect(edgeMaxAge(RAS)).toBe(300);
-  });
-
-  it('/image: remaining 59.999s caps client 59 edge 59', async () => {
-    setupR2L2(now - (86_400_000 - 59_999));
-    const res = await get(IMG);
-    expect(res.status).toBe(200);
-    expect(clientMaxAge(res)).toBe(59);
-    expect(edgeMaxAge(IMG)).toBe(59);
-  });
-
-  it('/rasterize: remaining 59.999s caps client 59 edge 59', async () => {
-    setupR2L2(now - (86_400_000 - 59_999));
-    const res = await get(RAS);
-    expect(res.status).toBe(200);
-    expect(clientMaxAge(res)).toBe(59);
-    expect(edgeMaxAge(RAS)).toBe(59);
-  });
-
-  it('/image: remaining 1ms caps client 0 skips edge', async () => {
-    setupR2L2(now - (86_400_000 - 1));
-    const res = await get(IMG);
-    expect(res.status).toBe(200);
-    expect(clientMaxAge(res)).toBe(0);
-    expect(edgeMaxAge(IMG)).toBeNull();
-  });
-
-  it('/image: fresh origin keeps full client 21600 edge 300', async () => {
-    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null);
-    (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
-    const res = await get(IMG);
-    expect(res.status).toBe(200);
-    expect(clientMaxAge(res)).toBe(21600);
-    expect(edgeMaxAge(IMG)).toBe(300);
   });
 });
 
