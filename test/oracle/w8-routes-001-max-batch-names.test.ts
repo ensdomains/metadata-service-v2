@@ -81,38 +81,41 @@ describe('W8-ROUTES-001 invalid MAX_BATCH_NAMES uses the default batch cap', () 
   });
 });
 
-describe('W8-ROUTES-001 practical maximum cap prevents oversized requests', () => {
-  it('accepts 1000 as the practical maximum cap', async () => {
-    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '1000' });
+describe('W8-ROUTES-001 practical maximum of 100 prevents oversized requests', () => {
+  it('accepts a batch under the maximum of 100', async () => {
+    const res = await batch({ names: names(80) }, { MAX_BATCH_NAMES: '100' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ total: 101 });
+    expect(await res.json()).toMatchObject({ total: 80 });
   });
 
-  it('falls back to default 100 when value exceeds the practical maximum of 1000', async () => {
-    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '1001' });
+  it('enforces the maximum of 100 when the configured cap is exactly 100', async () => {
+    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '100' });
     expect(res.status).toBe(400);
     expect((await res.json() as { error: string }).error).toBe(
       'Cannot process more than 100 names at once',
     );
   });
 
-  it('falls back to default 100 for a huge digit-only value that exceeds the maximum', async () => {
-    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '999999' });
+  it('falls back to default 100 when the configured value is literally max+1', async () => {
+    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '101' });
     expect(res.status).toBe(400);
     expect((await res.json() as { error: string }).error).toBe(
       'Cannot process more than 100 names at once',
     );
   });
 
-  it('enforces the practical maximum of 1000 as an actual cap', async () => {
-    const res = await batch({ names: names(1050) }, { MAX_BATCH_NAMES: '1000' });
+  it('falls back to default 100 for a digit-only value comfortably inside the old bound', async () => {
+    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '500' });
     expect(res.status).toBe(400);
     expect((await res.json() as { error: string }).error).toBe(
-      'Cannot process more than 1000 names at once',
+      'Cannot process more than 100 names at once',
     );
   });
 
-  it('still enforces a low positive integer cap below the maximum', async () => {
+  it('catches off-by-one >=100-mutation: low valid cap is still enforced', async () => {
+    // 50 is a valid positive-integer cap. Under a >=100 mutation,
+    // 50 < 100 falls back to default → 51 names accepted as 200.
+    // Asserting 400 "Cannot process more than 50" catches the mutation.
     const res = await batch({ names: names(51) }, { MAX_BATCH_NAMES: '50' });
     expect(res.status).toBe(400);
     expect((await res.json() as { error: string }).error).toBe(
