@@ -10,7 +10,12 @@ import { D1_RETENTION_MS } from '../../src/services/d1';
 // invalid, so cleanup must use the documented 30-day cutoff.
 
 const nodeRequire = createRequire(import.meta.url);
-const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
+let DatabaseSync: typeof import('node:sqlite').DatabaseSync | null = null;
+try {
+  ({ DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite'));
+} catch {
+  console.warn('[w8-config-002-d1-retention-infinity.test] node:sqlite unavailable on this Node — skipping real-SQL D1 suite');
+}
 
 const SCHEMA = readFileSync(
   fileURLToPath(new URL('../../migrations/002_network_scoping.sql', import.meta.url)),
@@ -62,12 +67,12 @@ function makeD1(db: import('node:sqlite').DatabaseSync) {
   };
 }
 
-describe('W8-CONFIG-002 scheduled retention', () => {
+describe.skipIf(!DatabaseSync)('W8-CONFIG-002 scheduled retention', () => {
   it('treats a non-finite D1_RETENTION_SECS as invalid and uses the 30-day default cutoff', async () => {
     expect(INFINITE_RETENTION_SECS).toMatch(/^1(?:0){309}$/);
     expect(Number(INFINITE_RETENTION_SECS)).toBe(Number.POSITIVE_INFINITY);
 
-    const db = new DatabaseSync(':memory:');
+    const db = new DatabaseSync!(':memory:');
     db.exec(SCHEMA);
     const oldAt = Date.now() - D1_RETENTION_MS - DAY;
     const freshAt = Date.now() - DAY;

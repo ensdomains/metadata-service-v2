@@ -36,6 +36,13 @@ try {
   console.warn('[d1-write-path-retention.test] node:sqlite unavailable on this Node — skipping real-SQL D1 suites');
 }
 const hasSqlite = DatabaseSyncImpl !== null;
+
+// Exact operational boundary and gap values for envSecsToMs guard regressions.
+const MAX_ENV_SECS = 10 * 365 * 24 * 60 * 60; // 315,360,000
+const MAX_PLUS_ONE  = MAX_ENV_SECS + 1;        // 315,360,001
+// MAX_SAFE_INTEGER / 1000 ≈ 9,007,199,254.741; floor is 9,007,199,254,741.
+const SAFE_SECS_UNSAFE_MS = 9_007_199_254_741;
+
 type SqliteDb = InstanceType<NonNullable<typeof DatabaseSyncImpl>>;
 
 // The real schema, straight from the latest migration.
@@ -581,6 +588,49 @@ describe.skipIf(!hasSqlite)('D1 reads treat rows older than the read max age as 
 
     expect(await run({})).toBe(false);
     expect(await run({ D1_READ_MAX_AGE_SECS: '600' })).toBe(true);
+  });
+
+  // ---- envSecsToMs guard-gap regressions on the D1 read path ---------------
+
+  // Discrimination via console.warn: when the guard rejects the env value it
+  // logs "[config] ignoring D1_READ_MAX_AGE_SECS=…". The max value is accepted
+  // (no warn); max+1, unsafe-int, and safe-secs/unsafe-ms are rejected (warn).
+  // The app.request exercises the real MetadataService → D1Service path.
+  const warnOnRead = async (env: Record<string, unknown>) => {
+    const sqlite = openSqlite();
+    seedDomain(sqlite, 'sepolia', 'sub.fox.eth', Date.now() - 30 * 60 * 1000);
+    stubIndexer();
+    const warn = vi.fn();
+    vi.stubGlobal('console', { ...console, warn });
+    try {
+      const app = await loadApp();
+      const { ctx, drain } = makeCtx();
+      const res = await app.request(
+        '/sepolia/registry/sub.fox.eth', undefined,
+        makeEnv({ DB: makeSqliteD1(sqlite).d1, ...env }), ctx as unknown as ExecutionContext,
+      );
+      expect(res.status).toBe(200);
+      await drain();
+      return warn.mock.calls.some((c: unknown[]) => String(c[0]).includes('ignoring D1_READ_MAX_AGE_SECS'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it('accepts the exact operational maximum for D1 read freshness (no config warn)', async () => {
+    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: String(MAX_ENV_SECS) })).toBe(false);
+  });
+
+  it('rejects max+1 for D1 read freshness (config warn emitted)', async () => {
+    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: String(MAX_PLUS_ONE) })).toBe(true);
+  });
+
+  it('rejects an unsafe-integer digit string for D1 read freshness (config warn emitted)', async () => {
+    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: '9'.repeat(16) })).toBe(true);
+  });
+
+  it('rejects safe seconds whose millisecond product is unsafe for D1 read freshness (config warn emitted)', async () => {
+    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: String(SAFE_SECS_UNSAFE_MS) })).toBe(true);
   });
 });
 
