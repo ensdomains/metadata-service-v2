@@ -835,17 +835,27 @@ export class AvatarService {
 
       if (!deadlineDriven) return await work;
 
+      // Already-aborted signal: produce RequestDeadlineError immediately
+      // without registering a listener that would never fire.
+      if (signal.aborted) {
+        work.catch(() => {});
+        throw new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`);
+      }
+
       // Race: the signal-abort event itself produces RequestDeadlineError.
       // No error-identity check — whichever settles first controls.
+      let abortHandler: (() => void) | undefined;
       const abortPromise = new Promise<never>((_, reject) => {
-        signal.addEventListener('abort', () => {
+        abortHandler = () => {
           reject(new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`));
-        }, { once: true });
+        };
+        signal.addEventListener('abort', abortHandler, { once: true });
       });
       try {
         return await Promise.race([work, abortPromise]);
       } finally {
-        work.catch(() => {}); // suppress late rejection after race settled
+        if (abortHandler) signal.removeEventListener('abort', abortHandler);
+        work.catch(() => {});
       }
     }
 
