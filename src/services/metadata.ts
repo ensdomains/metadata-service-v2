@@ -339,6 +339,10 @@ export class MetadataService {
     const verdictKey = expiryVerdictKey(canonical);
     if (this.expiryVerdicts.isLive(verdictKey)) return;
 
+    // Capture the generation before any chain read so a store that completes
+    // after an intervening eviction is discarded (W8-EXPIRY-001).
+    const token = this.expiryVerdicts.readGeneration();
+
     // The fail-open returns below cache nothing; settleExpiry caches a live verdict.
     if (this.blockchain.isV2Configured(this.network)) {
       let v2: { status: number; expiry: bigint } | null;
@@ -349,7 +353,7 @@ export class MetadataService {
         return;
       }
       if (v2 && v2.status === 2) {
-        this.settleExpiry(canonical, verdictKey, v2.expiry);
+        this.settleExpiry(canonical, verdictKey, v2.expiry, token);
         return; // live on v2 — ignore any lapsed v1 registration
       }
     }
@@ -363,18 +367,19 @@ export class MetadataService {
       console.warn(`Failed to check expiry for ${canonical}:`, error);
       return;
     }
-    this.settleExpiry(canonical, verdictKey, expiry);
+    this.settleExpiry(canonical, verdictKey, expiry, token);
   }
 
   // Throws DomainExpiredError (→ 410) if an expiry read from the chain (unix
   // seconds; 0 when there is none) has passed, and caches the live verdict
-  // otherwise.
-  private settleExpiry(canonical: string, verdictKey: string, expiry: bigint): void {
+  // otherwise. The `token` is the generation captured before the chain read;
+  // a store after an intervening eviction is silently dropped.
+  private settleExpiry(canonical: string, verdictKey: string, expiry: bigint, token: number): void {
     const expiryMs = Number(expiry) * 1000;
     if (expiry && expiryMs < Date.now()) {
       throw new DomainExpiredError(canonical, new Date(expiryMs));
     }
-    this.expiryVerdicts.setLive(verdictKey, expiry ? expiryMs : null);
+    this.expiryVerdicts.setLive(verdictKey, expiry ? expiryMs : null, token);
   }
 
   /** Drops this isolate's cached expiry verdict for a changed name, given by

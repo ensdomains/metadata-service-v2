@@ -48,6 +48,10 @@ export class ExpiryVerdictCache {
   // follows insertion order, so re-inserting on every hit keeps the least
   // recently used entry first.
   private entries = new Map<string, number>();
+  // Monotonically increasing generation, incremented on every eviction so an
+  // in-flight chain read that started before eviction cannot store its verdict
+  // afterward and satisfy the next request (W8-EXPIRY-001).
+  private generation = 0;
 
   constructor(
     private readonly ttlMs = EXPIRY_VERDICT_TTL_MS,
@@ -64,9 +68,17 @@ export class ExpiryVerdictCache {
     return true;
   }
 
+  /** Returns the current generation for an in-flight read to carry. */
+  readGeneration(): number {
+    return this.generation;
+  }
+
   /** Stores a live verdict read from the chain; `expiryMs` is the name's
-   *  expiry instant, or null when the chain reported none. */
-  setLive(key: string, expiryMs: number | null): void {
+   *  expiry instant, or null when the chain reported none. When `token` is
+   *  provided the store is a no-op unless it still equals the current
+   *  generation (an eviction between read-start and settle skips the store). */
+  setLive(key: string, expiryMs: number | null, token?: number): void {
+    if (token !== undefined && token !== this.generation) return;
     const now = Date.now();
     const lifetime = expiryMs === null ? this.ttlMs : Math.min(this.ttlMs, expiryMs - now);
     this.entries.delete(key);
@@ -78,6 +90,7 @@ export class ExpiryVerdictCache {
   }
 
   delete(key: string): void {
+    this.generation++;
     this.entries.delete(key);
   }
 
