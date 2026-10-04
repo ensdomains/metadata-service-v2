@@ -76,3 +76,32 @@ works correctly when the PK includes `root_domain_id`).
 - [ ] T002 [P] [AC2] Create `migrations/003_hierarchy_root_scoping.sql` with `PRIMARY KEY (network, id, root_domain_id)`, rerun the regression test to confirm it passes
 - [ ] T003 [AC3] Run `pnpm run test` to confirm full gate passes
 - [ ] T004 [AC4,AC5] Verify diff scope and branch provenance
+
+---
+
+## Completion note (post-implementation, 4 external-review rounds)
+
+The original plan assumed no application-code changes would be needed. External
+review across 4 rounds identified additional work, all within W8-D1-001 scope:
+
+### Actual change set (6 files, +681/−12 from BASE 5a5527c)
+
+| File | Purpose |
+|---|---|
+| `WORKHORSE-SPEC.md` | This spec (planning intent) |
+| `migrations/003_hierarchy_root_scoping.sql` | PK `(network, id, root_domain_id)` + composite index `idx_hierarchy_root_level (network, root_domain_id, level)` |
+| `src/services/d1.ts` | `getHierarchyCount()` with freshness filtering; per-root `sync_version` subquery |
+| `src/services/metadata.ts` | `executionCtx` param on `getRegistryHierarchy`; post-try-catch recovery on both success and failure paths |
+| `src/index.ts` | Pass `c.executionCtx` from hierarchy route |
+| `test/d1-hierarchy-isolation.test.ts` | 18 tests: isolation, EXPLAIN QUERY PLAN, freshness count, cross-network, recovery on both paths, sync_version per-root, boundary parity, causal containment, rejection absorption, deferred persistence |
+
+### Rounds
+
+- **Round 1** (a5e5981→b3deba6): PK fix + regression test
+- **Round 2** (ad9f5bb→fe9cfa9): Composite index + catch-block route recovery
+- **Round 3** (b1da4d0→1449252): Post-try-catch recovery on both paths, freshness-filtered count
+- **Round 4** (1c3b66e→a4a3dca): Full-PK sync_version subquery, inclusive count boundary, lint-clean
+
+### Final gate
+
+59 files, 1082 passed, 1 skipped. Typecheck 0, lint 0 errors. EXPLAIN QUERY PLAN: `SEARCH USING INDEX idx_hierarchy_root_level (network=? AND root_domain_id=?)`.
