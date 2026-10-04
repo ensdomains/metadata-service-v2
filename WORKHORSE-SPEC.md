@@ -1,6 +1,6 @@
 # Workhorse spec: WEB-1713 [W8-BUDGET-002] Fix testing-campaign finding on main (TDD)
 
-> **Current tip:** metadata-only correction (24 commits including this tip;
+> **Current tip:** metadata-only correction (25 commits including this tip;
 > hash intentionally omitted — content predates own commit). Product
 > unchanged since `964d536` (+71/−31 in `src/services/avatar.ts`).
 
@@ -17,12 +17,12 @@ guard, and late-rejection suppression.  Enforces invariant B1.
 
 | File | +/− |
 |---|---|
-| `WORKHORSE-SPEC.md` | +70 |
+| `WORKHORSE-SPEC.md` | +72 |
 | `src/services/avatar.ts` | +71/−31 |
 | `test/avatar-deadline.test.ts` | +384 |
-| **Aggregate** | **+525/−31** |
+| **Aggregate** | **+527/−31** |
 
-Tests: 30 total (16 behavioral/lifecycle + 14 contract) in 383-line test file.
+Tests: 30 total (16 behavioral/lifecycle + 14 contract) in 384-line test file.
 
 ### Product invariants
 
