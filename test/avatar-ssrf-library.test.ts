@@ -174,22 +174,46 @@ describe('createGuardedFetcher', () => {
 });
 
 describe('fetchMediaUrl redirect method semantics', () => {
-  it('a 302 after POST continues as GET without a body; a 307 repeats the POST', async () => {
-    const seen: Array<{ url: string; method?: string; body?: unknown }> = [];
+  it('a 302 after POST continues as GET without a body and strips every request-body header; a 307 repeats the POST', async () => {
+    const seen: Array<{ url: string; method?: string; body?: unknown; headers?: Record<string, string> }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
-      seen.push({ url, method: init?.method, body: init?.body });
+      const h: Record<string, string> = {};
+      if (init?.headers) new Headers(init.headers).forEach((v, k) => { h[k] = v; });
+      seen.push({ url, method: init?.method, body: init?.body, headers: h });
       if (url === 'https://gw.example/a') return new Response(null, { status: 302, headers: { Location: '/b' } });
       if (url === 'https://gw.example/c') return new Response(null, { status: 307, headers: { Location: '/d' } });
       return new Response('0x');
     }));
-    await fetchMediaUrl('https://gw.example/a', { method: 'POST', body: '{}' });
-    await fetchMediaUrl('https://gw.example/c', { method: 'POST', body: '{}' });
-    expect(seen).toEqual([
-      { url: 'https://gw.example/a', method: 'POST', body: '{}' },
-      { url: 'https://gw.example/b', method: 'GET', body: undefined },
-      { url: 'https://gw.example/c', method: 'POST', body: '{}' },
-      { url: 'https://gw.example/d', method: 'POST', body: '{}' },
-    ]);
+    await fetchMediaUrl('https://gw.example/a', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        'content-Location': '/original',
+        'Content-Type': 'application/json',
+        Accept: 'text/plain',
+      },
+    });
+    await fetchMediaUrl('https://gw.example/c', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        'content-Location': '/original',
+        'Content-Type': 'application/json',
+        Accept: 'text/plain',
+      },
+    });
+    // 302 POST → GET: body headers stripped, Accept preserved
+    expect(seen[0]).toEqual({ url: 'https://gw.example/a', method: 'POST', body: '{}', headers: { 'content-location': '/original', 'content-type': 'application/json', accept: 'text/plain' } });
+    expect(seen[1]!.method).toBe('GET');
+    expect(seen[1]!.body).toBeUndefined();
+    expect(seen[1]!.headers).not.toHaveProperty('content-encoding');
+    expect(seen[1]!.headers).not.toHaveProperty('content-language');
+    expect(seen[1]!.headers).not.toHaveProperty('content-location');
+    expect(seen[1]!.headers).not.toHaveProperty('content-type');
+    expect(seen[1]!.headers?.accept).toBe('text/plain');
+    // 307 POST repeats: nothing stripped
+    expect(seen[2]).toEqual({ url: 'https://gw.example/c', method: 'POST', body: '{}', headers: { 'content-location': '/original', 'content-type': 'application/json', accept: 'text/plain' } });
+    expect(seen[3]).toEqual({ url: 'https://gw.example/d', method: 'POST', body: '{}', headers: { 'content-location': '/original', 'content-type': 'application/json', accept: 'text/plain' } });
   });
 });
 

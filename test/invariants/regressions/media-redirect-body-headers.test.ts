@@ -78,4 +78,75 @@ describe('M3 redirect body headers', () => {
     expect(redirectedHeaders.has('content-type')).toBe(false);
     expect(redirectedHeaders.get('accept')).toBe('text/html');
   });
+
+  // A 303 redirect of a GET has no body and must not strip any headers —
+  // there were no request-body headers to delete, and removing unrelated
+  // headers like Accept would be a regression.
+  it('a 303 redirect preserves GET method and all headers', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, { status: 303, headers: { Location: 'https://target.example/media' } }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchMediaUrl('https://origin.example/media', {
+      method: 'GET',
+      headers: {
+        'Content-Encoding': 'gzip',
+        'Content-Language': 'en',
+        'Content-Location': '/alt',
+        'Content-Type': 'text/plain',
+        Accept: 'image/*',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const redirectedInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(redirectedInit.method).toBe('GET');
+    expect(redirectedInit.body).toBeUndefined();
+
+    const redirectedHeaders = new Headers(redirectedInit.headers);
+    // No body was sent, so every header is preserved:
+    expect(redirectedHeaders.get('content-encoding')).toBe('gzip');
+    expect(redirectedHeaders.get('content-language')).toBe('en');
+    expect(redirectedHeaders.get('content-location')).toBe('/alt');
+    expect(redirectedHeaders.get('content-type')).toBe('text/plain');
+    expect(redirectedHeaders.get('accept')).toBe('image/*');
+  });
+
+  // HEAD through 303 likewise has no body — every header must survive.
+  it('a 303 redirect preserves HEAD method and all headers', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, { status: 303, headers: { Location: 'https://target.example/media' } }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchMediaUrl('https://origin.example/media', {
+      method: 'HEAD',
+      headers: {
+        'Content-Encoding': 'gzip',
+        'Content-Language': 'en',
+        'Content-Location': '/alt',
+        'Content-Type': 'text/plain',
+        Accept: 'image/*',
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const redirectedInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(redirectedInit.method).toBe('HEAD');
+    expect(redirectedInit.body).toBeUndefined();
+
+    const redirectedHeaders = new Headers(redirectedInit.headers);
+    expect(redirectedHeaders.get('content-encoding')).toBe('gzip');
+    expect(redirectedHeaders.get('content-language')).toBe('en');
+    expect(redirectedHeaders.get('content-location')).toBe('/alt');
+    expect(redirectedHeaders.get('content-type')).toBe('text/plain');
+    expect(redirectedHeaders.get('accept')).toBe('image/*');
+  });
 });
