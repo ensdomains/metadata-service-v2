@@ -230,6 +230,28 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
     expect(aEthVersion).toBe(2);
   });
 
+  // Two concurrent storeHierarchy calls for the same root both pre-read
+  // version 0 if the pre-read happens before either batch commits.
+  // The product fix must make version derivation atomic so both stores
+  // observe distinct versions and the final committed version is 2.
+  it('concurrent same-root stores produce monotonic distinct versions (final 2 not 1)', async () => {
+    const { db, sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(db, 'mainnet');
+
+    // Launch two stores concurrently — both may pre-read version 0.
+    await Promise.all([
+      d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]),
+      d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]),
+    ]);
+
+    const version = (sqlite.prepare(
+      'SELECT sync_version FROM registry_hierarchy WHERE network = ? AND id = ? AND root_domain_id = ?'
+    ).get('mainnet', namehash('eth'), namehash('a.eth')) as { sync_version: number }).sync_version;
+    // On HEAD with pre-read: both reads get 0, both write 1, final = 1.
+    // After atomic fix: version derivation is serialized, final >= 2.
+    expect(version).toBeGreaterThanOrEqual(2);
+  });
+
   it('sync_version is per-root: sibling roots have independent version sequences', async () => {
     const { db, sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
     const d1 = new D1Service(db, 'mainnet');
@@ -269,7 +291,7 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
     return { sqlite, db };
   }
 
-  it('getHierarchyCount includes row exactly at freshness boundary (inclusive)', () => {
+  it('getHierarchyCount includes row exactly at freshness boundary (inclusive)', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(TEST_NOW);
     try {
@@ -286,13 +308,13 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
         VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${boundaryTs}, 1)`).run(namehash('eth'), rootId);
 
       const count = (d1 as any).getHierarchyCount('a.eth');
-      expect(count).resolves.toBe(1);
+      await expect(count).resolves.toBe(1);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('getHierarchyCount excludes row 1ms past freshness boundary (exclusive)', () => {
+  it('getHierarchyCount excludes row 1ms past freshness boundary (exclusive)', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(TEST_NOW);
     try {
@@ -309,7 +331,7 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
         VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${pastBoundaryTs}, 1)`).run(namehash('eth'), rootId);
 
       const count = (d1 as any).getHierarchyCount('a.eth');
-      expect(count).resolves.toBe(0);
+      await expect(count).resolves.toBe(0);
     } finally {
       vi.useRealTimers();
     }
@@ -659,17 +681,49 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
 
   // --- Route wiring: deleting c.executionCtx from index.ts survives all tests ---
   // The route must pass executionCtx so recovery is registered with waitUntil.
-  // Verify the source file contains the wiring call site.
+  // Source-inspection verifies call site; execution-level app.request proves
+  // the actual route handler delivers executionCtx to getRegistryHierarchy.
 
-  it('index.ts routes /registry-hierarchy/:name with c.executionCtx to getRegistryHierarchy', () => {
+  it('source-inspection: index.ts call site contains c.executionCtx', () => {
     const indexSource = readFileSync(
       new URL('../src/index.ts', import.meta.url),
       'utf8',
     );
-    // The exact call site: metadataService.getRegistryHierarchy(name, c.executionCtx)
     expect(indexSource).toMatch(
       /getRegistryHierarchy\s*\(\s*\w+\s*,\s*c\.executionCtx\s*\)/,
     );
+  });
+
+  it('execution-level: app.request route delivers ctx.waitUntil to getRegistryHierarchy', async () => {
+    // Spy before importing app so we capture the route handler's argument.
+    const getRegistryHierarchySpy = vi.spyOn(
+      MetadataService.prototype,
+      'getRegistryHierarchy',
+    );
+
+    const app = (await import('../src/index')).default;
+
+    const ctx = {
+      waitUntil: vi.fn(),
+      passThroughOnException: vi.fn(),
+    };
+
+    try {
+      await app.request(
+        '/registry-hierarchy/test.eth?network=mainnet',
+        undefined,
+        {} as Record<string, unknown>,
+        ctx as unknown as ExecutionContext,
+      );
+    } catch (_) { /* route may throw without real bindings */ }
+
+    const calls = getRegistryHierarchySpy.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const passedCtx = calls[0]?.[1] as { waitUntil?: unknown } | undefined;
+    expect(passedCtx).toBeDefined();
+    expect(passedCtx?.waitUntil).toBe(ctx.waitUntil);
+
+    getRegistryHierarchySpy.mockRestore();
   });
 
   // --- Causal containment: kill premature-resolution mutant ---
