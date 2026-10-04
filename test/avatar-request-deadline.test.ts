@@ -505,3 +505,100 @@ describe('deletion mutant kill', () => {
     expect(getMetadata).not.toHaveBeenCalled();
   });
 });
+
+// ── No retained timers after settlement (timer cleanup) ────────────────────
+
+describe('no retained timers after settlement', () => {
+  it('deadline win at 1000ms: no pending timers remain after settlement', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const before = vi.getTimerCount();
+    const out = await settle(inRequest(1000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    // After settlement, zero timers should remain. The current product
+    // leaves the nested withMediaTimeout 8s timer dangling.
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('media-timeout win: no pending timers remain after settlement', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const before = vi.getTimerCount();
+    const out = await settle(inRequest(20_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeInstanceOf(UpstreamError);
+    expect(out.error).not.toBeInstanceOf(RequestDeadlineError);
+    // raceRequestDeadline already clears its timer; withMediaTimeout must too.
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('early sync work success: no pending timers remain', async () => {
+    const getAvatar = vi.fn(async () => null);
+    const svc = makeService({ getAvatar });
+
+    const before = vi.getTimerCount();
+    const out = await settle(inRequest(10_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBeNull();
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('async work success (100ms): no pending timers remain', async () => {
+    const getAvatar = vi.fn(afterMs(100, null));
+    const svc = makeService({ getAvatar });
+
+    const before = vi.getTimerCount();
+    const out = await settle(inRequest(10_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBeNull();
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('sync throw: no pending timers remain', async () => {
+    const err = new UpstreamError('sync fail');
+    const getAvatar = vi.fn(() => { throw err; });
+    const svc = makeService({ getAvatar });
+
+    const before = vi.getTimerCount();
+    const out = await settle(inRequest(10_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBe(err);
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('async rejection (100ms): no pending timers remain', async () => {
+    const err = new UpstreamError('async fail');
+    const getAvatar = vi.fn(afterMs(100, Promise.reject(err)));
+    // afterMs returns () => Promise that resolves with the value, so for
+    // rejection we need a function that rejects.
+    const rejectAfter = () => new Promise<never>((_, reject) => setTimeout(() => reject(err), 100));
+    const getAvatar2 = vi.fn(rejectAfter);
+    const svc = makeService({ getAvatar: getAvatar2 });
+
+    const before = vi.getTimerCount();
+    const out = await settle(inRequest(10_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeInstanceOf(UpstreamError);
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('primary/legacy both paths complete: no pending timers remain', async () => {
+    const getAvatar = vi.fn(afterMs(50, null));
+    const legacyGetAvatar = vi.fn(afterMs(50, null));
+    const svc = makeService({ getAvatar }, { getAvatar: legacyGetAvatar });
+
+    const before = vi.getTimerCount();
+    // Primary returns null at 50ms, legacy returns null at 50ms.
+    const out = await settle(inRequest(10_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBeNull();
+    // Both primary and legacy resolve within budget; zero timers remain.
+    expect(vi.getTimerCount()).toBe(before);
+  });
+});
