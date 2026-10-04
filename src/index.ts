@@ -1091,8 +1091,8 @@ app.get(
 
       // Only honor a valid MigrationStatus (see handleImage) — ignore arbitrary input.
       const statusParam = c.req.query('status');
-      const outputWidth = c.req.query('w') ? parseInt(c.req.query('w')!, 10) : null;
-      const outputHeight = c.req.query('h') ? parseInt(c.req.query('h')!, 10) : null;
+      const outputWidth = c.req.query('w') && /^\d+$/.test(c.req.query('w')!) ? parseInt(c.req.query('w')!, 10) : null;
+      const outputHeight = c.req.query('h') && /^\d+$/.test(c.req.query('h')!) ? parseInt(c.req.query('h')!, 10) : null;
 
       const options: ImageGenerationOptions = { name };
 
