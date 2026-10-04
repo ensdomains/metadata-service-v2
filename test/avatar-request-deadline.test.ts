@@ -6,12 +6,19 @@ import { withRequestBudget } from '../src/services/request-budget';
 
 // W8-BUDGET-001: the request deadline must gate every upstream attempt including
 // avatar/header resolver RPC work AND metadata lookups, at the per-attempt
-// boundary (lookup, immediately before work()). The one outer guard in
-// resolveMedia lets legacy fallback attempts start after the primary consumed
-// time past the 1000ms floor, and getAvatarMeta has no guard at all.
+// boundary (lookup, immediately before work()). Each attempt must be causally
+// bounded by the returned request duration — a hung resolver at exactly 1000ms
+// must be killed by the deadline, not left to the fixed 8s media timeout.
 
 const DEADLINE_MS = 25_000;
+const MEDIA_TIMEOUT_MS = 8_000;
 const FIRST_UPSTREAM_ERROR = new UpstreamError('primary failed');
+
+// Never resolves; used to simulate a hung resolver.
+const hung = () => new Promise<never>(() => {});
+// Resolves after `ms` fake-time ms.
+const afterMs = <T>(ms: number, value: T): (() => Promise<T>) => () =>
+  new Promise((resolve) => setTimeout(() => resolve(value), ms));
 
 type FakeResolver = { getAvatar?: Mock; getHeader?: Mock; getMetadata?: Mock };
 
@@ -22,9 +29,9 @@ function makeService(primary: FakeResolver, legacy?: FakeResolver): AvatarServic
   return svc;
 }
 
-// Advance fake time in small steps until `promise` settles (or `maxMs` pass).
+// Advance fake time until `promise` settles (or `maxMs` pass).
 async function settle<T>(promise: Promise<T>, maxMs: number) {
-  const outcome: { done: boolean; value?: T; error?: unknown } = { done: false };
+  const outcome: { done: boolean; value?: T; error?: unknown; elapsed: number } = { done: false, elapsed: 0 };
   promise.then(
     (value) => { outcome.done = true; outcome.value = value; },
     (error) => { outcome.done = true; outcome.error = error; },
@@ -34,6 +41,7 @@ async function settle<T>(promise: Promise<T>, maxMs: number) {
   while (!outcome.done && Date.now() - start < maxMs) {
     await vi.advanceTimersByTimeAsync(50);
   }
+  outcome.elapsed = Date.now() - start;
   return outcome;
 }
 
@@ -46,7 +54,7 @@ function inRequest<T>(leftMs: number, fn: () => Promise<T>): Promise<T> {
 }
 
 function expectDeadlineError(error: unknown) {
-  expect(error).toBeInstanceOf(UpstreamError);
+  expect(error).toBeInstanceOf(RequestDeadlineError);
   expect((error as Error).name).toBe('RequestDeadlineError');
 }
 
@@ -91,7 +99,6 @@ describe('per-attempt deadline gate for avatar', () => {
 
     const out = await settle(inRequest(1000, () => svc.getAvatarImage('budget.eth')), 60_000);
 
-    // At exactly 1000ms, one attempt is allowed. The resolver returns null.
     expect(out.error).toBeUndefined();
     expect(out.value).toBeNull();
     expect(getAvatar).toHaveBeenCalledTimes(1);
@@ -148,7 +155,6 @@ describe('per-attempt deadline gate for header', () => {
 
 describe('legacy fallback per-attempt gating', () => {
   it('gates legacy fallback when primary (null) consumed time past the floor', async () => {
-    // Primary returns null after consuming 1ms, leaving 999ms.
     const getAvatar = vi.fn(async () => {
       vi.advanceTimersByTime(1);
       return null;
@@ -158,27 +164,12 @@ describe('legacy fallback per-attempt gating', () => {
 
     const out = await settle(inRequest(1000, () => svc.getAvatarImage('budget.eth')), 60_000);
 
-    // Primary was invoked (1000ms >= 1000ms). Legacy must not be invoked (999ms < 1000ms).
     expect(getAvatar).toHaveBeenCalledTimes(1);
     expect(legacyGetAvatar).not.toHaveBeenCalled();
-    // The overall call should fail: primary returned null (no avatar), legacy
-    // was gated → withLegacyFallback sees null from both paths and returns null.
-    // But the legacy attempt threw RequestDeadlineError internally. The question
-    // is: does withLegacyFallback catch it and return null, or does it propagate?
-    //
-    // withLegacyFallback: primary returned null (no error caught in the try),
-    // so primaryFailure is undefined. Then legacy lookup throws
-    // RequestDeadlineError. The catch in withLegacyFallback is around the
-    // primary call only. The legacy call is in a separate statement:
-    //   const legacy = await lookup(this.legacyResolver);
-    // An error there propagates out of withLegacyFallback.
-    //
-    // So the overall result should be a RequestDeadlineError.
     expectDeadlineError(out.error);
   });
 
   it('gates legacy fallback when primary (UpstreamError) consumed time past the floor', async () => {
-    // Primary throws UpstreamError after consuming 1ms, leaving 999ms.
     const getAvatar = vi.fn(async () => {
       vi.advanceTimersByTime(1);
       throw FIRST_UPSTREAM_ERROR;
@@ -188,12 +179,8 @@ describe('legacy fallback per-attempt gating', () => {
 
     const out = await settle(inRequest(1000, () => svc.getAvatarImage('budget.eth')), 60_000);
 
-    // Primary was invoked. Legacy must not be invoked.
     expect(getAvatar).toHaveBeenCalledTimes(1);
     expect(legacyGetAvatar).not.toHaveBeenCalled();
-    // withLegacyFallback: primary threw UpstreamError (caught, primaryFailure set).
-    // Then legacy lookup throws RequestDeadlineError. The await on legacy is
-    // outside the primary's try/catch, so the error propagates.
     expectDeadlineError(out.error);
   });
 });
@@ -263,13 +250,228 @@ describe('metadata legacy fallback per-attempt gating', () => {
   });
 });
 
-// ── Mutation kill: boundary precision ──────────────────────────────────────
+// ── Causal deadline bounding: hung work is killed by the deadline ──────────
+
+describe('causal deadline bounding: hung work killed by request deadline', () => {
+  it('avatar: hung resolver at exactly 1000ms is killed by deadline, not media timeout', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(1000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    // With exactly 1000ms remaining (< 8000ms media timeout), the deadline
+    // must win the race and throw RequestDeadlineError.
+    expectDeadlineError(out.error);
+    // The resolver was invoked (admitted past the floor check), but the
+    // deadline killed the hung work. Elapsed ~1000ms, not ~8000ms.
+    expect(getAvatar).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(1050);
+  });
+
+  it('header: hung resolver at exactly 1000ms is killed by deadline', async () => {
+    const getHeader = vi.fn(hung);
+    const svc = makeService({ getHeader });
+
+    const out = await settle(inRequest(1000, () => svc.getHeaderImage('budget.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getHeader).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(1050);
+  });
+
+  it('avatar: hung resolver at 5000ms remaining (shorter than media timeout) is killed by deadline', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(5000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    // 5000ms < 8000ms: deadline wins, elapsed ~5000ms.
+    expectDeadlineError(out.error);
+    expect(getAvatar).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(5050);
+  });
+});
+
+// ── Media timeout wins when shorter than deadline ──────────────────────────
+
+describe('media timeout wins when shorter than remaining deadline', () => {
+  it('avatar: hung resolver with ample time is killed by the 8s media timeout, not deadline', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(20_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    // 20s remaining > 8s media timeout: media timeout wins, throws UpstreamError.
+    // It must NOT be a RequestDeadlineError.
+    expect(out.error).toBeInstanceOf(UpstreamError);
+    expect((out.error as Error).name).not.toBe('RequestDeadlineError');
+    expect(getAvatar).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeGreaterThanOrEqual(7_950);
+    expect(out.elapsed).toBeLessThanOrEqual(8_050);
+  });
+
+  it('header: hung resolver with ample time is killed by media timeout', async () => {
+    const getHeader = vi.fn(hung);
+    const svc = makeService({ getHeader });
+
+    const out = await settle(inRequest(20_000, () => svc.getHeaderImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeInstanceOf(UpstreamError);
+    expect((out.error as Error).name).not.toBe('RequestDeadlineError');
+    expect(out.elapsed).toBeLessThanOrEqual(8_050);
+  });
+});
+
+// ── Work completing before both timeouts wins ──────────────────────────────
+
+describe('work completing before both timeouts wins', () => {
+  it('avatar: resolver completing in 100ms at 5000ms remaining returns normally', async () => {
+    const getAvatar = vi.fn(afterMs(100, null));
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(5000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBeNull();
+    expect(getAvatar).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(150);
+  });
+
+  it('metadata: resolver completing in 100ms at 5000ms remaining returns normally', async () => {
+    const getMetadata = vi.fn(afterMs(100, null));
+    const svc = makeService({ getMetadata });
+
+    const out = await settle(inRequest(5000, () => svc.getAvatarMeta('budget.eth')), 60_000);
+
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBeNull();
+    expect(getMetadata).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(150);
+  });
+});
+
+// ── Deadline error type is exact RequestDeadlineError ──────────────────────
+
+describe('deadline error type is exact RequestDeadlineError', () => {
+  it('deadline rejection is instanceof RequestDeadlineError (not just UpstreamError)', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(1000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    // Must be specifically RequestDeadlineError, not a plain UpstreamError
+    // with the same .name.
+    expect(out.error).toBeInstanceOf(RequestDeadlineError);
+    expect(out.error).toBeInstanceOf(UpstreamError); // subclass
+  });
+
+  it('media timeout is NOT RequestDeadlineError', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(20_000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expect(out.error).toBeInstanceOf(UpstreamError);
+    expect(out.error).not.toBeInstanceOf(RequestDeadlineError);
+  });
+});
+
+// ── Each attempt individually bounded (hung primary, legacy never reached) ─
+
+describe('each attempt individually bounded by returned deadline duration', () => {
+  it('hung primary avatar is killed by its own deadline bound; legacy never reached', async () => {
+    const getAvatar = vi.fn(hung);
+    const legacyGetAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar }, { getAvatar: legacyGetAvatar });
+
+    // Primary hung: the deadline kills it before it returns, so
+    // withLegacyFallback never sees a result and never tries legacy.
+    const out = await settle(inRequest(5000, () => svc.getAvatarImage('budget.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getAvatar).toHaveBeenCalledTimes(1);
+    expect(legacyGetAvatar).not.toHaveBeenCalled();
+    expect(out.elapsed).toBeLessThanOrEqual(5050);
+  });
+
+  it('hung primary metadata is killed by deadline; legacy never reached', async () => {
+    const getMetadata = vi.fn(hung);
+    const legacyGetMetadata = vi.fn(hung);
+    const svc = makeService({ getMetadata }, { getMetadata: legacyGetMetadata });
+
+    const out = await settle(inRequest(5000, () => svc.getAvatarMeta('budget.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getMetadata).toHaveBeenCalledTimes(1);
+    expect(legacyGetMetadata).not.toHaveBeenCalled();
+  });
+});
+
+// ── Metadata: hung work bounded by deadline ────────────────────────────────
+
+describe('metadata hung at deadline', () => {
+  it('metadata: hung resolver at 1000ms is killed by deadline, not media timeout', async () => {
+    const getMetadata = vi.fn(hung);
+    const svc = makeService({ getMetadata });
+
+    const out = await settle(inRequest(1000, () => svc.getAvatarMeta('budget.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getMetadata).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(1050);
+  });
+
+  it('metadata: hung resolver with ample time is killed by media timeout', async () => {
+    const getMetadata = vi.fn(hung);
+    const svc = makeService({ getMetadata });
+
+    const out = await settle(inRequest(20_000, () => svc.getAvatarMeta('budget.eth')), 60_000);
+
+    expect(out.error).toBeInstanceOf(UpstreamError);
+    expect(out.error).not.toBeInstanceOf(RequestDeadlineError);
+    expect(out.elapsed).toBeLessThanOrEqual(8_050);
+  });
+});
+
+// ── Mutable-name impostor: deadline behavior is name-independent ───────────
+
+describe('deadline behavior is name-independent (mutable-name impostor)', () => {
+  it('different name gets same deadline rejection at 0ms', async () => {
+    const getAvatar = vi.fn(async () => null);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(0, () => svc.getAvatarImage('other.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getAvatar).not.toHaveBeenCalled();
+  });
+
+  it('different name gets same deadline rejection at 999ms with hung resolver', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(999, () => svc.getAvatarImage('other.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getAvatar).not.toHaveBeenCalled();
+  });
+
+  it('different name with hung resolver at 1000ms is killed by deadline', async () => {
+    const getAvatar = vi.fn(hung);
+    const svc = makeService({ getAvatar });
+
+    const out = await settle(inRequest(1000, () => svc.getAvatarImage('other.eth')), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(getAvatar).toHaveBeenCalledTimes(1);
+    expect(out.elapsed).toBeLessThanOrEqual(1050);
+  });
+});
+
+// ── Boundary precision: < vs <= ────────────────────────────────────────────
 
 describe('boundary precision: < vs <=', () => {
   it('allows an attempt at exactly 1000ms (kills <=1000 mutation)', async () => {
-    // If the check used <=1000 instead of <1000, this would reject. But the
-    // invariant is "no new attempt starts with less than 1s left", so exactly
-    // 1000ms IS allowed. A mutation to <=1000 would make this test fail.
     const getAvatar = vi.fn(async () => null);
     const svc = makeService({ getAvatar });
 
@@ -280,7 +482,7 @@ describe('boundary precision: < vs <=', () => {
   });
 });
 
-// ── Deletion mutant kill: no gate at all ───────────────────────────────────
+// ── Deletion mutant kill ───────────────────────────────────────────────────
 
 describe('deletion mutant kill', () => {
   it('rejects at 0ms on avatar (gate must exist)', async () => {
