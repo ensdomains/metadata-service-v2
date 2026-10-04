@@ -713,21 +713,6 @@ export class AvatarService {
   }
 
   /**
-   * Race a media-resolution promise against the hard timeout (MEDIA_RESOLVE_TIMEOUT_MS)
-   * so a slow RPC/gateway fails fast instead of stalling until the global
-   * request timeout. Rejects with UpstreamError(`timeoutMessage`) on expiry.
-   */
-  private withMediaTimeout<T>(work: Promise<T>, timeoutMessage: string): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<T>((_, reject) => {
-      timer = setTimeout(() => reject(new UpstreamError(timeoutMessage)), MEDIA_RESOLVE_TIMEOUT_MS);
-    });
-    return Promise.race([work, timeout]).finally(() => {
-      if (timer !== undefined) clearTimeout(timer);
-    });
-  }
-
-  /**
    * Resolve avatar-record metadata via one resolver, bounded by the media timeout,
    * plus whether the avatar record is an NFT reference and the resolver's options
    * (see sanitizeAvatarMeta). Returns null for a definitive miss and throws
