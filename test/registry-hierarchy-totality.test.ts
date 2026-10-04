@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockEnv } from './mocks/hono-env';
 import { NotFoundError, UpstreamError, RequestDeadlineError } from '../src/services/errors';
 
@@ -104,9 +104,20 @@ function expectPlaceholderHierarchy(body: unknown, name: string) {
 
 // ---- tests -------------------------------------------------------------------
 
+function maxAgeOf(cc: string | null): number | null {
+  const match = (cc ?? '').match(/(?:^|[,\s])max-age=(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function storedEdgeMaxAge(): number | null {
+  const stored = [...edgeStore.values()][0];
+  return stored ? maxAgeOf(stored.headers.get('Cache-Control')) : null;
+}
+
 describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
   beforeEach(() => {
     getHierarchy.mockReset();
+    edgeStore.clear();
   });
 
   it('returns 200 placeholder for definitive NotFoundError with normal cache headers', async () => {
@@ -120,10 +131,11 @@ describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
     const body = await res.json();
     expectPlaceholderHierarchy(body, 'nick.eth');
 
-    // Normal hierarchy cache: 300s max-age.
-    const cc = res.headers.get('Cache-Control') ?? '';
-    expect(cc).toContain('max-age=300');
+    // Normal hierarchy cache: 300s max-age, client and edge.
+    expect(maxAgeOf(res.headers.get('Cache-Control'))).toBe(300);
+    expect(storedEdgeMaxAge()).toBe(300);
     expect(res.headers.get('Cache-Tag')).toContain('hierarchy');
+    expect(getHierarchy).toHaveBeenCalledTimes(1);
   });
 
   it('returns 200 placeholder for non-definitive NotFoundError with error cache headers', async () => {
@@ -137,9 +149,10 @@ describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
     const body = await res.json();
     expectPlaceholderHierarchy(body, 'nick.eth');
 
-    // Error cache: 30s max-age.
-    const cc = res.headers.get('Cache-Control') ?? '';
-    expect(cc).toContain('max-age=30');
+    // Error cache: exactly 30s, not a 300s value that contains the substring.
+    expect(maxAgeOf(res.headers.get('Cache-Control'))).toBe(30);
+    expect(storedEdgeMaxAge()).toBe(30);
+    expect(getHierarchy).toHaveBeenCalledTimes(1);
   });
 
   it('returns 200 placeholder for UpstreamError with error cache headers', async () => {
@@ -151,8 +164,9 @@ describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
     const body = await res.json();
     expectPlaceholderHierarchy(body, 'nick.eth');
 
-    const cc = res.headers.get('Cache-Control') ?? '';
-    expect(cc).toContain('max-age=30');
+    expect(maxAgeOf(res.headers.get('Cache-Control'))).toBe(30);
+    expect(storedEdgeMaxAge()).toBe(30);
+    expect(getHierarchy).toHaveBeenCalledTimes(1);
   });
 
   it('returns 200 placeholder for RequestDeadlineError with error cache headers', async () => {
@@ -166,8 +180,9 @@ describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
     const body = await res.json();
     expectPlaceholderHierarchy(body, 'nick.eth');
 
-    const cc = res.headers.get('Cache-Control') ?? '';
-    expect(cc).toContain('max-age=30');
+    expect(maxAgeOf(res.headers.get('Cache-Control'))).toBe(30);
+    expect(storedEdgeMaxAge()).toBe(30);
+    expect(getHierarchy).toHaveBeenCalledTimes(1);
   });
 
   it('edge-caches the placeholder response', async () => {

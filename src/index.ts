@@ -29,7 +29,7 @@ import { withServingHost } from "./services/media-fetch";
 import { RasterizeService } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
-import { CachePresets } from "./utils/cache-headers";
+import { CachePresets, CacheTTL } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
@@ -756,7 +756,14 @@ app.get(
 
         const placeholder = metadataService.generateBasicHierarchy(name);
         const res = c.json(placeholder);
-        edgeCachePut(c, res);
+        // Client headers already carry the policy. The edge writer defaults to
+        // 300s and rewrites the stored copy, so a degraded 200 must pass 30s
+        // explicitly or the colo keeps a zero-owner placeholder as fresh success.
+        edgeCachePut(
+          c,
+          res,
+          definitive ? EDGE_CACHE_MAX_AGE_SECS : CacheTTL.error,
+        );
         return res;
       }
       return httpError(c, error, "Failed to resolve registry hierarchy");
