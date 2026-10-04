@@ -529,6 +529,9 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
     // Key must preserve the original ordered duplicate params as received
     const k = v3EdgeKey(`${B}/sepolia/registry/fox.eth/image?w=100&w=200&h=518`);
     expect(edgeStore.has(k), 'stored key must preserve ordered duplicate params').toBe(true);
+    // Renderer must receive the first w value (Hono semantics)
+    const lastCall = vi.mocked(ImageCacheService.prototype.getImage).mock.calls.at(-1)!;
+    expect(lastCall[1]?.size?.width, 'renderer must use first w=100').toBe(100);
   });
 
   // ── __ecv sanitisation ────────────────────────────────────────────
