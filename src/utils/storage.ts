@@ -42,26 +42,15 @@ export class StorageManager {
   // maxAgeSeconds: when set, returns null if the R2 object's uploaded timestamp
   // is older than this threshold, so the caller can fall through to origin
   // instead of serving an expired card through a binding read.
-  // Returns the absolute uploadedAtMs so backfill callers can compute an
-  // absolute KV expiration deadline — immune to body-latency clock drift.
-  // When maxAgeSeconds is supplied, missing or invalid uploaded fails closed.
-  async getSvgByKey(cacheKey: string, maxAgeSeconds?: number): Promise<{ svg: string; uploadedAtMs: number } | null> {
+  // Returns ageSeconds alongside the SVG so backfill callers can cap KV
+  // lifetime to the remaining R2 authoritative deadline.
+  async getSvgByKey(cacheKey: string, maxAgeSeconds?: number): Promise<{ svg: string; ageSeconds: number } | null> {
     const key = `svg/${cacheKey}.svg`;
     const object = await this.r2Bucket.get(key);
     if (!object) return null;
-    const svg = await object.text();
-    // uploaded is authoritative; if absent or invalid, we cannot enforce
-    // TTL, so fail closed when a maxAge was requested.
-    if (maxAgeSeconds !== undefined) {
-      if (!object.uploaded) return null;
-      const uploadedMs = object.uploaded.getTime();
-      if (!isFinite(uploadedMs)) return null;
-      const ageSeconds = (Date.now() - uploadedMs) / 1000;
-      if (ageSeconds >= maxAgeSeconds) return null;
-      return { svg, uploadedAtMs: uploadedMs };
-    }
-    // undefined maxAgeSeconds: unbounded backward compat
-    return { svg, uploadedAtMs: object.uploaded ? object.uploaded.getTime() : 0 };
+    const ageSeconds = object.uploaded ? (Date.now() - object.uploaded.getTime()) / 1000 : 0;
+    if (maxAgeSeconds !== undefined && ageSeconds >= maxAgeSeconds) return null;
+    return { svg: await object.text(), ageSeconds };
   }
 
   async setSvgByKey(cacheKey: string, svg: string, maxAge: number = 86400): Promise<void> {

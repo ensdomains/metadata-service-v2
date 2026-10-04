@@ -109,7 +109,6 @@ describe('ImageCacheService', () => {
         bodyUsed: false,
         blob: vi.fn(),
         json: vi.fn(),
-        uploaded: new Date(),
       } as unknown as R2ObjectBody);
 
       const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
@@ -185,7 +184,6 @@ describe('ImageCacheService', () => {
         arrayBuffer: vi.fn(),
         body: null,
         bodyUsed: false,
-        uploaded: new Date(),
       } as unknown as R2ObjectBody);
 
       const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
@@ -841,6 +839,16 @@ describe('ImageCacheService', () => {
         await Promise.all(waitUntilPromises);
         const entry = JSON.parse((svgCacheKv.put as Mock).mock.calls[0][1] as string);
         expect(entry.migrationStatus).toBe('native');
+      });
+
+      it('serialises default/unknown migrationStatus in KV entry', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>S</svg>', 100 * 1000));
+        // 'unknown' hits the default TTL config branch
+        await imageCacheService.getImage('s.eth', { name: 's.eth', migrationStatus: 'unknown' as const }, executionCtx);
+        await Promise.all(waitUntilPromises);
+        const entry = JSON.parse((svgCacheKv.put as Mock).mock.calls[0][1] as string);
+        expect(entry.migrationStatus).toBe('unknown');
       });
     });
 
