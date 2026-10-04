@@ -37,7 +37,7 @@ import type {
   MetadataResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
-import { NotFoundError, UpstreamError, RequestDeadlineError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
+import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
 export interface Env {
