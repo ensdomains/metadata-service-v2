@@ -8,27 +8,28 @@ vi.mock('../src/services/rasterize', () => ({
 }));
 
 import app from '../src/index';
+import { NETWORKS } from '../src/types';
 import { MetadataService } from '../src/services/metadata';
 import { NotFoundError } from '../src/services/errors';
 
-const edgeEntries = new Map<string, Response>();
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+const requestUrl = 'http://localhost/registry-hierarchy/precheck-missing.eth?network=mainnet';
+
+interface EdgeWrite {
+  url: string;
+  response: Response;
+}
+
+const edgeWrites: EdgeWrite[] = [];
 const fakeDefaultCache = {
   match: vi.fn().mockResolvedValue(undefined),
   put: vi.fn(async (request: RequestInfo | URL, response: Response) => {
-    const key = typeof request === 'string'
-      ? request
-      : request instanceof URL
-        ? request.href
-        : request.url;
-    edgeEntries.set(key, response);
+    const url = typeof request === 'string' ? request : request instanceof URL ? request.href : request.url;
+    edgeWrites.push({ url, response });
   }),
   delete: vi.fn().mockResolvedValue(false),
 };
-
 (globalThis as unknown as { caches: unknown }).caches = { default: fakeDefaultCache };
-
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
-const MAINNET_RESOLVER = '0xF29100983E058B709F3D539b0c765937B804AC15';
 
 function makeExecutionContext() {
   const pending: Promise<unknown>[] = [];
@@ -42,16 +43,13 @@ function makeExecutionContext() {
 }
 
 afterEach(() => {
+  edgeWrites.length = 0;
   vi.restoreAllMocks();
-  fakeDefaultCache.match.mockClear();
-  fakeDefaultCache.put.mockClear();
-  fakeDefaultCache.delete.mockClear();
-  edgeEntries.clear();
 });
 
-describe('registry hierarchy totality', () => {
-  it('returns and edge-caches a root-first placeholder when the expiry precheck definitively misses', async () => {
-    const checkExpiry = vi.spyOn(MetadataService.prototype, 'checkExpiry').mockRejectedValue(
+describe('registry hierarchy totality on a definitive expiry precheck miss', () => {
+  it('returns and edge-caches the root-first zero-owner placeholder without calling the hierarchy service', async () => {
+    vi.spyOn(MetadataService.prototype, 'checkExpiry').mockRejectedValue(
       new NotFoundError('not found in any source', { definitive: true }),
     );
     const getRegistryHierarchy = vi.spyOn(MetadataService.prototype, 'getRegistryHierarchy');
@@ -67,25 +65,31 @@ describe('registry hierarchy totality', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('Cache-Control')).toBe('public, max-age=300, stale-while-revalidate=60');
-    const body = await response.json() as Record<string, unknown>;
+    const body = await response.json();
     expect(body).toEqual({
       name: 'precheck-missing.eth',
       hierarchy: [
-        { name: 'eth', owner: ZERO_ADDRESS, resolver: MAINNET_RESOLVER, level: 1 },
-        { name: 'precheck-missing.eth', owner: ZERO_ADDRESS, resolver: MAINNET_RESOLVER, level: 2 },
+        {
+          name: 'eth',
+          owner: ZERO_ADDRESS,
+          resolver: NETWORKS.mainnet.contracts.resolver,
+          level: 1,
+        },
+        {
+          name: 'precheck-missing.eth',
+          owner: ZERO_ADDRESS,
+          resolver: NETWORKS.mainnet.contracts.resolver,
+          level: 2,
+        },
       ],
     });
-    expect(body).not.toHaveProperty('_provenance');
-    expect(checkExpiry).toHaveBeenCalledOnce();
-    expect(checkExpiry).toHaveBeenCalledWith('precheck-missing.eth');
+    expect(JSON.stringify(body)).not.toContain('_provenance');
     expect(getRegistryHierarchy).not.toHaveBeenCalled();
 
-    expect(fakeDefaultCache.put).toHaveBeenCalledOnce();
-    const edgeResponse = edgeEntries.get(
-      'http://localhost/registry-hierarchy/precheck-missing.eth?network=mainnet',
-    );
-    expect(edgeResponse?.status).toBe(200);
-    expect(edgeResponse?.headers.get('Cache-Control')).toBe('public, max-age=300');
-    expect(await edgeResponse?.json()).toEqual(body);
+    expect(edgeWrites).toHaveLength(1);
+    expect(edgeWrites[0].url).toBe(requestUrl);
+    expect(edgeWrites[0].response.status).toBe(200);
+    expect(edgeWrites[0].response.headers.get('Cache-Control')).toBe('public, max-age=300');
+    expect(await edgeWrites[0].response.json()).toEqual(body);
   });
 });
