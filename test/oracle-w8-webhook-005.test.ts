@@ -83,7 +83,7 @@ describe('W8-WEBHOOK-005 contract_address primitive', () => {
     const res = await svc.handleWebhook(
       makeCtx(JSON.stringify(shapedEvent(0))),
     );
-    const body = await res.json();
+    const body = await res.json() as { error: string };
 
     expect(res.status).toBe(400);
     expect(String(body.error)).toMatch(/contract_address/i);

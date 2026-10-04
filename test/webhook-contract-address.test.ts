@@ -68,7 +68,7 @@ describe('W8-WEBHOOK-005 contract_address', () => {
     const res = await svc.handleWebhook(
       makeCtx(JSON.stringify(fullyShapedEvent(0))),
     );
-    const body = await res.json();
+    const body = await res.json() as { error: string };
 
     expect(res.status).toBe(400);
     expect(body.error).toContain('contract_address');
