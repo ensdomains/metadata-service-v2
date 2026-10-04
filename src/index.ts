@@ -299,8 +299,9 @@ function getServices(env: Env, network: NetworkName): FullServices {
 
   const storageManager = new StorageManager(env.ASSET_BUCKET);
 
-  const parsedWebhookTolerance = env.WEBHOOK_TOLERANCE_SECS
-    ? parseInt(env.WEBHOOK_TOLERANCE_SECS, 10)
+  const rawValue = env.WEBHOOK_TOLERANCE_SECS?.trim();
+  const parsedWebhookTolerance = rawValue && /^-?\d+$/.test(rawValue)
+    ? parseInt(rawValue, 10)
     : undefined;
   const webhookToleranceSecs = Number.isFinite(parsedWebhookTolerance)
     ? parsedWebhookTolerance
