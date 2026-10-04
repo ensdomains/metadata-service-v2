@@ -303,7 +303,13 @@ function getServices(env: Env, network: NetworkName): FullServices {
   const parsedWebhookTolerance = rawValue && /^-?\d+$/.test(rawValue)
     ? parseInt(rawValue, 10)
     : undefined;
-  const webhookToleranceSecs = Number.isFinite(parsedWebhookTolerance)
+  // Reject non-safe-integer and values exceeding the documented maximum
+  // accepted replay-tolerance (86400s = 24h). Such values fall back to the
+  // secure DEFAULT_TOLERANCE_SECS (120s). Ordinary finite overrides unchanged.
+  const MAX_TOLERANCE_SECS = 86400;
+  const webhookToleranceSecs = Number.isFinite(parsedWebhookTolerance) &&
+    Number.isSafeInteger(parsedWebhookTolerance) &&
+    parsedWebhookTolerance <= MAX_TOLERANCE_SECS
     ? parsedWebhookTolerance
     : undefined;
   const webhookService = new WebhookService(
