@@ -690,22 +690,81 @@ describe('ImageCacheService', () => {
         expect((svgCacheKv.put as Mock).mock.calls.length).toBe(0);
       });
 
-      it('backfills at exactly 60 s remaining', async () => {
-        (svgCacheKv.get as Mock).mockResolvedValue(null);
-        const ms = 3540 * 1000;
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
-        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
-        await Promise.all(waitUntilPromises);
-        assertL2Backfill(ms, 3600, 60);
+      it('backfills at exactly 60 s remaining (integer clock, expiration >= ceil+60)', async () => {
+        const savedNow = fixedNow;
+        // Use integer-aligned now for exact boundary
+        fixedNow = Math.floor(savedNow / 1000) * 1000;
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          (svgCacheKv.get as Mock).mockResolvedValue(null);
+          const ms = 3540 * 1000;
+          vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+          await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          await Promise.all(waitUntilPromises);
+          assertL2Backfill(ms, 3600, 60);
+        } finally {
+          fixedNow = savedNow;
+          dateNowSpy?.mockReturnValue(fixedNow);
+        }
       });
 
-      it('backfills at 60.001 s remaining', async () => {
-        (svgCacheKv.get as Mock).mockResolvedValue(null);
-        const ms = 3540 * 1000 - 1;
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
-        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
-        await Promise.all(waitUntilPromises);
-        assertL2Backfill(ms, 3600, 60);
+      it('backfills at 60.001 s remaining (integer clock, expiration >= ceil+60)', async () => {
+        const savedNow = fixedNow;
+        fixedNow = Math.floor(savedNow / 1000) * 1000;
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          (svgCacheKv.get as Mock).mockResolvedValue(null);
+          const ms = 3540 * 1000 - 1;
+          vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+          await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          await Promise.all(waitUntilPromises);
+          assertL2Backfill(ms, 3600, 60);
+        } finally {
+          fixedNow = savedNow;
+          dateNowSpy?.mockReturnValue(fixedNow);
+        }
+      });
+
+      // ── KV fractional clock ──────────────────────────────────────
+      // With now ending at .500 fractional seconds, remaining 60.001 s
+      // produces integer expiration only 59.5 s ahead → must skip.
+      it('skips KV put when integer expiration < 60 s despite nominal remaining 60.001', async () => {
+        const savedNow = fixedNow;
+        // Set now to a value ending in .500 fractional seconds
+        fixedNow = Math.floor(savedNow / 1000) * 1000 + 500;
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          (svgCacheKv.get as Mock).mockResolvedValue(null);
+          const ms = 3540 * 1000 - 1; // nominal remaining 60.001 s
+          vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+          await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          await Promise.all(waitUntilPromises);
+          // Integer expiration = floor(uploadedMs/1000) + 3600
+          // = floor((fixedNow - ms)/1000) + 3600
+          // = floor((500ms + N*1000 - 3539999)/1000) + 3600
+          // = ... expires 59.5 s ahead → skip
+          expect((svgCacheKv.put as Mock).mock.calls.length).toBe(0);
+        } finally {
+          fixedNow = savedNow;
+          dateNowSpy?.mockReturnValue(fixedNow);
+        }
+      });
+
+      it('backfills when integer expiration >= 60 s at exact integer boundary', async () => {
+        const savedNow = fixedNow;
+        fixedNow = Math.floor(savedNow / 1000) * 1000;
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          (svgCacheKv.get as Mock).mockResolvedValue(null);
+          const ms = 3540 * 1000; // remaining exactly 60 s
+          vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+          await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          await Promise.all(waitUntilPromises);
+          assertL2Backfill(ms, 3600, 60);
+        } finally {
+          fixedNow = savedNow;
+          dateNowSpy?.mockReturnValue(fixedNow);
+        }
       });
 
       // ── unmigrated capping ─────────────────────────────────────────

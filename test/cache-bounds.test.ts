@@ -182,6 +182,84 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
   });
 });
 
+describe('downstream TTL: R2 absolute deadline cap (P2)', () => {
+  const IMG = '/sepolia/registry/fox.eth/image';
+  const RAS = '/sepolia/registry/fox.eth/rasterize';
+  const B = 'http://localhost';
+  let now: number; let ns: any = null;
+  let igsSpy: any = null; let asSpy: any = null;
+
+  function r2(uploadedAtMs: number) {
+    return { text: vi.fn().mockResolvedValue('<svg w="518" h="518"></svg>'), arrayBuffer: vi.fn(), body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(), uploaded: new Date(uploadedAtMs) } as any;
+  }
+  function clientMax(res: Response) { const m = /max-age=(\d+)/.exec(res.headers.get('Cache-Control') ?? ''); return m ? Number(m[1]) : -1; }
+  function edgeMax(p: string) { const e = edgeStore.get(v3EdgeKey(`${B}${p}`)); return e ? e.maxAge : null; }
+
+  beforeEach(async () => {
+    edgeStore.clear(); now = Date.now(); ns = vi.spyOn(Date, 'now').mockReturnValue(now);
+    vi.mocked(ImageCacheService.prototype.getImage).mockRestore();
+    const { ImageGenerationService: IGS } = await import('../src/services/image');
+    igsSpy = vi.spyOn(IGS.prototype, 'generateDomainImage').mockResolvedValue({ svg: '<svg w="518" h="518"></svg>' } as any);
+    const { AvatarService: AS } = await import('../src/services/avatar');
+    asSpy = vi.spyOn(AS.prototype, 'getAvatarImage').mockResolvedValue(null as any);
+  });
+  afterEach(() => { ns?.mockRestore(); ns = null; igsSpy?.mockRestore(); asSpy?.mockRestore();
+    vi.spyOn(ImageCacheService.prototype, 'getImage').mockImplementation(async function (this: ImageCacheService, _name: any, options: any) {
+      const s = (options as any).migrationStatus ?? 'unmigrated';
+      return { svg: '<svg width="518" height="518"></svg>', contentType: 'image/svg+xml', cacheStatus: 'MISS', ttlConfig: this.getTtlConfig(s) } as any;
+    });
+  });
+
+  function setupR2(ms: number) { (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null); (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(r2(ms)); }
+
+  it('/image: remaining ~300s, client and edge capped to floor of (deadline-now)/1000', async () => {
+    setupR2(now - (86_400_000 - 300_000));
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(clientMax(res)).toBe(300);
+    expect(edgeMax(IMG)).toBe(300);
+  });
+
+  it('/rasterize: 300.001s nominal, 2ms raster delay produces edge 299', async () => {
+    setupR2(now - (86_400_000 - 300_001));
+    // Simulate 2ms raster latency
+    const { RasterizeService: RS } = await import('../src/services/rasterize');
+    const orig = RS.prototype.rasterize;
+    RS.prototype.rasterize = async function (this: any, ...a: any[]) { ns?.mockReturnValue(now + 2); return (orig as any).apply(this, a); };
+    try {
+      const res = await get(RAS);
+      expect(res.status).toBe(200);
+      expect(clientMax(res)).toBe(299);
+      expect(edgeMax(RAS)).toBe(299);
+    } finally { RS.prototype.rasterize = orig; ns?.mockReturnValue(now); }
+  });
+
+  it('/image: remaining 59.999s caps client 59 edge 59', async () => {
+    setupR2(now - (86_400_000 - 59_999));
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(clientMax(res)).toBe(59);
+    expect(edgeMax(IMG)).toBe(59);
+  });
+
+  it('/image: remaining 1ms caps client 0, no edge put', async () => {
+    setupR2(now - (86_400_000 - 1));
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(clientMax(res)).toBe(0);
+    expect(edgeMax(IMG)).toBeNull();
+  });
+
+  it('/image: fresh origin MISS keeps full client 21600 edge 300', async () => {
+    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null);
+    (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(clientMax(res)).toBe(21600);
+    expect(edgeMax(IMG)).toBe(300);
+  });
+});
+
 // ---- SWR revalidation verdicts (metadata-cache) --------------------------------
 
 // In-memory KV double (only what MetadataCacheService touches).
