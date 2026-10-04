@@ -14,7 +14,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function stubChain(status: number, body: string): string[] {
+function stubChain(status: number, body: string | null): string[] {
   const calls: string[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     const target = String(url);
@@ -33,18 +33,23 @@ describe('W8-MEDIA-001 Fetch redirect statuses', () => {
 
     const response = await fetchMediaUrl(FIRST);
 
-    expect(response.status).toBe(300);
-    expect(await response.text()).toBe('multiple-choices');
-    expect(calls).toEqual([FIRST]);
+    expect({ status: response.status, body: await response.text(), calls }).toEqual({
+      status: 300,
+      body: 'multiple-choices',
+      calls: [FIRST],
+    });
   });
 
   it('does not follow another non-redirect 3xx that carries Location', async () => {
-    const calls = stubChain(304, 'not-modified');
+    // 304 cannot carry a body. Null body, status, and the single call are the
+    // observable: following it would return the second URL's 200.
+    const calls = stubChain(304, null);
 
     const response = await fetchMediaUrl(FIRST);
 
-    expect(response.status).toBe(304);
-    expect(await response.text()).toBe('not-modified');
-    expect(calls).toEqual([FIRST]);
+    expect({ status: response.status, calls }).toEqual({
+      status: 304,
+      calls: [FIRST],
+    });
   });
 });
