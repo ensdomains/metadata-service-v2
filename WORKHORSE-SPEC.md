@@ -21,7 +21,7 @@ should be ignored and the defaults used instead.
 trailing garbage. The rasterize handler uses `parseInt` on the raw query values
 without validating that the entire string is a pure decimal integer. The image
 route (`/image`) has the same pattern (line 555) but that is out of scope for
-this ticket (W8-ROUTES-002).
+this ticket (W8-ROUTES-002, also WEB-1717).
 
 The `imageService.validateOptions()` correctly uses `Number.isInteger`, but:
 - For non-square dimensions the rasterize handler does pass `options.size`
@@ -31,11 +31,21 @@ The `imageService.validateOptions()` correctly uses `Number.isInteger`, but:
   entirely and rewrites the SVG width/height attributes directly with the
   attacker-supplied `outputWidth`/`outputHeight`.
 
+## Acceptance contract
+
+The rasterize route supplies a custom size **only** when both `?w=` and `?h=`
+are present, each is a pure decimal string (all digits, no sign, no whitespace,
+no radix prefix), and each parsed value is within 100–2000 inclusive.
+Otherwise — malformed values, missing or incomplete pairs, or out-of-range values —
+no custom size is supplied and the defaults (518×518) are used.
+
+Leading-zero decimal spellings (e.g. `w=0100`) are pure decimal strings and are
+accepted; `parseInt('0100', 10)` → `100` correctly.
+
 ## Proposed fix
 
 Replace the `parseInt`-only parsing with a pure-decimal-integer check on the
-query string before conversion. The simplest correct change in
-`src/index.ts` ~lines 1094–1095:
+query string before conversion. The change in `src/index.ts` ~lines 1094–1095:
 
 ```typescript
 // Before (buggy):
@@ -47,34 +57,79 @@ const outputWidth = c.req.query('w') && /^\d+$/.test(c.req.query('w')!) ? parseI
 const outputHeight = c.req.query('h') && /^\d+$/.test(c.req.query('h')!) ? parseInt(c.req.query('h')!, 10) : null;
 ```
 
-This rejects any query value that contains non-digit characters (e.g. `100a`,
-`10.5`, `-100`, `0x64`), causing the handler to fall through to default
-dimensions. The `/^\d+$/` test also naturally rejects empty strings (already
-handled by the ternary guard), whitespace, and leading zeros — all of which
-`parseInt` would quietly convert.
+The `/^\d+$/` regex rejects non-digit characters (`100a`, `10.5`, `-100`,
+`0x64`, ` 200`) and empty strings. Leading zeros (`0100`) are accepted — they
+match `\d+` and `parseInt` correctly converts them.
 
 No change to `/image` or any other route. The fix is isolated to the two
 query-param parse lines in the rasterize handler.
 
-## Test plan
+## TDD matrix
 
-1. **Regression test (red):** Add a test in `test/rasterize-svg-avatar.test.ts`
-   that calls `/mainnet/registry/nick.eth/rasterize?w=100a&h=101` (or similar
-   malformed params) and asserts that the rasterized SVG uses the default
-   518×518 dimensions, not the attacker-selected 100×101. This test must fail
-   on the base commit (red).
+All tests live in `test/rasterize-svg-avatar.test.ts`, in the existing
+`describe('/rasterize never hands an SVG avatar to resvg')` block. Each
+test asserts against `state.rasterized[0]` (the SVG handed to the mocked
+rasterizer) and validates dimension handling. The existing test infrastructure
+already mocks the rasterizer, image cache, and metadata service — no new mocks
+needed.
 
-2. **Apply fix:** The two-line change above.
+### T1 — Malformed width (red → green)
+`/mainnet/registry/nick.eth/rasterize?w=100a&h=200`
 
-3. **Regression test (green):** The same test now passes.
+- **Red:** `parseInt('100a')=100` and `parseInt('200')=200` both pass the
+  range guard; `hasCustomSize` is true and the SVG is rewritten to
+  `width="100"`. Fixed code treats `w=100a` as null → `hasCustomSize` is false
+  → default 518×518.
+- **Assert:** `state.rasterized[0]` contains `width="518"` and does **not**
+  contain `width="100"`.
 
-4. **Gate:** `CI=true pnpm run test` — all existing tests must continue to pass
-   (the change is a pure restriction; no existing test should rely on malformed
-   query params being accepted).
+### T2 — Malformed height (red → green)
+`/mainnet/registry/nick.eth/rasterize?w=200&h=101b`
+
+- **Red:** same class as T1, one dimension is malformed, the other is clean.
+  `parseInt('101b')=101` → passes → custom 200×101.
+- **Assert:** `state.rasterized[0]` contains `width="518"` (default), not
+  `width="200"`.
+
+### T3 — Malformed both (red → green)
+`/mainnet/registry/nick.eth/rasterize?w=100a&h=101b`
+
+- **Red:** both parse as 100 and 101 via `parseInt` → custom size applied.
+- **Assert:** `state.rasterized[0]` uses default 518×518, contains neither
+  `width="100"` nor an attribute reflecting the garbage input.
+
+### T4 — Missing width, clean height (no partial size)
+`/mainnet/registry/nick.eth/rasterize?h=200`
+
+- **Green on base (no regression risk):** `hasCustomSize` is already false
+  because `outputWidth` is null. The fix must not accidentally accept a
+  single-param pair. This test guards against a regression where a future
+  change tries to supply a custom size from one param only.
+- **Assert:** `state.rasterized[0]` uses default 518×518, never `width="200"`.
+
+### T5 — Clean square custom size (no regression)
+`/mainnet/registry/nick.eth/rasterize?w=250&h=250`
+
+- **Green on base, green after fix:** pure decimal, within range → custom
+  250×250 applied. Guards against the fix being too restrictive.
+- **Assert:** `state.rasterized[0]` matches `/^<svg width="250" height="250"/`.
+
+### T6 — Out-of-range clean value (no regression)
+`/mainnet/registry/nick.eth/rasterize?w=99&h=99`
+
+- **Green on base, green after fix:** `hasCustomSize` is already false
+  (99 < 100). Guards against the regex fix accidentally widening the range.
+- **Assert:** default 518×518.
+
+## Gate
+
+`CI=true pnpm run test` — all existing tests plus the six TDD cases above must
+pass after the fix. The change is a pure restriction; no existing test should
+rely on malformed query params being accepted.
 
 ## Exclusions
 
-- `/image` route (W8-ROUTES-002): untouched.
+- `/image` route (W8-ROUTES-002 / WEB-1717): untouched.
 - No copy from `testing-campaign` branch.
 - No other rasterize behaviour changes.
 
