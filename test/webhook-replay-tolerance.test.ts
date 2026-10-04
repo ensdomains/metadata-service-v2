@@ -196,9 +196,12 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     } as unknown as Record<string, unknown>;
   }
 
-  it('rejects a one-year-old signed envelope when WEBHOOK_TOLERANCE_SECS is a malformed huge-number-with-garbage value', async () => {
+  it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS has a garbage suffix that parseInt would accept', async () => {
+    // '300junk' → parseInt = 300, which is finite, a safe integer, and ≤ max.
+    // Without the whole-string regex guard, a 121s-old envelope would be
+    // accepted (200). Removing only the regex guard surfaces this failure.
     const nowSecs = Math.floor(Date.now() / 1000);
-    const ts = nowSecs - 365 * 24 * 3600; // 1 year old
+    const ts = nowSecs - 121;
     const body = JSON.stringify({
       event_type: 'NameRegistered',
       protocol: 'v2',
@@ -215,7 +218,7 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
 
     const env = makeEnv({
       WEBHOOK_SECRET: SECRET_HEX,
-      WEBHOOK_TOLERANCE_SECS: '999999999999999999999junk',
+      WEBHOOK_TOLERANCE_SECS: '300junk',
     });
     const app = await loadApp();
 
@@ -232,13 +235,13 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects a one-year-old signed envelope when WEBHOOK_TOLERANCE_SECS is a digit-only value far beyond the maximum accepted tolerance', async () => {
-    // A clean all-digit string that passes the whole-string regex guard still
-    // parses to a value (~1e+21) far exceeding any practical tolerance window
-    // and outside the safe integer range. The parser must reject values above
-    // the documented maximum (86400s) and non-safe-integers.
+  it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS is one above the maximum accepted tolerance', async () => {
+    // '86401' passes regex, isFinite, and isSafeInteger but exceeds
+    // MAX_TOLERANCE_SECS (86400). Without the max bound guard, a 121s-old
+    // envelope would be accepted (200). Removing only the max check surfaces
+    // this failure.
     const nowSecs = Math.floor(Date.now() / 1000);
-    const ts = nowSecs - 365 * 24 * 3600;
+    const ts = nowSecs - 121;
     const body = JSON.stringify({
       event_type: 'NameRegistered',
       protocol: 'v2',
@@ -255,7 +258,7 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
 
     const env = makeEnv({
       WEBHOOK_SECRET: SECRET_HEX,
-      WEBHOOK_TOLERANCE_SECS: '999999999999999999999',
+      WEBHOOK_TOLERANCE_SECS: '86401',
     });
     const app = await loadApp();
 
@@ -270,5 +273,46 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
 
     expect(res.status).toBe(401);
+  });
+
+  it('accepts and purges a fresh signed envelope when WEBHOOK_TOLERANCE_SECS is a negative unsafe integer', async () => {
+    // '-9007199254740993' → parseInt = -9007199254740992, which is not a safe
+    // integer (outside ±2^53-1). Without the isSafeInteger guard it would pass
+    // as a huge negative tolerance that rejects even fresh requests (401). With
+    // the guard it falls back to the 120s default, and a fresh correctly signed
+    // envelope is accepted (200 + purge).
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const ts = nowSecs;
+    const body = JSON.stringify({
+      event_type: 'NameRegistered',
+      protocol: 'v2',
+      block_number: 100,
+      tx_hash: '0xabc',
+      log_index: 0,
+      contract_address: '0xdef',
+      name: 'stale-window.eth',
+      namehash: '0x123',
+      data: '{}',
+      timestamp: ts,
+    });
+    const sig = await signBody(SECRET_HEX, ts, body);
+
+    const env = makeEnv({
+      WEBHOOK_SECRET: SECRET_HEX,
+      WEBHOOK_TOLERANCE_SECS: '-9007199254740993',
+    });
+    const app = await loadApp();
+
+    const res = await app.request('/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Timestamp': String(ts),
+        'X-Webhook-Signature': sig,
+      },
+      body,
+    }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
+
+    expect(res.status).toBe(200);
   });
 });
