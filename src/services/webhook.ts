@@ -222,6 +222,28 @@ export class WebhookService {
     if (typeof payload.timestamp !== 'number') {
       return { valid: false, error: 'Missing or invalid timestamp' };
     }
+    if (payload.protocol !== 'v1' && payload.protocol !== 'v2') {
+      return { valid: false, error: 'Missing or invalid protocol' };
+    }
+    if (typeof payload.block_number !== 'number') {
+      return { valid: false, error: 'Missing or invalid block_number' };
+    }
+    if (typeof payload.tx_hash !== 'string') {
+      return { valid: false, error: 'Missing or invalid tx_hash' };
+    }
+    if (typeof payload.log_index !== 'number') {
+      return { valid: false, error: 'Missing or invalid log_index' };
+    }
+    if (typeof payload.contract_address !== 'string') {
+      return { valid: false, error: 'Missing or invalid contract_address' };
+    }
+    if (payload.namehash != null && typeof payload.namehash !== 'string') {
+      return { valid: false, error: 'Missing or invalid namehash' };
+    }
+    // Opaque extra data: required string, never parsed.
+    if (typeof payload.data !== 'string') {
+      return { valid: false, error: 'Missing or invalid data' };
+    }
 
     // A name OR namehash must be present to target invalidation. (zigens may send
     // either; some events carry only a namehash.)
