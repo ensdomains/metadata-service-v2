@@ -104,6 +104,13 @@ describe('hierarchy route totality (S3) — blind oracle', () => {
       'public, max-age=30',
       'public, max-age=30',
     ],
+    [
+      'direct hierarchy',
+      404,
+      'sub.deep-404.eth',
+      'public, max-age=300, stale-while-revalidate=60',
+      'public, max-age=300',
+    ],
   ] as const).map(
     ([seam, status, name, clientCacheControl, edgeCacheControl]) => ({
       seam,
@@ -158,10 +165,18 @@ describe('hierarchy route totality (S3) — blind oracle', () => {
       expect.soft(response.status).toBe(200);
       expect.soft(body.name).toBe(name);
       const resolver = NETWORKS.mainnet.contracts.resolver;
-      expect.soft(body.hierarchy).toEqual([
-        { name: 'eth', owner: ZERO, resolver, level: 1 },
-        { name, owner: ZERO, resolver, level: 2 },
-      ]);
+      const labels = name.split('.');
+      expect.soft(body.hierarchy).toEqual(
+        labels
+          .map((_, i, arr) => arr.slice(i).join('.'))
+          .reverse()
+          .map((levelName, levelIndex) => ({
+            name: levelName,
+            owner: ZERO,
+            resolver,
+            level: levelIndex + 1,
+          })),
+      );
       expect.soft(body).not.toHaveProperty('_provenance');
       expect.soft(response.headers.get('Cache-Control')).toBe(clientCacheControl);
       expect.soft(expiry.mock.calls).toEqual([[name]]);
