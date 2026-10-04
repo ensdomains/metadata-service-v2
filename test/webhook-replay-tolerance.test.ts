@@ -231,4 +231,44 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
 
     expect(res.status).toBe(401);
   });
+
+  it('rejects a one-year-old signed envelope when WEBHOOK_TOLERANCE_SECS is a digit-only value far beyond the maximum accepted tolerance', async () => {
+    // A clean all-digit string that passes the whole-string regex guard still
+    // parses to a value (~1e+21) far exceeding any practical tolerance window
+    // and outside the safe integer range. The parser must reject values above
+    // the documented maximum (86400s) and non-safe-integers.
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const ts = nowSecs - 365 * 24 * 3600;
+    const body = JSON.stringify({
+      event_type: 'NameRegistered',
+      protocol: 'v2',
+      block_number: 100,
+      tx_hash: '0xabc',
+      log_index: 0,
+      contract_address: '0xdef',
+      name: 'stale-window.eth',
+      namehash: '0x123',
+      data: '{}',
+      timestamp: ts,
+    });
+    const sig = await signBody(SECRET_HEX, ts, body);
+
+    const env = makeEnv({
+      WEBHOOK_SECRET: SECRET_HEX,
+      WEBHOOK_TOLERANCE_SECS: '999999999999999999999',
+    });
+    const app = await loadApp();
+
+    const res = await app.request('/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Timestamp': String(ts),
+        'X-Webhook-Signature': sig,
+      },
+      body,
+    }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
+
+    expect(res.status).toBe(401);
+  });
 });
