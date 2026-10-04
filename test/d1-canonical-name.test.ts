@@ -87,13 +87,15 @@ describe('D1Service canonicalizes names on writes', () => {
       { name: 'ETH', owner: ZERO, resolver: ZERO, level: 1 },
       { name: 'Fox.ETH', owner: OWNER, resolver: ZERO, level: 2 },
     ]);
-    // Batch order: INSERT eth, INSERT Fox.eth (no DELETE — no pre-existing rows).
-    expect(calls[0].sql).toContain('SELECT');
+    // Batch order: INSERT eth, INSERT Fox.eth, in-batch DELETE NOT IN.
+    expect(calls[0].sql).toContain('INSERT');
+    expect(calls[0].args.slice(0, 3)).toEqual(['mainnet', namehash('eth'), 'eth']);
     expect(calls[1].sql).toContain('INSERT');
-    expect(calls[1].args.slice(0, 3)).toEqual(['mainnet', namehash('eth'), 'eth']);
-    expect(calls[2].sql).toContain('INSERT');
-    expect(calls[2].args.slice(0, 3)).toEqual(['mainnet', namehash('fox.eth'), 'fox.eth']);
-    expect(calls[2].args[6]).toBe(namehash('eth')); // parent_id resolved from the canonical level-1 name
+    expect(calls[1].args.slice(0, 3)).toEqual(['mainnet', namehash('fox.eth'), 'fox.eth']);
+    expect(calls[1].args[6]).toBe(namehash('eth'));
+    expect(calls[2].sql).toContain('DELETE');
+    expect(calls[2].args[0]).toBe('mainnet');
+    expect(calls[2].args[1]).toBe(namehash('fox.eth')); // parent_id resolved from the canonical level-1 name
   });
 
   it('a read after a write with different casing hits the same key', async () => {

@@ -255,21 +255,12 @@ export class D1Service {
   }>): Promise<void> {
     const rootDomainId = namehash(canonicalizeName(name));
 
-    // Capture pre-existing ids to clean up stale rows after INSERTs.
-    // This read is before the batch; version derivation inside INSERT
-    // subqueries is atomic because the batch transaction runs INSERTs
-    // first (seeing committed rows from before this transaction).
-    const oldRows = await this.db.prepare(
-      'SELECT id FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2'
-    ).bind(this.network, rootDomainId).all<{ id: string }>();
-    const oldIds = new Set((oldRows.results || []).map(r => r.id));
-
     const statements: D1PreparedStatement[] = [];
-    const newIds = new Set<string>();
+    const newIds: string[] = [];
 
     for (const level of hierarchy) {
       const id = namehash(canonicalizeName(level.name));
-      newIds.add(id);
+      newIds.push(id);
 
       const record: Omit<D1HierarchyRecord, 'sync_version'> = {
         network: this.network,
@@ -299,15 +290,22 @@ export class D1Service {
       ));
     }
 
-    // DELETE rows whose id existed before this call but is absent from
-    // the new hierarchy (e.g., a domain shrank from 3 levels to 2).
-    for (const oldId of oldIds) {
-      if (!newIds.has(oldId)) {
-        statements.push(
-          this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND id = ?2 AND root_domain_id = ?3')
-            .bind(this.network, oldId, rootDomainId)
-        );
-      }
+    // DELETE stale rows inside the same transactional batch. Uses
+    // id NOT IN (...) scoped to network + root_domain_id so concurrent
+    // stores cannot leave orphaned rows. An empty hierarchy deletes all
+    // rows for the root (no NOT IN clause). Dynamic placeholders are
+    // bounded by the hierarchy length, which is capped at ~32 labels.
+    if (newIds.length === 0) {
+      statements.push(
+        this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2')
+          .bind(this.network, rootDomainId)
+      );
+    } else {
+      const placeholders = newIds.map(() => '?').join(', ');
+      const deleteStmt = this.db.prepare(
+        `DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2 AND id NOT IN (${placeholders})`
+      );
+      statements.push(deleteStmt.bind(this.network, rootDomainId, ...newIds));
     }
 
     await this.db.batch(statements);
