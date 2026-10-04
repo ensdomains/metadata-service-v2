@@ -35,7 +35,7 @@ Files changed:
 - **KV backfill lifetime capping**: R2→L1 backfill caps `softTtl` and sets absolute `expiration` to the remaining R2 lifetime. Backfill is skipped when remaining < 60 s (Cloudflare KV minimum `expirationTtl`). `createdAt` preserves the authoritative R2 upload time, not `Date.now()`.
 - **Conservative integer semantics**: `softTtl` floored to integer. `expiration` floored at `uploadedAtMs / 1000`. This prevents fractional-second lifetime extension.
 - **60 s boundary**: `remaining < 60` correctly allows backfill at exactly 60 s. Tests at 60 s, 59.999 s, and 60.001 s kill `<=` and off-by-one mutants.
-- **Cache generation bump**: `CARD_CACHE_VERSION` bumped `v2` → `v3`. Pre-fix v2 KV entries carry backfill-time `createdAt` and full TTL; without the bump they remain L1 hits after deploy and bypass R2 deadline enforcement. Old v2 keys become invisible to new reads and expire on their own TTL or via the version-agnostic invalidation prefix — no explicit old-key deletion required.
+- **Cache generation bump**: `CARD_CACHE_VERSION` bumped `v2` → `v3`. Pre-fix v2 KV entries carry backfill-time `createdAt` and full TTL; without the bump they remain L1 hits after deploy and bypass R2 deadline enforcement. The same `v3` discriminator is shared with the edge cache — `edgeCacheKeyUrl()` appends `__ecv=v3` query parameter to every internal `caches.default` match, put, and webhook purge URL. Pre-deploy v2 edge entries miss. Purge deletes both legacy (unversioned) and v3 keys for transition safety. Client-visible URL and headers are unchanged.
 - **Default behavior**: When `maxAgeSeconds` is not passed, `getSvgByKey` returns the object regardless of age (backward-compatible).
 
 ## Showing each criterion
@@ -56,4 +56,5 @@ Files changed:
 - [x] T004 [AC2] Add TTL boundary tests: fresh (TTL-1ms L2 hit), exact (== TTL L3 miss), expired (> TTL L3 miss) across unmigrated/migrated/native; r2MaxAge 0; undefined maxAge backward compat (RED at `0e3d09a`, `915bad3`, `18e0ae2`; GREEN at `e439edd`, `36621af`, `539ae7c`)
 - [x] T005 [AC2] Add backfill lifetime capping tests: absolute `expiration` assertion, 60 s boundary ±1 ms, migrationStatus serialization, hardTtl/softTtl capping, no-write + full-TTL + off-by-one + no-backdate mutants (GREEN at `539ae7c`)
 - [x] T006 [AC3] Run `pnpm run test` and verify all tests pass (58 files, 47 image-cache tests + afterAll sentinel)
-- [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts` version expectation
+- [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 KV isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts`
+- [x] T008 [AC4] Edge cache discriminator regressions: RED `be4a235` (after revert 9cdcd85 998b7b6 9a527d4), GREEN `bd445c7`; 5 mocked-module exports + 2 test-file edge cache assertion updates
