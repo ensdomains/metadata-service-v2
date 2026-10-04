@@ -29,7 +29,7 @@ import { withServingHost } from "./services/media-fetch";
 import { RasterizeService } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
-import { CachePresets } from "./utils/cache-headers";
+import { CachePresets, CacheTTL } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
@@ -678,15 +678,18 @@ app.get(
     try {
       await metadataService.checkExpiry(name);
 
-      const migrationStatus = await metadataService.getMigrationStatus(name);
+      const { degradedByUpstreamFailure, ...migrationStatus } =
+        await metadataService.getMigrationStatus(name);
 
-      const cacheHeaders = CachePresets.migrationStatus(name);
+      const cacheHeaders = degradedByUpstreamFailure
+        ? CachePresets.error()
+        : CachePresets.migrationStatus(name);
       Object.entries(cacheHeaders).forEach(([key, value]) => {
         c.header(key, value);
       });
 
       const res = c.json(migrationStatus);
-      edgeCachePut(c, res);
+      edgeCachePut(c, res, degradedByUpstreamFailure ? CacheTTL.error : undefined);
       return res;
     } catch (error) {
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {

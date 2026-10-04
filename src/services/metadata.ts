@@ -711,6 +711,15 @@ export class MetadataService {
               expirationDate: d1Record.expiration_date ?? undefined,
             };
 
+            // Internal signal for the route: rescued from D1 after a live-tier
+            // outage (UpstreamError). Non-enumerable so public JSON never includes
+            // it and the shape stays unchanged.
+            if (error instanceof UpstreamError) {
+              Object.defineProperty(fallbackResponse, 'degradedByUpstreamFailure', {
+                value: true,
+              });
+            }
+
             return fallbackResponse;
           }
         } catch (d1Error) {
