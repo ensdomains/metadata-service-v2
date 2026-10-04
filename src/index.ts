@@ -774,7 +774,7 @@ function getMaxBatchNames(env: Env): number {
   // Invalid/garbage/unsafe value, out of practical range, or overflow → the default.
   const configured = env.MAX_BATCH_NAMES ?? '';
   const parsed = Number(configured);
-  return /^\d+$/.test(configured) && Number.isInteger(parsed) && parsed > 0 && parsed <= 1000
+  return /^\d+$/.test(configured) && Number.isInteger(parsed) && parsed > 0 && parsed <= DEFAULT_MAX_BATCH_NAMES
     ? parsed
     : DEFAULT_MAX_BATCH_NAMES;
 }
