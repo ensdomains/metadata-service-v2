@@ -87,6 +87,8 @@ describe('W3-ROUTES-004: migration-status D1 fallback cache TTL', () => {
       sync_version: 1,
     };
 
+    vi.spyOn(MetadataService.prototype, 'checkExpiry').mockResolvedValue(undefined);
+
     vi.spyOn(FallbackService.prototype, 'getMigrationStatus')
       .mockRejectedValue(new UpstreamError('indexer 502'));
 
