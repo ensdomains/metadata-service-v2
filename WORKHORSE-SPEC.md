@@ -57,7 +57,7 @@ Core production and primary test files (the exact diff also contains required ro
 - [x] T005 [AC2] Prove absolute expiration, 60 s ±1 ms, migration-status serialization, conservative integer lifetime and body-latency safety in the final TTL cycle.
 - [x] T006 [AC3] Run `pnpm run test` and verify all tests pass (58 files, 47 image-cache tests + afterAll sentinel)
 - [x] T007 [AC4] Bump `CARD_CACHE_VERSION` to `v3`; add legacy v2 isolation tests (RED at `9e4257f`, GREEN at `c78768f`); update `avatar-embed-security.test.ts` version expectation
-- [x] T008 [AC4] Final single edge RED `a68890e` (13 intended failures, typecheck clean) → product-only GREEN `ca6b43e`; all seven RED test blobs identical. Actual put→hit body/one-render, duplicate `w` first-value semantics (proved by mutant: `394411d` assertion catches last-w switch), duplicate client `__ecv` replacement, image/rasterize match/put and legacy+v3 purge covered.
+- [x] T008 [AC4] Final single edge RED `a68890e` (13 intended failures, typecheck clean) → product-only GREEN `ca6b43e`; all seven RED test blobs identical. Actual put→hit body/one-render (proved by mutant: `e7cf0c2` edge-always-miss produces 2 calls), duplicate `w` first-value semantics (proved by mutant: `394411d` last-w switch fails), duplicate client `__ecv` replacement, image/rasterize match/put and legacy+v3 purge covered.
 
 ## Final evidence
 
