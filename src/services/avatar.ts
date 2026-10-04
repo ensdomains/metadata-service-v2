@@ -604,7 +604,6 @@ export class AvatarService {
       return null;
     }
 
-    timeLeftForAttempt(`${kind} resolution`);
     const uri = await this.withLegacyFallback((resolver) => this.resolveRecord(resolver, kind, normalized, name));
     if (!uri) {
       return null;
@@ -674,6 +673,7 @@ export class AvatarService {
   private async lookup<T>(work: () => Promise<T | null>, what: string, name: string): Promise<T | null> {
     const scope: OutageScope = {};
     let result: T | null;
+    timeLeftForAttempt(what);
     try {
       result = await runInOutageScope(scope, () => this.withMediaTimeout(work(), `${what} timed out for ${name}`));
     } catch (error) {
