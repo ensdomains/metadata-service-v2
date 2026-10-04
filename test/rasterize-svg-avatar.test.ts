@@ -35,7 +35,7 @@ const svgB64 = HOSTILE_SVG.toString('base64');
 const pngB64 = PNG.toString('base64');
 
 // The route mocks below hand out whatever card the test put here.
-const state = vi.hoisted(() => ({ card: '', rasterized: [] as string[] }));
+const state = vi.hoisted(() => ({ card: '', rasterized: [] as string[], getImageOptions: null as Record<string, unknown> | null }));
 
 vi.mock('../src/services/rasterize', () => ({
   RasterizeService: class {
@@ -48,7 +48,8 @@ vi.mock('../src/services/rasterize', () => ({
 
 vi.mock('../src/services/image-cache', () => ({
   ImageCacheService: class {
-    async getImage() {
+    async getImage(_name: string, options: Record<string, unknown>) {
+      state.getImageOptions = options;
       return {
         svg: state.card,
         contentType: 'image/svg+xml',
@@ -163,5 +164,73 @@ describe('/rasterize never hands an SVG avatar to resvg', () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize');
     expect(res.status).toBe(500);
     expect(state.rasterized).toHaveLength(0);
+  });
+});
+
+describe('rasterize dimensions (W8-RASTER-001)', () => {
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  const req = (path: string) => app.request(path, undefined, createMockEnv() as unknown as Record<string, unknown>, ctx);
+
+  beforeEach(async () => {
+    state.card = await card('nick.eth');
+    state.rasterized = [];
+    state.getImageOptions = null;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  // T1 — Malformed width: w=100a parses as 100 on base → square rewrite to 100×100.
+  // After fix w=100a is rejected → null → hasCustomSize false → default 518×518.
+  it('ignores a malformed width (T1)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100a&h=100');
+    expect(res.status).toBe(200);
+    // Red on base: width="100" (rewritten). Green after fix: width="518" (default).
+    expect(state.rasterized[0]).not.toMatch(/ width="100"/);
+    expect(state.rasterized[0]).toMatch(/ width="518"/);
+  });
+
+  // T2 — Malformed height: h=200b parses as 200 on base → square rewrite to 200×200.
+  it('ignores a malformed height (T2)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=200b');
+    expect(res.status).toBe(200);
+    // Red on base: width="200" (rewritten). Green after fix: width="518" (default).
+    expect(state.rasterized[0]).not.toMatch(/ width="200"/);
+    expect(state.rasterized[0]).toMatch(/ width="518"/);
+  });
+
+  // T3 — Malformed both (non-square): w=100a→100, h=101b→101. On base options.size
+  // is set to {width:100,height:101}; after fix both are null, no size is supplied.
+  it('ignores two malformed values and supplies no size (T3)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100a&h=101b');
+    expect(res.status).toBe(200);
+    // Red on base: getImageOptions.size = {width:100,height:101}.
+    // Green after fix: getImageOptions has no size property.
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T4 — Missing width, clean height: must not supply a partial custom size.
+  it('supplies no custom size when only height is present (T4)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?h=200');
+    expect(res.status).toBe(200);
+    // Green on base already: outputWidth is null → hasCustomSize is false.
+    // Guards against a future regression that tries to supply a one-param size.
+    expect(state.rasterized[0]).toMatch(/ width="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T5 — Clean square custom size: pure decimal, within range → applied.
+  it('accepts a clean square custom size (T5)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=250&h=250');
+    expect(res.status).toBe(200);
+    // Must be rewritten to the requested size.
+    expect(state.rasterized[0]).toMatch(/^<svg width="250" height="250"/);
+  });
+
+  // T6 — Out-of-range clean values: 99 < 100 → hasCustomSize is already false.
+  it('ignores out-of-range clean values (T6)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=99');
+    expect(res.status).toBe(200);
+    // Green on base, guards against the regex fix accidentally widening the range.
+    expect(state.rasterized[0]).toMatch(/ width="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
   });
 });
