@@ -2,57 +2,41 @@
 
 ## Summary
 
-Add a request-deadline guard (`timeLeftForAttempt`) before `fetchMedia` in
-`AvatarService.resolveMedia` so the media-host fetch is gated by the same
-deadline that gates every other upstream attempt. Currently, the UA-level
-record resolution (RPC/gateway) checks the deadline between attempts, but if
-that resolution exhausts the time, `fetchMedia` still starts — violating
-invariant B1 that no new upstream attempt starts with less than 1s left.
+Add a request-deadline guard (`timeLeftForAttempt`) before `fetchMedia` in `AvatarService.resolveMedia`, extend with per-hop deadline gating via `beforeEachFetch`, budget-bounded signal timeout, causal race against signal-abort event, named listener with exact cleanup, and initial-aborted guard. Enforces invariant B1: no upstream attempt (including the media-host fetch and every redirect hop) starts with less than 1s left; deadline exhaustion always surfaces `RequestDeadlineError`.
+
+## Scope note
+
+This spec was written for the initial one-guard fix and has NOT been rewritten. The actual branch (`WEB-1713` at `928f63e`) spans 15 commits, 11 correction rounds, 3 files, and includes: entry guard, per-hop `beforeEachFetch` gating, `min(7000, remainingRequestTime())` bounded signal, causal `Promise.race` against signal-abort, named handler with `removeEventListener` in `finally`, initial `signal.aborted` guard, and late-rejection suppression. The test file (`test/avatar-deadline.test.ts`) grew through 8 rounds of test-hardening to model full EventTarget semantics with deduplication, capture normalization, invocation-based once auto-removal, stopImmediatePropagation, and post-abort registration behavior — all without any product change since round 6 (`964d536`).
+
+**Prior rewrite**: The test commit at `760ff5c` was rewritten into sibling `4c152cc` via `git commit --amend` to fix a TypeScript compilation error. No review evidence on `760ff5c` is applicable to `4c152cc`.
 
 ## Technical context
 
 - **Language and version**: TypeScript, Cloudflare Workers runtime, Node.js test runner (vitest)
-- **Dependencies used or added**: No new dependencies. Uses existing `timeLeftForAttempt` from `src/services/request-budget.ts`.
-- **Testing**: `pnpm run test` (vitest). Focused regression test in `test/request-deadline.test.ts` (the existing deadline test file) or a new dedicated test.
-- **Constraints**:
-  - One finding only (`W8-BUDGET-002`); no other findings.md id bundled.
-  - No cherry-picks from testing-campaign.
-  - PR targets main from a ticket-named branch.
-  - The fix is minimal: one guard at one call site.
-
-## Direction check
-
-| Constraint | How this plan meets it |
-|---|---|
-| Fix only W8-BUDGET-002 | One guard added in `resolveMedia` before `fetchMedia`; no other changes. |
-| TDD from main BASE | Write focused regression test first, record failure, then apply fix. |
-| No testing-campaign code | Original implementation; no copy/cherry-pick/transplant. |
-| Independent PR from main | Branch `WEB-1713` cut from committed BASE `5a5527c`; one finding. |
+- **Dependencies**: No new dependencies. Uses existing `timeLeftForAttempt`, `remainingRequestTime` from `src/services/request-budget.ts`; `RequestDeadlineError` from `src/services/errors.ts`.
+- **Testing**: `pnpm run test` (vitest). 18 focused tests + 10 direct contract tests in `test/avatar-deadline.test.ts`.
+- **Build**: `pnpm run build`
+- **Lint**: `pnpm run lint` (0 errors)
+- **Typecheck**: `pnpm run typecheck` (clean)
 
 ## Structure
 
-- **`src/services/avatar.ts`**: Add `timeLeftForAttempt` import from `./request-budget`; insert a call before `this.fetchMedia(uri, kind, name)` at line ~612 in `resolveMedia`.
-- **`test/request-deadline.test.ts`** (or new file): Add a focused regression test that sets up `withRequestBudget` with a deadline near exhaustion, resolves a media record, and asserts `RequestDeadlineError` is thrown before `fetchMediaUrl` is called.
+- **`src/services/avatar.ts`** (+64/−42): Entry guard, per-hop gating, bounded timeout, causal race, named listener cleanup, initial-aborted guard
+- **`test/avatar-deadline.test.ts`** (~450 lines): 18 behavioral tests + 10 contract tests covering all invariants
+- **`WORKHORSE-SPEC.md`**: This file (updated for actual scope)
 
-## Decisions
+## History
 
-1. **Where to place the guard.** The guard goes in `resolveMedia`, immediately before the `this.fetchMedia` call, because that is the site where the UA-level resolution chain (RPC with retry, legacy fallback) has finished and the next upstream attempt is about to start. Placing it inside `fetchMedia` itself would also work but would not change behaviour for any other caller — `resolveMedia` is the only caller.
-2. **Test location.** The new test goes in `test/request-deadline.test.ts` to stay with the existing deadline tests that exercise the same invariant (B1). The file already sets up fake timers, mocks `fetch`, and uses `withRequestBudget` / `inRequest` helpers.
-
-## Showing each criterion
-
-| # | Criterion, as the ticket words it | Check (command and input) | Expected output |
+| Round | Date | Commits | Finding |
 |---|---|---|---|
-| AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `pnpm run test -- test/request-deadline.test.ts` on the branch with only the test commit (before the fix) | The new test fails with the assertion that `RequestDeadlineError` was thrown, but `fetchMediaUrl` was called (or no error was thrown). Output captured as evidence. |
-| AC2 | After the fix, that focused regression passes without weakening its assertion. | `pnpm run test -- test/request-deadline.test.ts` on the branch with both test + fix commits | The new test passes: `RequestDeadlineError` is thrown before `fetchMediaUrl`. |
-| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `pnpm run test` at branch HEAD | Exit 0, all tests pass including the new one and all existing ones. |
-| AC4 | The change set addresses only `W8-BUDGET-002` and does not bundle another findings.md id. | `git diff BASE...HEAD` | Diff touches only `src/services/avatar.ts` (import + guard) and the test file; no other changes. |
-| AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | `git log BASE..HEAD` | All commits are original to this branch; no commits or file contents from testing-campaign. |
-
-## Tasks
-
-- [ ] T001 [P] [AC1] Write focused regression test in `test/request-deadline.test.ts`: inside `withRequestBudget` with time set so <1s remains after a mocked record resolution, assert `RequestDeadlineError` before `fetchMediaUrl`.
-- [ ] T002 [AC1] Commit the test, run `pnpm run test`, record the failing test output as evidence.
-- [ ] T003 [AC2] [AC4] Add `import { timeLeftForAttempt } from './request-budget'` to `src/services/avatar.ts` and insert `timeLeftForAttempt('media fetch')` before `this.fetchMedia(uri, kind, name)` in `resolveMedia`.
-- [ ] T004 [AC2] [AC3] Run `pnpm run test`; verify the new test passes and all existing tests pass.
-- [ ] T005 [AC5] Verify diff touches only the two files; verify no testing-campaign content in `git log`.
+| R1 | — | `4deeca1`, `1579f7e` | Entry guard for fetchMedia |
+| R2 | — | `59f8c13`, `f06611c` | Per-hop gating, bounded timeout, error conversion |
+| R3 | — | `1a3896a`, `27a7536` | deadlineDriven discriminator, body coverage |
+| R4 | — | `89b5c8c`, `af9dff5` | signal.aborted attribution guard |
+| R5 | — | `78e811f`, `44d5ca0` | Causal race (Promise.race) |
+| R6 | — | `2a53b22`, `964d536` | Named handler, exact cleanup, initial-aborted |
+| R7 | — | `aa5e7c6` | Identity-sensitive Sets (test only) |
+| R8 | — | `953b157` | Tuple-identity (signal,type,cb,capture) (test only) |
+| R9 | — | `760ff5c`→`4c152cc` | EventTarget dedup, capture normalization, conditional once (test only) |
+| R10 | — | `4c152cc` alone | Abort hook replaced with callback wrapping (test only) |
+| R11 | — | `928f63e` | Invocation-based once auto-removal, stopImmediatePropagation, post-abort (test only) |
