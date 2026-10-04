@@ -176,7 +176,7 @@ export async function fetchMediaUrl(
     // Fetch-spec redirect semantics: 303, and 301/302 after a POST, continue as
     // a GET without a body; 307/308 repeat the request as is.
     const method = (request.method ?? 'GET').toUpperCase();
-    if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
+    if ((response.status === 303 && method !== 'GET' && method !== 'HEAD') || ((response.status === 301 || response.status === 302) && method === 'POST')) {
       const headers = { ...request.headers };
       for (const key of Object.keys(headers)) {
         if (['content-encoding', 'content-language', 'content-location', 'content-type'].includes(key.toLowerCase())) {
