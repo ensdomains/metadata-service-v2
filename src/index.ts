@@ -733,10 +733,16 @@ app.get(
       if (error instanceof HTTPException && (error.status === 404 || error.status === 503)) {
         const parts = name.split('.');
         const ZERO = '0x0000000000000000000000000000000000000000';
+        const resolver = NETWORKS[network].contracts.resolver;
         const basicHierarchy = parts
           .map((_, i, arr) => arr.slice(i).join('.'))
           .reverse()
-          .map((domainName) => ({ name: domainName, owner: ZERO }));
+          .map((domainName, levelIndex) => ({
+            name: domainName,
+            owner: ZERO,
+            resolver,
+            level: levelIndex + 1,
+          }));
         const body = { name, hierarchy: basicHierarchy };
         const is404 = error.status === 404;
         const cacheHeaders = is404

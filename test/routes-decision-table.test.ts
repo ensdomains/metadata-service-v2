@@ -13,6 +13,7 @@ import { createMockEnv } from './mocks/hono-env';
 
 // ---- fake caches.default (per-colo L0 edge cache) -----------------------------
 const edgeStore = new Map<string, Response>();
+let edgePuts = 0;
 const keyOf = (r: RequestInfo | URL) =>
   typeof r === 'string' ? r : r instanceof URL ? r.href : r.url;
 (globalThis as unknown as { caches: unknown }).caches = {
@@ -21,6 +22,7 @@ const keyOf = (r: RequestInfo | URL) =>
       return edgeStore.get(keyOf(req))?.clone() ?? null;
     },
     async put(req: RequestInfo | URL, res: Response) {
+      edgePuts += 1;
       edgeStore.set(keyOf(req), res.clone());
     },
     async delete(req: RequestInfo | URL) {
@@ -47,9 +49,13 @@ vi.mock('../src/services/font', () => ({
 
 import app from '../src/index';
 import { MetadataService } from '../src/services/metadata';
+import { NETWORKS } from '../src/config/networks';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
-const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() };
+const ctx = {
+  waitUntil: vi.fn(),
+  passThroughOnException: vi.fn(),
+} as unknown as ExecutionContext;
 const req = (path: string) =>
   app.request(
     path,
@@ -61,6 +67,7 @@ const req = (path: string) =>
 describe('hierarchy route totality (S3) — blind oracle', () => {
   beforeEach(() => {
     edgeStore.clear();
+    edgePuts = 0;
     vi.restoreAllMocks();
   });
 
@@ -150,12 +157,11 @@ describe('hierarchy route totality (S3) — blind oracle', () => {
 
       expect.soft(response.status).toBe(200);
       expect.soft(body.name).toBe(name);
-      expect
-        .soft(body.hierarchy?.map(({ name: levelName, owner }) => ({ name: levelName, owner })))
-        .toEqual([
-          { name: 'eth', owner: ZERO },
-          { name, owner: ZERO },
-        ]);
+      const resolver = NETWORKS.mainnet.contracts.resolver;
+      expect.soft(body.hierarchy).toEqual([
+        { name: 'eth', owner: ZERO, resolver, level: 1 },
+        { name, owner: ZERO, resolver, level: 2 },
+      ]);
       expect.soft(body).not.toHaveProperty('_provenance');
       expect.soft(response.headers.get('Cache-Control')).toBe(clientCacheControl);
       expect.soft(expiry.mock.calls).toEqual([[name]]);
@@ -167,6 +173,7 @@ describe('hierarchy route totality (S3) — blind oracle', () => {
           .soft(expiry.mock.invocationCallOrder[0])
           .toBeLessThan(hierarchy.mock.invocationCallOrder[0]!);
       }
+      expect.soft(edgePuts).toBe(1);
       expect.soft(edgeStore.size).toBe(1);
       expect
         .soft(storedResponse?.headers.get('Cache-Control'))
