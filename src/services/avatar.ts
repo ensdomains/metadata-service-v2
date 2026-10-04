@@ -15,6 +15,7 @@ import {
   type PublicClient,
 } from 'viem';
 import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
+import { timeLeftForAttempt } from './request-budget';
 import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayStatus } from './ccip-request';
 import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
@@ -608,6 +609,7 @@ export class AvatarService {
       return null;
     }
 
+    timeLeftForAttempt(`${kind} fetch for ${name}`);
     try {
       return await this.fetchMedia(uri, kind, name);
     } catch (error) {
