@@ -1,5 +1,9 @@
 # Workhorse spec: WEB-1713 [W8-BUDGET-002] Fix testing-campaign finding on main (TDD)
 
+> **Current tip:** metadata-only correction (24 commits including this tip;
+> hash intentionally omitted — content predates own commit). Product
+> unchanged since `964d536` (+71/−31 in `src/services/avatar.ts`).
+
 ## Summary
 
 Add a request-deadline guard (`timeLeftForAttempt`) before `fetchMedia` in
@@ -9,13 +13,16 @@ signal timeout, causal `Promise.race` against signal-abort, named handler with
 exact `removeEventListener` cleanup in `finally`, initial `signal.aborted`
 guard, and late-rejection suppression.  Enforces invariant B1.
 
-## Actual scope (HEAD `c79bbae`, 22 commits)
+## Exact final scope (24 commits from BASE `5a5527c`)
 
-| File | +/− | Lines |
-|---|---|---|
-| `src/services/avatar.ts` | +71/−31 | 102-line diff |
-| `test/avatar-deadline.test.ts` | +384 | 383 lines |
-| `WORKHORSE-SPEC.md` | +42 | This file |
+| File | +/− |
+|---|---|
+| `WORKHORSE-SPEC.md` | +70 |
+| `src/services/avatar.ts` | +71/−31 |
+| `test/avatar-deadline.test.ts` | +384 |
+| **Aggregate** | **+525/−31** |
+
+Tests: 30 total (16 behavioral/lifecycle + 14 contract) in 383-line test file.
 
 ### Product invariants
 
@@ -51,11 +58,12 @@ stale-wrapper→non-once re-registration, duplicate once one invocation.
 | 4 | `89b5c8c` | `af9dff5` | signal.aborted attribution |
 | 5 | `78e811f` | `44d5ca0` | Causal race |
 | 6 | `2a53b22` | `964d536` | Named handler, cleanup, initial-aborted |
-| 7-12 | `aa5e7c6`→`c79bbae` | — | Test hardening: Sets, tuples, dedup, capture norm, invocation-based once, full-tuple wrappers |
+| 7-12 | `aa5e7c6`→`c79bbae` | — | Test hardening only |
+| repair | `4151e98`+`990adf5`+`c79bbae` | — | Revert+contract-red+harness-green |
+| docs | this tip | — | Metadata correction (24-commit scope) |
 
-**Sibling rewrite**: `760ff5c` amended into `4c152cc` (TS `{once}` fix). Evidence on `760ff5c` inapplicable.
-
-**Product unchanged since `964d536`** (round 6). All commits after are test hardening or documentation.
+**Sibling rewrite**: `760ff5c` amended into `4c152cc` (TS `{once}` fix).
+Evidence on `760ff5c` inapplicable.  Product unchanged since `964d536`.
 
 ## Build/test/lint
 
