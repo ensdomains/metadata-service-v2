@@ -106,6 +106,7 @@ function expectNoPurge(fakes: ReturnType<typeof makeService>) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('webhook replay tolerance configuration', () => {
@@ -321,7 +322,6 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
   }
 
   function assertFullPurge(mocks: Mocks) {
-    // Internal (6) + metadata (4) + batch key (1) = 11 KV deletes
     expect.soft(mocks.metadataKv.delete).toHaveBeenCalledTimes(11);
     for (const k of INTERNAL_KEYS) {
       expect.soft(mocks.metadataKv.delete).toHaveBeenCalledWith(k);
@@ -349,56 +349,67 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
 
   // ── stale-envelope rejection tests ────────────────────────────────────
 
-  it('300junk-garbage tolerance: rejects 121s-old, zero purge, zero background work', async () => {
+  it('300junk-garbage tolerance: rejects 121s-old, zero purge, zero bg work, zero edge warming', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '300junk',
     });
+    const edgeDelete = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
+    expect.soft(edgeDelete).not.toHaveBeenCalled();
   });
 
-  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero background work', async () => {
+  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero bg work, zero edge warming', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '86401',
     });
+    const edgeDelete = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
+    expect.soft(edgeDelete).not.toHaveBeenCalled();
   });
 
-  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero background work', async () => {
+  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero bg work, zero edge warming', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '999999999999999999999',
     });
+    const edgeDelete = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
+    expect.soft(edgeDelete).not.toHaveBeenCalled();
   });
 
   // ── acceptance tests ──────────────────────────────────────────────────
 
-  it('86400 inclusive max: accepts age 121, full prefix-correct purge + waitUntil work', async () => {
+  it('86400 inclusive max: accepts age 121, full purge, bg drained, edge warming', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '86400',
     });
+    const edgeDelete = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
@@ -407,14 +418,17 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect.soft(bg.length).toBeGreaterThanOrEqual(1);
     const settled = await Promise.allSettled(bg);
     expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
+    expect.soft(edgeDelete).toHaveBeenCalled();
   });
 
-  it('negative unsafe-int fallback: accepts fresh request, full prefix-correct purge + waitUntil work', async () => {
+  it('negative unsafe-int fallback: accepts fresh, full purge, bg drained, edge warming', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '-9007199254740993',
     });
+    const edgeDelete = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs);
 
@@ -423,5 +437,6 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect.soft(bg.length).toBeGreaterThanOrEqual(1);
     const settled = await Promise.allSettled(bg);
     expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
+    expect.soft(edgeDelete).toHaveBeenCalled();
   });
 });
