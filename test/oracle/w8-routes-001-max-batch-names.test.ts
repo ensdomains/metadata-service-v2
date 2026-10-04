@@ -80,3 +80,43 @@ describe('W8-ROUTES-001 invalid MAX_BATCH_NAMES uses the default batch cap', () 
     expect(await res.json()).toMatchObject({ total: 3 });
   });
 });
+
+describe('W8-ROUTES-001 practical maximum cap prevents oversized requests', () => {
+  it('accepts 1000 as the practical maximum cap', async () => {
+    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '1000' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ total: 101 });
+  });
+
+  it('falls back to default 100 when value exceeds the practical maximum of 1000', async () => {
+    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '1001' });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe(
+      'Cannot process more than 100 names at once',
+    );
+  });
+
+  it('falls back to default 100 for a huge digit-only value that exceeds the maximum', async () => {
+    const res = await batch({ names: names(101) }, { MAX_BATCH_NAMES: '999999' });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe(
+      'Cannot process more than 100 names at once',
+    );
+  });
+
+  it('enforces the practical maximum of 1000 as an actual cap', async () => {
+    const res = await batch({ names: names(1050) }, { MAX_BATCH_NAMES: '1000' });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe(
+      'Cannot process more than 1000 names at once',
+    );
+  });
+
+  it('still enforces a low positive integer cap below the maximum', async () => {
+    const res = await batch({ names: names(51) }, { MAX_BATCH_NAMES: '50' });
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toBe(
+      'Cannot process more than 50 names at once',
+    );
+  });
+});
