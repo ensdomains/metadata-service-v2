@@ -1,9 +1,10 @@
-// W8-BUDGET-002 round-8 oracle: tuple-identity listener lifecycle.
-// Tracks exact `(signal identity, type, callback identity, normalized
-// capture)` tuples.  Uses an active-set approach: every addEventListener
-// records a tuple; removeEventListener deletes the matching tuple.
-// After the operation, the active set must be empty.  Wrong-signal,
-// wrong-capture, and wrong-callback mutants all fail independently.
+// W8-BUDGET-002 round-10 oracle: dispatch-based once auto-removal.
+// Hooks AbortController.prototype.abort so {once:true} tuples are
+// removed from tracking only when the actual abort dispatch invokes
+// them.  Listeners registered on an already-aborted signal are never
+// forgiven and must be explicitly removed.  Includes contract tests
+// for pre-dispatch once removal, post-abort non-forgiveness, and
+// post-abort explicit cleanup.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AvatarService } from '../src/services/avatar';
 import { UpstreamError } from '../src/services/errors';
@@ -17,26 +18,24 @@ const PNG_BASE64 =
 
 let timeoutMsValues: number[] = [];
 
-// Active-set tracking: every addEventListener('abort', ...) records a tuple;
-// every removeEventListener('abort', ...) with matching (signal ===, type,
-// callback ===, capture ===) deletes it.  After a lifecycle operation the
-// array must be empty — no stale listeners.
-interface ListenerTuple {
-  signal: AbortSignal;
-  type: string;
-  callback: EventListenerOrEventListenerObject;
-  capture: boolean;
-}
+interface ListenerTuple { signal: AbortSignal; type: string; callback: EventListenerOrEventListenerObject; capture: boolean; once: boolean; }
 let activeTuples: ListenerTuple[] = [];
 
 function normCapture(o?: boolean | AddEventListenerOptions): boolean {
-  if (o === true) return true;
-  if (o === false || o === undefined) return false;
+  if (o === true) return true; if (o === false || o === undefined) return false;
   return (o as AddEventListenerOptions).capture === true;
+}
+function normOnce(o?: boolean | AddEventListenerOptions): boolean {
+  if (typeof o === 'object' && o !== null) return (o as AddEventListenerOptions).once === true;
+  return false;
+}
+function findTuple(signal: AbortSignal, type: string, cb: EventListenerOrEventListenerObject, capture: boolean): number {
+  return activeTuples.findIndex(t => t.signal === signal && t.type === type && t.callback === cb && t.capture === capture);
 }
 
 const origAdd = AbortSignal.prototype.addEventListener;
 const origRemove = AbortSignal.prototype.removeEventListener;
+const origAbort = AbortController.prototype.abort;
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -49,19 +48,31 @@ beforeEach(() => {
     return ctrl.signal;
   });
 
+  // Hook abort dispatch: remove {once} tuples for the listeners that fired.
+  vi.spyOn(AbortController.prototype, 'abort').mockImplementation(function (this: AbortController, reason?: any) {
+    const sig = this.signal;
+    // Capture the set of {once} callbacks that will be auto-removed.
+    const onceCbs = new Set(activeTuples.filter(t => t.signal === sig && t.once).map(t => t.callback));
+    const r = origAbort.call(this, reason);
+    // Remove those tuples — EventTarget already auto-removed the listeners.
+    activeTuples = activeTuples.filter(t => !(t.signal === sig && t.once && onceCbs.has(t.callback)));
+    return r;
+  });
+
   vi.spyOn(AbortSignal.prototype, 'addEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean) {
       if (type === 'abort') {
-        activeTuples.push({ signal: this, type, callback: listener, capture: normCapture(options) });
+        const cap = normCapture(options);
+        if (findTuple(this, type, listener, cap) === -1) {
+          activeTuples.push({ signal: this, type, callback: listener, capture: cap, once: normOnce(options) });
+        }
       }
       return origAdd.call(this, type, listener, options);
     });
   vi.spyOn(AbortSignal.prototype, 'removeEventListener')
     .mockImplementation(function (this: AbortSignal, type: string, listener: EventListenerOrEventListenerObject, options?: EventListenerOptions | boolean) {
       if (type === 'abort') {
-        const cap = normCapture(options);
-        const idx = activeTuples.findIndex(t =>
-          t.signal === this && t.type === type && t.callback === listener && t.capture === cap);
+        const idx = findTuple(this, type, listener, normCapture(options));
         if (idx !== -1) activeTuples.splice(idx, 1);
       }
       return origRemove.call(this, type, listener, options);
@@ -73,9 +84,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
 
 async function settle<T>(promise: Promise<T>, maxMs: number) {
@@ -84,8 +93,7 @@ async function settle<T>(promise: Promise<T>, maxMs: number) {
   const s = Date.now();
   await vi.advanceTimersByTimeAsync(0);
   while (!o.done && Date.now() - s < maxMs) await vi.advanceTimersByTimeAsync(50);
-  o.elapsed = Date.now() - s;
-  return o;
+  o.elapsed = Date.now() - s; return o;
 }
 
 function expectDeadline(err: unknown) { expect(err).toBeInstanceOf(UpstreamError); expect((err as Error).name).toBe('RequestDeadlineError'); }
@@ -110,11 +118,9 @@ function hangingFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Re
   });
 }
 
-function assertAllRemoved() {
-  expect(activeTuples.length).toBe(0);
-}
+function assertAllRemoved() { expect(activeTuples).toEqual([]); }
 
-// ------- prior oracles (unchanged, compressed) -------
+// ------- prior oracles -------
 
 describe('W8-BUDGET-002: prior oracles', () => {
   it('entry guard', async () => {
@@ -174,81 +180,123 @@ describe('W8-BUDGET-002: prior oracles', () => {
   });
 });
 
-// ------- tuple-identity lifecycle tests -------
+// ------- dispatch-based contract tests -------
 
-describe('W8-BUDGET-002: listener lifecycle — tuple identity', () => {
-  it('removes exact tuple after work succeeds (avatar)', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockResolvedValue(validPng());
-    const b = await import('../src/services/request-budget');
-    await b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
-      await svc.getAvatarImage('test.eth');
-    });
+describe('W8-BUDGET-002: tuple instrumentation contract', () => {
+  it('deduplicates identical (signal,type,callback,capture)', () => {
+    const s = new AbortController().signal; const cb = () => {};
+    s.addEventListener('abort', cb); s.addEventListener('abort', cb);
+    expect(activeTuples.length).toBe(1);
+    s.removeEventListener('abort', cb); assertAllRemoved();
+  });
+  it('normalizes capture: true and {capture:true}', () => {
+    const s = new AbortController().signal; const cb = () => {};
+    s.addEventListener('abort', cb, true);
+    s.removeEventListener('abort', cb, { capture: true });
+    assertAllRemoved();
+  });
+  it('separate capture values create separate tuples', () => {
+    const s = new AbortController().signal; const cb = () => {};
+    s.addEventListener('abort', cb, false); s.addEventListener('abort', cb, true);
+    expect(activeTuples.length).toBe(2);
+    s.removeEventListener('abort', cb, false); s.removeEventListener('abort', cb, true);
+    assertAllRemoved();
+  });
+  it('distinct callbacks', () => {
+    const s = new AbortController().signal; const cb1=()=>{},cb2=()=>{};
+    s.addEventListener('abort', cb1); s.addEventListener('abort', cb2);
+    expect(activeTuples.length).toBe(2);
+    s.removeEventListener('abort', cb1); s.removeEventListener('abort', cb2);
+    assertAllRemoved();
+  });
+  it('distinct signals', () => {
+    const s1=new AbortController().signal,s2=new AbortController().signal;const cb=()=>{};
+    s1.addEventListener('abort', cb); s2.addEventListener('abort', cb);
+    expect(activeTuples.length).toBe(2);
+    s1.removeEventListener('abort', cb); s2.removeEventListener('abort', cb);
+    assertAllRemoved();
+  });
+  it('idempotent removal', () => {
+    const s=new AbortController().signal;const cb=()=>{};
+    s.addEventListener('abort', cb);
+    s.removeEventListener('abort', cb); s.removeEventListener('abort', cb);
     assertAllRemoved();
   });
 
-  it('removes exact tuple after work succeeds (header)', async () => {
-    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockResolvedValue(validPng());
-    const b = await import('../src/services/request-budget');
-    await b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
-      await svc.getHeaderImage('test.eth');
-    });
+  // Pre-dispatch: listener registered before abort fires — auto-removed.
+  it('pre-dispatch {once} listener is auto-removed by abort dispatch', () => {
+    const ctrl = new AbortController(); const s = ctrl.signal;
+    s.addEventListener('abort', () => {}, { once: true });
+    ctrl.abort();
     assertAllRemoved();
   });
 
-  it('removes exact tuple after synchronous rejection', async () => {
+  // Post-abort: listener registered on already-aborted signal — never fires, must be explicitly removed.
+  it('post-abort {once} listener is NOT forgiven — it never fires', () => {
+    const ctrl = new AbortController(); ctrl.abort();
+    const s = ctrl.signal;
+    s.addEventListener('abort', () => {}, { once: true });
+    expect(activeTuples.length).toBe(1);
+    s.removeEventListener('abort', () => {});
+    // Wrong callback → tuple still there.
+    expect(activeTuples.length).toBe(1);
+  });
+
+  it('post-abort listener can be explicitly removed with matching callback', () => {
+    const ctrl = new AbortController(); ctrl.abort();
+    const s = ctrl.signal; const cb = () => {};
+    s.addEventListener('abort', cb, { once: true });
+    s.removeEventListener('abort', cb);
+    assertAllRemoved();
+  });
+});
+
+// ------- lifecycle tests -------
+
+describe('W8-BUDGET-002: listener lifecycle', () => {
+  it('removes abort listener after work succeeds (avatar)', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    fm.mockResolvedValue(validPng());
+    const b = await import('../src/services/request-budget');
+    await b.withRequestBudget(async () => { vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-3000); await svc.getAvatarImage('test.eth'); });
+    assertAllRemoved();
+  });
+  it('header succeed', async () => {
+    const { svc, fetchMock: fm } = makeService(MEDIA_URL);
+    fm.mockResolvedValue(validPng());
+    const b = await import('../src/services/request-budget');
+    await b.withRequestBudget(async () => { vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-3000); await svc.getHeaderImage('test.eth'); });
+    assertAllRemoved();
+  });
+  it('sync rejection', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockRejectedValue(new Error('sync fail'));
     const b = await import('../src/services/request-budget');
-    await b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 3000);
-      await svc.getAvatarImage('test.eth').catch(() => {});
-    });
+    await b.withRequestBudget(async () => { vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-3000); await svc.getAvatarImage('test.eth').catch(()=>{}); });
     assertAllRemoved();
   });
-
-  it('removes exact tuple after asynchronous (signal-abort) rejection', async () => {
+  it('async signal-abort', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockImplementationOnce(() => new Promise<Response>(() => {}));
     const b = await import('../src/services/request-budget');
-    await settle(b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000);
-      return svc.getAvatarImage('test.eth').catch(() => {});
-    }), 10_000);
+    await settle(b.withRequestBudget(async () => { vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000); return svc.getAvatarImage('test.eth').catch(()=>{}); }), 10_000);
     assertAllRemoved();
   });
-
-  it('16 concurrent successes: all tuples removed', async () => {
+  it('16 concurrent', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
-    fm.mockImplementation(async () => validPng());
+    fm.mockImplementation(async()=>validPng());
     const b = await import('../src/services/request-budget');
-    const results = await b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 5000);
-      return Promise.all(Array.from({ length: 16 }, () => svc.getAvatarImage('test.eth')));
-    });
-    expect(results).toHaveLength(16);
-    for (const r of results) expect(r).not.toBeNull();
+    const r = await b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-5000);return Promise.all(Array.from({length:16},()=>svc.getAvatarImage('test.eth')));});
+    expect(r).toHaveLength(16); for(const x of r) expect(x).not.toBeNull();
     assertAllRemoved();
   });
-
-  it('does not register a listener on an already-aborted signal', async () => {
+  it('initial-aborted', async () => {
     const { svc, fetchMock: fm } = makeService(MEDIA_URL);
     fm.mockResolvedValue(validPng());
     const b = await import('../src/services/request-budget');
-    const origTimeout = AbortSignal.timeout;
-    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
-      const s = origTimeout(ms);
-      Object.defineProperty(s, 'aborted', { value: true, configurable: true });
-      return s;
-    });
-    const error = await b.withRequestBudget(async () => {
-      vi.setSystemTime(Date.now() + b.REQUEST_DEADLINE_MS - 2000);
-      return svc.getAvatarImage('test.eth').catch((e: unknown) => e);
-    });
-    expectDeadline(error);
-    assertAllRemoved(); // no tuple was ever registered
+    const origTo = AbortSignal.timeout;
+    vi.spyOn(AbortSignal,'timeout').mockImplementation((ms:number)=>{const s=origTo(ms);Object.defineProperty(s,'aborted',{value:true,configurable:true});return s;});
+    const e = await b.withRequestBudget(async()=>{vi.setSystemTime(Date.now()+b.REQUEST_DEADLINE_MS-2000);return svc.getAvatarImage('test.eth').catch((x:unknown)=>x);});
+    expectDeadline(e); assertAllRemoved();
   });
 });
