@@ -66,6 +66,9 @@ query-param parsing in the rasterize handler.
 ## Commit history
 
 ```
+current metadata-only correction (tip; hash intentionally omitted because
+    content predates commit)
+de4b131 docs: correct WORKHORSE-SPEC mutant kill lists, per-file diffs, commit count
 00f6f51 docs: correct WORKHORSE-SPEC to match committed matrix
 ceec071 test: add non-square valid and exactly-one-invalid cases
 1cb8b19 refactor: read rasterize w/h params once per dimension
@@ -74,13 +77,11 @@ ee9dee7 test: harden W8-RASTER-001 matrix
 c40e4e5 test: red — W8-RASTER-001 six-case TDD matrix on main base
 23d3d9f spec: amend WORKHORSE-SPEC
 4f152f9 spec: WORKHORSE-SPEC for W8-RASTER-001
-5a5527c Merge pull request #54 (main HEAD BASE)
+5a5527c Merge pull request #54 (main BASE)
 ```
 
-8 linear commits on `5a5527c7e7ac7c20140bdd81757c5bd075bd389a` (final will
-be 9 including this correction). Pre-correction diff:
-`WORKHORSE-SPEC.md` +206/−0, `src/index.ts` +4/−2,
-`test/rasterize-svg-avatar.test.ts` +189/−2 — aggregate +399/−4.
+10 linear commits including current tip on
+`5a5527c7e7ac7c20140bdd81757c5bd075bd389a`.
 
 ## Test matrix (20 cases)
 
@@ -190,13 +191,27 @@ T1, T2, T3 failed as expected.
 | `ee9dee7` (harden) | 58 | 1077 | 1 |
 | `1cb8b19` (refactor) | 58 | 1077 | 1 |
 | `ceec071` (non-square/one-invalid) | 58 | 1084 | 1 |
-| `00f6f51` (spec correction, HEAD) | 58 | 1084 | 1 |
+| `00f6f51` (spec correction) | 58 | 1084 | 1 |
+| `de4b131` (mutant kill list correction) | 58 | 1084 | 1 |
+| (current tip; metadata-only correction) | 58 | 1084 | 1 |
 
 ### Typecheck and lint
 ```
 tsc --noEmit      → clean
 eslint src        → 0 errors (20 pre-existing warnings)
 ```
+
+## Final diff
+
+```
+WORKHORSE-SPEC.md                 | 225 ++++++++++
+src/index.ts                      |   6 +-
+test/rasterize-svg-avatar.test.ts | 191 +++++-
+3 files changed, 418 insertions(+), 4 deletions(-)
+```
+
+Per-file: WORKHORSE-SPEC +225/−0, src/index.ts +4/−2,
+test/rasterize-svg-avatar.test.ts +189/−2.
 
 ## Exclusions
 
