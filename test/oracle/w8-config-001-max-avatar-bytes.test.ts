@@ -68,4 +68,27 @@ describe('MAX_AVATAR_BYTES garbage falls back to the 25 MiB default', () => {
     const res = await avatar('9007199254740993', overDefault);
     expect(res.status).toBe(404);
   });
+
+  it('rejects a safe but impractically huge value and falls back to the default cap', async () => {
+    // Number.MAX_SAFE_INTEGER (9,007,199,254,740,991) is a safe integer
+    // but ~9 PB — an operator slip that must not disable the resource cap.
+    const overDefault = png(DEFAULT_CAP + 1);
+    const res = await avatar('9007199254740991', overDefault);
+    expect(res.status).toBe(404);
+  });
+
+  it('accepts a value at the practical maximum and caps at that size', async () => {
+    // 100 MiB (104,857,600) is the largest accepted cap.
+    const body = png(PNG_MAGIC.length);
+    const res = await avatar('104857600', body);
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(body);
+  });
+
+  it('rejects a value one byte above the practical maximum and falls back to the default', async () => {
+    // 100 MiB + 1 must fall back to the 25 MiB default.
+    const overDefault = png(DEFAULT_CAP + 1);
+    const res = await avatar('104857601', overDefault);
+    expect(res.status).toBe(404);
+  });
 });
