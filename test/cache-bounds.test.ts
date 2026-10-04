@@ -428,3 +428,109 @@ describe('getV2Registries: discovery failure after cache TTL', () => {
     expect(exec).toHaveBeenCalledTimes(2);
   });
 });
+
+// P1 deployment gap: edge cache (caches.default) is keyed by request URL
+// without a generation discriminator, so pre-deploy v2 edge entries can
+// outlive the authoritative R2 deadline by up to EDGE_CACHE_MAX_AGE_SECS
+// (300 s).  The fix adds a __ecv=v3 query parameter to the edge cache key.
+describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
+  const VERSIONED_PARAM = '__ecv=v3';
+  const IMAGE_PATH = '/sepolia/registry/fox.eth/image';
+  const RASTERIZE_PATH = '/sepolia/registry/fox.eth/rasterize';
+  const BASE_URL = 'http://localhost';
+
+  function versionedUrl(path: string): string {
+    return `${BASE_URL}${path}?${VERSIONED_PARAM}`;
+  }
+
+  function unversionedUrl(path: string): string {
+    return `${BASE_URL}${path}`;
+  }
+
+  function setEdgeEntry(url: string, body: string, maxAge: number = 300) {
+    edgeStore.set(url, {
+      response: new Response(body, {
+        headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': `public, max-age=${maxAge}` },
+      }),
+      maxAge,
+    });
+  }
+
+  beforeEach(() => {
+    edgeStore.clear();
+  });
+
+  it('does not serve an unversioned pre-v3 edge entry for /image (SVG)', async () => {
+    setEdgeEntry(unversionedUrl(IMAGE_PATH), '<svg>PRE-V3-EDGE</svg>');
+
+    const res = await get(IMAGE_PATH);
+    const text = await res.text();
+
+    // Must miss the unversioned entry and render fresh — the pre-deploy
+    // edge bytes must never reach the client.
+    expect(text).not.toContain('PRE-V3-EDGE');
+    expect(res.status).toBe(200);
+  });
+
+  it('does not serve an unversioned pre-v3 edge entry for /rasterize (PNG)', async () => {
+    setEdgeEntry(unversionedUrl(RASTERIZE_PATH), 'PREV3PNG', 300);
+
+    const res = await get(RASTERIZE_PATH);
+    const body = await res.arrayBuffer();
+
+    expect(new TextDecoder().decode(body)).not.toBe('PREV3PNG');
+    expect(res.status).toBe(200);
+  });
+
+  it('serves a v3 edge entry for /image (SVG)', async () => {
+    setEdgeEntry(versionedUrl(IMAGE_PATH), '<svg>V3-EDGE-HIT</svg>');
+
+    const res = await get(IMAGE_PATH);
+    const text = await res.text();
+
+    expect(text).toContain('V3-EDGE-HIT');
+    expect(res.status).toBe(200);
+  });
+
+  it('serves a v3 edge entry for /rasterize (PNG)', async () => {
+    setEdgeEntry(versionedUrl(RASTERIZE_PATH), 'V3PNGHIT', 300);
+
+    const res = await get(RASTERIZE_PATH);
+    const body = await res.arrayBuffer();
+
+    expect(new TextDecoder().decode(body)).toBe('V3PNGHIT');
+    expect(res.status).toBe(200);
+  });
+
+  it('public request URL is unchanged (no version discriminator visible to client)', async () => {
+    // The edge cache key is internal; the client-visible URL must be untouched.
+    const res = await get('/sepolia/registry/fox.eth/image?width=518&height=518');
+    // The response should not redirect, and the URL should stay as-is.
+    expect(res.status).toBe(200);
+    // No __ecv in client-visible headers or body
+    const text = await res.text();
+    expect(text).not.toContain('__ecv');
+  });
+
+  it('stores a freshly rendered edge entry under the versioned URL', async () => {
+    // No pre-populated edge entry — fresh render.
+    const res = await get(IMAGE_PATH);
+    expect(res.status).toBe(200);
+    await flush();
+
+    // After the render, an entry must exist at the versioned URL.
+    expect(edgeStore.has(versionedUrl(IMAGE_PATH)), 'versioned edge entry must be stored').toBe(true);
+    // No entry at the unversioned URL (never stored there by new code).
+    // (A pre-deploy entry might exist there but the new code doesn't put there.)
+  });
+
+  it('query parameter ordering does not affect cache key matching', async () => {
+    // Varying query param order should still match the same edge entry.
+    setEdgeEntry(versionedUrl('/sepolia/registry/fox.eth/image?width=518&height=518'), '<svg>QORDER</svg>');
+
+    const res = await get('/sepolia/registry/fox.eth/image?height=518&width=518');
+    const text = await res.text();
+
+    expect(text).toContain('QORDER');
+  });
+});
