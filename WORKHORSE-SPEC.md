@@ -84,7 +84,7 @@ works correctly when the PK includes `root_domain_id`).
 The original plan assumed no application-code changes would be needed. External
 review across 4 rounds identified additional work, all within W8-D1-001 scope:
 
-### Actual change set (7 files, +1005/−23 from BASE 5a5527c)
+### Actual change set (7 files, +1109/−26 from BASE 5a5527c)
 
 | File | Purpose |
 |---|---|
@@ -93,7 +93,7 @@ review across 4 rounds identified additional work, all within W8-D1-001 scope:
 | `src/services/d1.ts` | `getHierarchyCount()` with freshness filtering; per-root `sync_version` subquery |
 | `src/services/metadata.ts` | `executionCtx` param on `getRegistryHierarchy`; post-try-catch recovery on both success and failure paths |
 | `src/index.ts` | Pass `c.executionCtx` from hierarchy route |
-| `test/d1-hierarchy-isolation.test.ts` | 24 tests: isolation, EXPLAIN QUERY PLAN, freshness count, cross-network, recovery both paths, sync_version per-root + repeated-store + concurrent atomic, clock-frozen boundary inclusion/exclusion, causal containment with countCalled, rejection absorption, deferred persistence, route wiring source-inspection + execution-level app.request |
+| `test/d1-hierarchy-isolation.test.ts` | 28 tests across 7 rounds |
 
 ### Rounds
 
@@ -102,8 +102,8 @@ review across 4 rounds identified additional work, all within W8-D1-001 scope:
 - **Round 3** (b1da4d0→1449252): Post-try-catch recovery on both paths, freshness-filtered count
 - **Round 4** (1c3b66e→a4a3dca): Full-PK sync_version subquery, inclusive count boundary, lint-clean
 - **Round 5** (b307457→4e1064b): Pre-DELETE version query, clock-frozen boundary tests, route-wiring source-inspection, causal containment hardening
-- **Round 6** (959e934→270be5a): Atomic INSERT-first batch order eliminates pre-read race; concurrent stores observe distinct versions; complement-based stale-row cleanup; execution-level app.request route wiring test; boundary assertions awaited before useRealTimers
+- **Round 7** (c014370→ce447cb): In-batch NOT IN DELETE eliminates pre-read stale-row race; empty hierarchy handled; dynamic placeholders bounded to ~32; concurrent overlap test; shrink tests sequential+concurrent+sibling+cross-network; concurrent version exact toBe(2); causal containment promiseSettled flag
 
 ### Final gate
 
-59 files, 1088 passed, 1 skipped. Typecheck 0, lint 0 errors. EXPLAIN QUERY PLAN: `SEARCH USING INDEX idx_hierarchy_root_level (network=? AND root_domain_id=?)`.
+59 files, 1092 passed, 1 skipped. Typecheck 0, lint 0 errors.
