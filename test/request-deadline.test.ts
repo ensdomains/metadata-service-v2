@@ -23,6 +23,7 @@ import { IndexerService } from '../src/services/indexer';
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from '../src/services/fallback';
 import { UpstreamError } from '../src/services/errors';
 import { MAX_UNQUEUED_RPC_ATTEMPTS, withRequestBudget } from '../src/services/request-budget';
+import { guardedCcipRequest } from '../src/services/ccip-request';
 
 // WEB-1552: the retry budget multiplied past the request timeout. The primary
 // RPC transport alone (8s timeout, retryCount 2) could spend ~25s of the 30s
@@ -624,6 +625,28 @@ describe('which RPC reads mark an endpoint', () => {
     expect(slowCalls).toBeGreaterThan(0);
     expect(out.error).toBeUndefined();
     expect(out.value).toBe(OWNER);
+  });
+});
+
+describe('CCIP gateway fetch under the request deadline', () => {
+  const SENDER = '0x1111111111111111111111111111111111111111' as const;
+
+  it('does not start a gateway fetch with less than 1s left on the request deadline', async () => {
+    const fetchMock = vi.fn(async () => new Response('0x01', { headers: { 'content-type': 'text/plain' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    // 500ms left: well under MIN_UPSTREAM_ATTEMPT_MS (1000ms).
+    const out = await settle(inRequest(500, () =>
+      guardedCcipRequest({
+        data: '0x01',
+        sender: SENDER,
+        urls: ['https://gateway.example/{data}'],
+      }),
+    ), 60_000);
+
+    expectDeadlineError(out.error);
+    expect(out.elapsed).toBeLessThanOrEqual(50);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
