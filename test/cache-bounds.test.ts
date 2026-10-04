@@ -182,6 +182,115 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
   });
 });
 
+// P2: Near-expiry R2 hits carry full-status client/edge TTLs beyond the
+// authoritative R2 deadline.  Downstream max-age and edge caps must be
+// bounded to the remaining R2 lifetime (conservative floor).
+describe('L0 edge-cache TTL: remaining R2 lifetime cap (P2)', () => {
+  const IMG = '/sepolia/registry/fox.eth/image';
+  const RAS = '/sepolia/registry/fox.eth/rasterize';
+
+  function overrideGetImage(remaining: number) {
+    const spy = vi.mocked(ImageCacheService.prototype.getImage);
+    spy.mockImplementationOnce(async function (this: ImageCacheService, _name, options) {
+      const status = options.migrationStatus ?? 'unmigrated';
+      const ttl = this.getTtlConfig(status);
+      // Simulate R2 hit with the given remaining lifetime.
+      // The route handler must cap downstream TTLs to this value.
+      return {
+        svg: '<svg width="518" height="518"></svg>',
+        contentType: 'image/svg+xml',
+        cacheStatus: 'stale' as const,
+        ttlConfig: ttl,
+        avatarFailed: false,
+        remainingLifetimeSeconds: remaining,
+      } as unknown as Awaited<ReturnType<ImageCacheService['getImage']>>;
+    });
+  }
+
+  function clientMaxAge(res: Response): number {
+    const cc = res.headers.get('Cache-Control') ?? '';
+    const m = /max-age=(\d+)/.exec(cc);
+    return m ? Number(m[1]) : -1;
+  }
+
+  function edgeMaxAge(url: string): number | null {
+    const e = edgeStore.get(url);
+    return e ? e.maxAge : null;
+  }
+
+  beforeEach(() => { edgeStore.clear(); });
+
+  // ── remaining 300 s ───────────────────────────────────────────────
+
+  it('/image: remaining 300s caps client max-age to 300 and edge to 300', async () => {
+    overrideGetImage(300);
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    // Client max-age must be capped, not the full softTtl (21600 for migrated)
+    expect(clientMaxAge(res)).toBe(300);
+    // Edge entry must be capped
+    const ema = edgeMaxAge(v3EdgeKey(`http://localhost${IMG}`));
+    expect(ema).not.toBeNull();
+    expect(ema).toBe(300);
+  });
+
+  it('/rasterize: remaining 300s caps client max-age to 300 and edge to 300', async () => {
+    overrideGetImage(300);
+    const res = await get(RAS);
+    expect(res.status).toBe(200);
+    expect(clientMaxAge(res)).toBe(300);
+    const ema = edgeMaxAge(v3EdgeKey(`http://localhost${RAS}`));
+    expect(ema).not.toBeNull();
+    expect(ema).toBe(300);
+  });
+
+  // ── remaining < 60 s ─────────────────────────────────────────────
+
+  it('/image: remaining 59.999s caps client max-age to 59, skips edge put', async () => {
+    overrideGetImage(59.999);
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(clientMaxAge(res)).toBe(59);
+    // Edge put must be skipped — too close to expiry for useful caching
+    expect(edgeMaxAge(v3EdgeKey(`http://localhost${IMG}`))).toBeNull();
+  });
+
+  it('/rasterize: remaining 59.999s caps client max-age to 59, skips edge put', async () => {
+    overrideGetImage(59.999);
+    const res = await get(RAS);
+    expect(res.status).toBe(200);
+    expect(clientMaxAge(res)).toBe(59);
+    expect(edgeMaxAge(v3EdgeKey(`http://localhost${RAS}`))).toBeNull();
+  });
+
+  // ── remaining ~0 ──────────────────────────────────────────────────
+
+  it('/image: remaining 1ms caps client max-age to 0, skips edge put', async () => {
+    overrideGetImage(0.001);
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(clientMaxAge(res)).toBe(0);
+    expect(edgeMaxAge(v3EdgeKey(`http://localhost${IMG}`))).toBeNull();
+  });
+
+  // ── full TTLs still applied for fresh origin (MISS) ───────────────
+
+  it('/image: fresh origin MISS keeps full status client/edge TTLs', async () => {
+    const spy = vi.mocked(ImageCacheService.prototype.getImage);
+    const before = spy.mock.calls.length;
+    // Default mock returns MISS with full ttlConfig (migrated: softTtl=21600)
+    const res = await get(IMG);
+    expect(res.status).toBe(200);
+    expect(spy.mock.calls.length).toBe(before + 1);
+    // Full client TTL
+    expect(clientMaxAge(res)).toBe(21600);
+    // Edge capped at EDGE_CACHE_MAX_AGE_SECS=300 (existing behavior)
+    const ema = edgeMaxAge(v3EdgeKey(`http://localhost${IMG}`));
+    expect(ema).not.toBeNull();
+    expect(ema).toBe(300);
+  });
+});
+
 // ---- SWR revalidation verdicts (metadata-cache) --------------------------------
 
 // In-memory KV double (only what MetadataCacheService touches).
