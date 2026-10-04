@@ -24,10 +24,6 @@ export interface ImageCacheResult {
   // lookup failed (not because the name has none). Such a card is not written
   // to KV/R2, and routes must not cache it for long either.
   avatarFailed: boolean;
-  // Absolute authoritative deadline (epoch ms) — R2 upload time + r2MaxAge.
-  // Routes recompute remaining = floor((deadline - Date.now()) / 1000) at
-  // response time so body/raster latency never extends the cap.
-  authoritativeDeadlineMs?: number;
 }
 
 // Compute SHA-256 hex digest of an ArrayBuffer
@@ -130,10 +126,7 @@ export class ImageCacheService {
             console.error(`[image-cache] KV backfill failed for ${cacheKey}:`, err),
           ),
         );
-        // Carry absolute deadline so routes recompute remaining at response
-        // time — body/raster latency must not extend the cap.
-        const deadlineMs = r2Result.uploadedAtMs + ttlConfig.r2MaxAge * 1000;
-        return { svg: r2Result.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false, authoritativeDeadlineMs: deadlineMs };
+        return { svg: r2Result.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
       }
     } catch (err) {
       console.error(`[image-cache] R2 read error for ${cacheKey}:`, err);
@@ -302,13 +295,7 @@ export class ImageCacheService {
     if (uploadedAtMs !== undefined) {
       const ageSeconds = (Date.now() - uploadedAtMs) / 1000;
       const remaining = Math.max(0, ttlConfig.r2MaxAge - ageSeconds);
-      const expiration = Math.floor(uploadedAtMs / 1000) + ttlConfig.r2MaxAge;
-      // Integer-expiration check: floor(uploaded/1000) + r2MaxAge must be
-      // >= ceil(now/1000) + 60.  ceil(now/1000) is conservative — a
-      // fractional now (ms offset) pushes the required expiration threshold
-      // to the next integer second, correctly skipping when the absolute
-      // deadline is only 59.x s ahead.
-      if (expiration < Math.ceil(Date.now() / 1000) + 60) return;
+      if (remaining < 60) return;
 
       const entry: SvgCacheEntry = {
         svg,
