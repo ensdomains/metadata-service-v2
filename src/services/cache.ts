@@ -223,10 +223,10 @@ export class CacheService {
 
 // Cache key generators for internal operations
 export const CacheKeys = {
-  domain: (name: string, network: string) => `ensnode:${network}:domain:${name.toLowerCase()}`,
-  domains: (names: string[], network: string) => `ensnode:${network}:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
-  migrationStatus: (name: string, network: string) => `ensnode:${network}:migration:${name.toLowerCase()}`,
-  hierarchy: (name: string, network: string) => `ensnode:${network}:hierarchy:${name.toLowerCase()}`,
+  domain: (name: string, network: string) => `ensnode:${network}:domain:${name.normalize("NFC").toLowerCase()}`,
+  domains: (names: string[], network: string) => `ensnode:${network}:batch:${names.map(n => n.normalize("NFC").toLowerCase()).sort().join(",")}`,
+  migrationStatus: (name: string, network: string) => `ensnode:${network}:migration:${name.normalize("NFC").toLowerCase()}`,
+  hierarchy: (name: string, network: string) => `ensnode:${network}:hierarchy:${name.normalize("NFC").toLowerCase()}`,
   health: (network: string) => `ensnode:${network}:health:status`,
 };
 
