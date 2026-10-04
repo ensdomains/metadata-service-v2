@@ -23,13 +23,15 @@ without validating that the entire string is a pure decimal integer. The image
 route (`/image`) has the same pattern (line 555) but that is out of scope for
 this ticket (W8-ROUTES-002, also WEB-1717).
 
-The `imageService.validateOptions()` correctly uses `Number.isInteger`, but:
-- For non-square dimensions the rasterize handler does pass `options.size`
-  through `validateOptions`, but `parseInt('100a')=100` is a valid integer and
-  passes.
-- For square custom dimensions the rasterize handler bypasses `options.size`
-  entirely and rewrites the SVG width/height attributes directly with the
-  attacker-supplied `outputWidth`/`outputHeight`.
+Two downstream paths are affected:
+- **Square custom size:** `hasCustomSize` is true and `outputWidth === outputHeight`;
+  the handler bypasses `options.size` and rewrites the root SVG width/height
+  attributes directly with the attacker-supplied values via `svgForRasterize.replace()`.
+- **Non-square custom size:** `hasCustomSize` is true and dimensions differ;
+  the handler sets `options.size = {width, height}` and passes it through
+  `validateOptions` (which accepts the parsed integer) and into
+  `imageCacheService.getImage()`. The SVG is not rewritten — the size is
+  communicated to the card composer via options.
 
 ## Acceptance contract
 
@@ -42,96 +44,162 @@ no custom size is supplied and the defaults (518×518) are used.
 Leading-zero decimal spellings (e.g. `w=0100`) are pure decimal strings and are
 accepted; `parseInt('0100', 10)` → `100` correctly.
 
-## Proposed fix
-
-Replace the `parseInt`-only parsing with a pure-decimal-integer check on the
-query string before conversion. The change in `src/index.ts` ~lines 1094–1095:
+## Implemented fix
 
 ```typescript
-// Before (buggy):
-const outputWidth = c.req.query('w') ? parseInt(c.req.query('w')!, 10) : null;
-const outputHeight = c.req.query('h') ? parseInt(c.req.query('h')!, 10) : null;
-
-// After (fixed):
-const outputWidth = c.req.query('w') && /^\d+$/.test(c.req.query('w')!) ? parseInt(c.req.query('w')!, 10) : null;
-const outputHeight = c.req.query('h') && /^\d+$/.test(c.req.query('h')!) ? parseInt(c.req.query('h')!, 10) : null;
+// src/index.ts lines 1092-1097 (committed at 1cb8b19)
+const statusParam = c.req.query('status');
+const wParam = c.req.query('w');
+const hParam = c.req.query('h');
+const outputWidth = wParam && /^\d+$/.test(wParam) ? parseInt(wParam, 10) : null;
+const outputHeight = hParam && /^\d+$/.test(hParam) ? parseInt(hParam, 10) : null;
 ```
 
-The `/^\d+$/` regex rejects non-digit characters (`100a`, `10.5`, `-100`,
-`0x64`, ` 200`) and empty strings. Leading zeros (`0100`) are accepted — they
-match `\d+` and `parseInt` correctly converts them.
+Query params are captured once per dimension into locals (`wParam`, `hParam`)
+before validation. The `/^\d+$/` regex rejects non-digit characters (`100a`,
+`10.5`, `-100`, `0x64`, ` 200`) and empty strings. Leading zeros (`0100`) are
+accepted — they match `\d+` and `parseInt` correctly converts them.
 
-No change to `/image` or any other route. The fix is isolated to the two
-query-param parse lines in the rasterize handler.
+No change to `/image` or any other route. The fix is isolated to the
+query-param parsing in the rasterize handler.
 
-## TDD matrix
+## Commit history
 
-All tests live in `test/rasterize-svg-avatar.test.ts`, in the existing
-`describe('/rasterize never hands an SVG avatar to resvg')` block. Each
-test asserts against `state.rasterized[0]` (the SVG handed to the mocked
-rasterizer) and validates dimension handling. The existing test infrastructure
-already mocks the rasterizer, image cache, and metadata service — no new mocks
-needed.
+```
+ceec071 test: add non-square valid and exactly-one-invalid cases
+1cb8b19 refactor: read rasterize w/h params once per dimension
+ee9dee7 test: harden W8-RASTER-001 matrix
+7920201 fix: W8-RASTER-001
+c40e4e5 test: red — W8-RASTER-001 six-case TDD matrix on main base
+23d3d9f spec: amend WORKHORSE-SPEC
+4f152f9 spec: WORKHORSE-SPEC for W8-RASTER-001
+5a5527c Merge pull request #54 (main HEAD BASE)
+```
 
-### T1 — Malformed width (red → green)
-`/mainnet/registry/nick.eth/rasterize?w=100a&h=200`
+7 linear commits on `5a5527c7e7ac7c20140bdd81757c5bd075bd389a`.
+3 files changed: `src/index.ts` (+6/−2), `test/rasterize-svg-avatar.test.ts`
+(+191/−6), `WORKHORSE-SPEC.md` (+138).
 
-- **Red:** `parseInt('100a')=100` and `parseInt('200')=200` both pass the
-  range guard; `hasCustomSize` is true and the SVG is rewritten to
-  `width="100"`. Fixed code treats `w=100a` as null → `hasCustomSize` is false
-  → default 518×518.
-- **Assert:** `state.rasterized[0]` contains `width="518"` and does **not**
-  contain `width="100"`.
+## Test matrix (20 cases)
 
-### T2 — Malformed height (red → green)
-`/mainnet/registry/nick.eth/rasterize?w=200&h=101b`
+All tests live in a dedicated `describe('rasterize dimensions (W8-RASTER-001)')`
+block in `test/rasterize-svg-avatar.test.ts`. The block has its own `beforeEach`
+that resets `state.card` (default 518×518 no-avatar card), `state.rasterized`,
+`state.getImageOptions`, and console error spy.
 
-- **Red:** same class as T1, one dimension is malformed, the other is clean.
-  `parseInt('101b')=101` → passes → custom 200×101.
-- **Assert:** `state.rasterized[0]` contains `width="518"` (default), not
-  `width="200"`.
+The mock `ImageCacheService.getImage` captures its `options` argument into
+`state.getImageOptions`, enabling assertions on whether `options.size` was set
+(non-square path) or not (default path). The mock `RasterizeService.rasterize`
+captures the SVG handed to the rasterizer into `state.rasterized`, enabling
+assertions on root SVG width/height attributes (square rewrite path).
 
-### T3 — Malformed both (red → green)
-`/mainnet/registry/nick.eth/rasterize?w=100a&h=101b`
+### Malformed values (T1–T3)
 
-- **Red:** both parse as 100 and 101 via `parseInt` → custom size applied.
-- **Assert:** `state.rasterized[0]` uses default 518×518, contains neither
-  `width="100"` nor an attribute reflecting the garbage input.
+Square malformed pairs use **anchored root SVG assertions** to detect the SVG
+attribute rewrite. Non-square uses **`getImageOptions` property assertions**
+to detect whether `options.size` was set.
 
-### T4 — Missing width, clean height (no partial size)
-`/mainnet/registry/nick.eth/rasterize?h=200`
+| Case | Query | Detection path | Red on base | Green after fix |
+|------|-------|---------------|-------------|-----------------|
+| T1 | `w=100a&h=100` | Square rewrite | SVG `width="100"` (rewritten) | SVG `width="518"` (default) |
+| T2 | `w=200&h=200b` | Square rewrite | SVG `width="200"` (rewritten) | SVG `width="518"` (default) |
+| T3a | `w=100a&h=101b` | Non-square `options.size` | `size={width:100,height:101}` | No `size` property |
+| T3b | `w=150x&h=150x` | Square rewrite | SVG `width="150"` (rewritten) | SVG `width="518"` (default) |
 
-- **Green on base (no regression risk):** `hasCustomSize` is already false
-  because `outputWidth` is null. The fix must not accidentally accept a
-  single-param pair. This test guards against a regression where a future
-  change tries to supply a custom size from one param only.
-- **Assert:** `state.rasterized[0]` uses default 518×518, never `width="200"`.
+Assertions: `not.toMatch(/^<svg width="ATK"/)` (anchored to root SVG opening tag,
+distinct from background `<rect width="518">`) plus `toMatch(/^<svg width="518" height="518"/)`
+for defaults; `not.toHaveProperty('size')` for non-square.
 
-### T5 — Clean square custom size (no regression)
-`/mainnet/registry/nick.eth/rasterize?w=250&h=250`
+### Incomplete pairs (T4)
 
-- **Green on base, green after fix:** pure decimal, within range → custom
-  250×250 applied. Guards against the fix being too restrictive.
-- **Assert:** `state.rasterized[0]` matches `/^<svg width="250" height="250"/`.
+| Case | Query | Assertion |
+|------|-------|-----------|
+| T4a | `?h=200` | Root SVG 518×518, no `size` in options |
+| T4b | `?w=200` | Root SVG 518×518, no `size` in options |
 
-### T6 — Out-of-range clean value (no regression)
-`/mainnet/registry/nick.eth/rasterize?w=99&h=99`
+Both directions covered. Green on base already — guards against future
+regression that tries to supply a one-param size.
 
-- **Green on base, green after fix:** `hasCustomSize` is already false
-  (99 < 100). Guards against the regex fix accidentally widening the range.
-- **Assert:** default 518×518.
+### Clean custom sizes — square + non-square (T5)
 
-## Gate
+| Case | Query | Detection path | Assertion |
+|------|-------|---------------|-----------|
+| T5a | `w=250&h=250` | Square rewrite | Root SVG `width="250" height="250"` |
+| T5b | `w=200&h=300` | Non-square `options.size` | `size={width:200,height:300}`, root SVG 518×518 |
+| T5c | `w=100&h=2000` | Non-square `options.size` (kills square-only) | `size={width:100,height:2000}`, root SVG 518×518 |
+| T5d | `w=2000&h=100` | Non-square `options.size` (kills square-only) | `size={width:2000,height:100}`, root SVG 518×518 |
 
-`CI=true pnpm run test` — all existing tests plus the six TDD cases above must
-pass after the fix. The change is a pure restriction; no existing test should
-rely on malformed query params being accepted.
+Non-square cases assert `getImageOptions!.size` has the exact expected shape.
+The root SVG stays at 518×518 because the mock returns the default card and
+the SVG rewrite only fires for square sizes.
+
+### Boundary values (T6)
+
+| Case | Query | Meaning | Assertion |
+|------|-------|---------|-----------|
+| T6a | `w=99&h=99` | Both below lower | Root SVG 518×518, no size |
+| T6b | `w=100&h=100` | Exact lower bound (kills `>100`) | Root SVG `width="100" height="100"` |
+| T6c | `w=2000&h=2000` | Exact upper bound | Root SVG `width="2000" height="2000"` |
+| T6d | `w=2001&h=2001` | Both above upper | Root SVG 518×518, no size |
+| T6e | `w=99&h=100` | Cross-boundary (both-square) | Root SVG 518×518, no size |
+| T6f | `w=200&h=99` | Valid w, h too low (kills height-bound removal) | Root SVG 518×518, no size |
+| T6g | `w=99&h=200` | Valid h, w too low (kills width-bound removal) | Root SVG 518×518, no size |
+| T6h | `w=200&h=2001` | Valid w, h too high (kills height-bound removal) | Root SVG 518×518, no size |
+| T6i | `w=2001&h=200` | Valid h, w too high (kills width-bound removal) | Root SVG 518×518, no size |
+
+### Leading zeros (T7)
+
+| Case | Query | Assertion |
+|------|-------|-----------|
+| T7 | `w=0100&h=0100` | Root SVG `width="100" height="100"` (accepted, kills `/^[1-9]\d*$/`) |
+
+## Mutant coverage (9 mutants, all killed by committed tests)
+
+Each mutant was temporarily applied against `1cb8b19`, tests were run to
+confirm failure, then the mutant was reverted. No mutant commits exist.
+
+| # | Mutant | Change | Tests killed |
+|---|--------|--------|-------------|
+| 1 | Exclusive lower bound | `>=100` → `>100` | T5c, T5d, T6b, T7 |
+| 2 | No-leading-zero parser | `/^\d+$/` → `/^[1-9]\d*$/` | T7 |
+| 3 | Upper off-by-one | `<=2000` → `<2000` | T6c |
+| 4 | Permissive parser | Regex guard removed (bare `parseInt`) | T1, T2, T3a, T3b |
+| 5 | Width-only `hasCustomSize` | Remove `outputHeight` from guard | T2, T4b |
+| 6 | Height-only `hasCustomSize` | Remove `outputWidth` from guard | T1, T4a, T6e |
+| 7 | Square-only | Add `&& outputWidth === outputHeight` | T5b, T5c, T5d |
+| 8 | Width-bound removed | Skip height range check | T6f, T6h |
+| 9 | Height-bound removed | Skip width range check | T6e, T6g, T6i |
+
+## Gates
+
+### Red gate (`c40e4e5` — six-case matrix on buggy base)
+```
+CI=true pnpm run test
+Test Files  1 failed | 57 passed (58)
+Tests       3 failed | 1067 passed | 1 skipped (1071)
+```
+T1, T2, T3 failed as expected.
+
+### Green gates (all CI=true pnpm run test)
+| Commit | Files | Passed | Skipped |
+|--------|-------|--------|---------|
+| `7920201` (fix) | 58 | 1070 | 1 |
+| `ee9dee7` (harden) | 58 | 1077 | 1 |
+| `1cb8b19` (refactor) | 58 | 1077 | 1 |
+| `ceec071` (non-square/one-invalid) | 58 | 1084 | 1 |
+
+### Typecheck and lint
+```
+tsc --noEmit      → clean
+eslint src        → 0 errors (20 pre-existing warnings)
+```
 
 ## Exclusions
 
-- `/image` route (W8-ROUTES-002 / WEB-1717): untouched.
-- No copy from `testing-campaign` branch.
+- `/image` route (W8-ROUTES-002, WEB-1717): untouched, zero diffs.
+- `testing-campaign` branch: not copied or cherry-picked.
 - No other rasterize behaviour changes.
+- No subagents, no `host.sh`, no bare `pnpm run test`.
 
 ## Base
 
