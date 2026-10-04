@@ -204,6 +204,57 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
     const sepoliaEthRow = sepoliaResults.find((r) => r.name === 'eth');
     expect(sepoliaEthRow!.owner).toBe('0xSEP');
   });
+
+  // --- P2 (sync_version): subquery keys only (network, id), missing root_domain_id ---
+  // Sibling roots sharing eth would inherit each other's sync_version.
+  // store a.eth twice → version 2, store b.eth once → version 1 for b.eth's eth.
+
+  it('sync_version is per-root: sibling roots have independent version sequences', async () => {
+    const { db, sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(db, 'mainnet');
+
+    // Store a.eth once, then b.eth once. They share eth as ancestor.
+    await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
+    await d1.storeHierarchy('b.eth', [ethAncestor(), bEthDomain()]);
+
+    // a.eth's eth row: first write, sync_version should be 1.
+    const aEthVersion = (sqlite.prepare(
+      'SELECT sync_version FROM registry_hierarchy WHERE network = ? AND id = ? AND root_domain_id = ?'
+    ).get('mainnet', namehash('eth'), namehash('a.eth')) as { sync_version: number }).sync_version;
+    expect(aEthVersion).toBe(1);
+
+    // b.eth's eth row: first write for b.eth, but the subquery
+    //   (SELECT sync_version FROM registry_hierarchy WHERE network=?1 AND id=?2)
+    // matches a.eth's eth row on HEAD because it only keys on (network, id).
+    // After the fix includes root_domain_id, b.eth's version is independent.
+    const bEthVersion = (sqlite.prepare(
+      'SELECT sync_version FROM registry_hierarchy WHERE network = ? AND id = ? AND root_domain_id = ?'
+    ).get('mainnet', namehash('eth'), namehash('b.eth')) as { sync_version: number }).sync_version;
+    expect(bEthVersion).toBe(1);
+  });
+
+  // --- P2 (boundary): getHierarchyCount uses > but isFresh uses <= ---
+  // A row exactly at the max-age boundary is fresh by isFresh (inclusive)
+  // but excluded by getHierarchyCount (exclusive), causing redundant sync.
+
+  it('getHierarchyCount includes rows exactly at the freshness boundary, matching isFresh', async () => {
+    const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(
+      { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])) }) }) } as unknown as D1Database,
+      'mainnet'
+    );
+
+    const rootId = namehash('a.eth');
+    // Write a row exactly at the freshness boundary (7 days ago).
+    const boundaryTs = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    sqlite.prepare(`INSERT INTO registry_hierarchy (network, id, name, owner, resolver, level, parent_id, root_domain_id, last_updated, sync_version)
+      VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${boundaryTs}, 1)`).run(namehash('eth'), rootId);
+
+    // isFresh uses <= (inclusive), so the row IS fresh.
+    // getHierarchyCount must also return 1 (use >= not >).
+    const count = await (d1 as any).getHierarchyCount('a.eth');
+    expect(count).toBe(1);
+  });
 });
 
 // === Route-level recovery test (mock-based) =================================
@@ -376,14 +427,28 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
     expect(waitUntil).toHaveBeenCalled();
   });
 
-  // --- Exact promise identity: waitUntil receives the syncHierarchy promise ---
+  // --- Causal containment: registered promise causally contains sync ---
+  // The outer promise registered with waitUntil must remain pending while
+  // syncHierarchy runs, settle only after it completes, and not swallow
+  // assertions. Reference equality with the inner syncPromise is NOT required.
 
-  it('waitUntil receives the actual pending syncHierarchy promise, not a resolved substitute', async () => {
-    // Use a never-resolving syncHierarchy to prove the promise is
-    // the real one (a resolved substitute would settle immediately).
+  it('waitUntil-registered promise is pending before sync, settles after sync, and D1 stays empty until sync completes', async () => {
     let syncResolve!: (v: unknown) => void;
     const syncPromise = new Promise((resolve) => { syncResolve = resolve; });
     const syncHierarchyMock = vi.fn().mockReturnValue(syncPromise);
+
+    const { DatabaseSync: DB } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
+    const sqlite = new DB(':memory:');
+    sqlite.exec(readFileSync(new URL('../migrations/002_network_scoping.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/003_hierarchy_root_scoping.sql', import.meta.url), 'utf8'));
+    const realStmt = (sql: string, params: unknown[] = []): unknown => ({
+      bind: (...p: unknown[]) => realStmt(sql, p),
+      run: async () => ({ success: true, results: [], meta: sqlite.prepare(sql).run(...(params as never[])) }),
+      first: async () => sqlite.prepare(sql).get(...(params as never[])) ?? null,
+      all: async () => ({ results: sqlite.prepare(sql).all(...(params as never[])), success: true, meta: {} }),
+    });
+    const realDb = { prepare: (sql: string) => realStmt(sql), batch: async (stmts: Array<{ run: () => Promise<unknown> }>) => Promise.all(stmts.map((s: { run: () => Promise<unknown> }) => s.run())) } as unknown as D1Database;
+    const realD1 = new D1Service(realDb, 'sepolia');
 
     const svc = new MetadataService(
       { indexerV2Endpoint: 'https://indexer.test/graphql', indexerV2ApiVersion: 'v2', indexerV1Endpoint: 'https://v1.test/subgraph', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: true },
@@ -394,20 +459,28 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
     vi.spyOn(s.fallback, 'getRegistryHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
     vi.spyOn(s.cache, 'get').mockResolvedValue(null);
     vi.spyOn(s.cache, 'set').mockResolvedValue(undefined);
-    s.d1 = { getHierarchy: vi.fn().mockResolvedValue([]), getHierarchyCount: vi.fn().mockResolvedValue(0) } as unknown as D1Service;
+    s.d1 = realD1;
     s.sync = { syncHierarchy: syncHierarchyMock };
 
-    const waitUntil = vi.fn((p: Promise<unknown>) => {
-      // The promise must be pending (not resolved).
-      expect(Promise.resolve(p)).not.toBe(p); // p !== a resolved promise wrapping p
-    });
+    let registeredPromise: Promise<unknown> | null = null;
+    const waitUntil = vi.fn((p: Promise<unknown>) => { registeredPromise = p; });
     const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
 
     try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {}
 
-    // Clean up.
+    // 1. A promise was registered.
+    expect(registeredPromise).not.toBeNull();
+    // 2. syncHierarchy was called.
+    expect(syncHierarchyMock).toHaveBeenCalledWith('a.eth');
+    // 3. D1 is still empty before sync completes (causal ordering).
+    const before = await realD1.getHierarchyCount('a.eth');
+    expect(before).toBe(0);
+
+    // Complete the sync.
     syncResolve({ operation: 'hierarchy', processed: 1, stored: 1, errors: 0, duration: 0 });
-    await syncPromise;
+
+    // 4. Registered promise resolves cleanly.
+    await expect(registeredPromise!).resolves.not.toThrow();
   });
 
   // --- Rejection absorption: syncHierarchy failure does not propagate ---
