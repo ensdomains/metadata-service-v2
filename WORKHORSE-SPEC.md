@@ -60,7 +60,8 @@ Core production and primary test files (the exact diff also contains required ro
 - [x] T008 [AC4] Final single edge RED `a68890e` (13 intended failures, typecheck clean) → product-only GREEN `ca6b43e`; all seven RED test blobs identical. Actual put→hit body/one-render (proved by mutant: `e7cf0c2` edge-always-miss produces 2 calls), duplicate `w` first-value semantics (proved by mutant: `394411d` last-w switch fails), duplicate client `__ecv` replacement, image/rasterize match/put and legacy+v3 purge covered.
 - [x] T009 [AC2] Final downstream cycle RED `1a12284` (5 intended failures, test-only/typecheck-clean) → GREEN `70793ba` (only `src/index.ts` and `src/services/image-cache.ts`); both RED test blobs are byte-identical.
 - [x] T010 [AC2] Propagate `authoritativeDeadlineMs`, recompute conservative remaining lifetime separately at response and edge-put time for image/rasterize, skip zero, and require integer KV expiration at least 60 actual seconds beyond fractional current time.
+- [x] T011 [AC2] KV-deadline preservation RED `b377ea8` (4 intended failures; tests only) → GREEN `df50011` (only image-cache/types); unchanged RED blobs. Backfill persists the exact deadline, L1 restores it, malformed/expired marked entries fail closed, and unmarked fresh-origin entries remain valid.
 
 ## Final evidence
 
-Final append-only history: **75 commits**. Exact scope: **13 files, +901/-33**. Focused/full/typecheck/lint/build and edge/TTL/deadline/KV-fractional mutants passed. Rejected attempts, forbidden-stash attempt, and explicit reverts remain durable evidence. Fresh external closure is still required.
+Final append-only history: **78 commits**. Exact scope: **14 files, +1028/-44**. Focused/full/typecheck/lint/build and edge/TTL/deadline/KV-fractional mutants passed. Rejected attempts, forbidden-stash attempt, and explicit reverts remain durable evidence. Fresh external closure is still required.
