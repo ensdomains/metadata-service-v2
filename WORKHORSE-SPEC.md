@@ -27,8 +27,8 @@ The request deadline (request-budget.ts) gates every upstream attempt except ava
 
 ## Structure
 
-- **`test/avatar-request-deadline.test.ts`** (new): 33 focused regression tests covering avatar, header, and metadata resolution at 0ms, 999ms, 1000ms, and ample remaining; legacy fallback gating after primary null and UpstreamError consumption; metadata legacy fallback; causal deadline bounding (hung work killed by deadline vs media timeout); work completing before both timeouts; exact `RequestDeadlineError` instanceof check; per-attempt independent bounding; name-independent behavior; boundary precision; deletion mutant kill.
-- **`src/services/avatar.ts`** (edit): capture `timeLeftForAttempt` return value; wrap the `withMediaTimeout` call in `raceRequestDeadline(work, timeLeft, what)` so the deadline and media timeout race and the shorter wins. Import `raceRequestDeadline` from `./request-budget`. The stale outer `timeLeftForAttempt` in `resolveMedia` removed.
+- **`test/avatar-request-deadline.test.ts`** (new): 40 focused regression tests covering avatar, header, and metadata resolution at 0ms, 999ms, 1000ms, and ample remaining; legacy fallback gating; causal deadline bounding (hung work killed by deadline vs media timeout); work completing before both timeouts; exact `RequestDeadlineError` instanceof check; per-attempt independent bounding; name-independent behavior; boundary precision; deletion mutant kill; timer retention after all outcomes (deadline win, media-timeout win, sync/async work success, sync throw, async rejection, primary+legacy).
+- **`src/services/avatar.ts`** (edit): import `raceRequestDeadline` and `timeLeftForAttempt` from `./request-budget`; capture `timeLeftForAttempt` return value; track the media-timer handle at the `lookup()` level; create the media timeout inside `runInOutageScope` (preserving outage-scope classification); clear the timer in the outer `finally` block so no timer survives any outcome. `withMediaTimeout` private method also updated with internal timer cleanup for callers that still use it.
 - **`WORKHORSE-SPEC.md`** (this file): committed at the planning stage as the record of intent; revised in later commits to document POSTMASTER-HOLD corrections.
 
 ## Decisions
@@ -38,17 +38,17 @@ The request deadline (request-budget.ts) gates every upstream attempt except ava
 3. **Causal bounding**: `raceRequestDeadline` races the media-timeout promise against a deadline promise with the captured `timeLeft` duration. Whichever is shorter wins: the deadline throws `RequestDeadlineError`, the media timeout throws `UpstreamError`. Outside a request (no budget), `raceRequestDeadline` passes through with no deadline race.
 4. **In-scope paths**: `getAvatarImage`, `getHeaderImage`, `getAvatarMeta` — all flow through `lookup()`.
 5. **Legacy fallback semantics preserved**: `withLegacyFallback` is unchanged. When the primary attempt consumes time past the floor, the legacy lookup independently throws `RequestDeadlineError`. When the primary hangs, the deadline kills it before legacy is reached.
-6. **TDD history**: three red→green cycles — initial gate placement (`62d83dc`→`5d6f4fc`), per-attempt correction (`c53d778`→`5628bd3`), causal deadline bounding (`0f7cfe3`→`b4d775f`).
+6. **TDD history**: four red→green cycles — initial gate placement (`62d83dc`→`5d6f4fc`), per-attempt correction (`c53d778`→`5628bd3`), causal deadline bounding (`0f7cfe3`→`b4d775f`), timer cleanup (`fc7db36`→`60e6fa7`).
 
 ## Showing each criterion
 
 | # | Criterion, as the ticket words it | Check (command and input) | Expected output |
 |---|---|---|---|
 | AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `npx vitest run test/avatar-request-deadline.test.ts` on the test-only commit before each fix (commits `62d83dc`, `c53d778`, `0f7cfe3` each tested against the preceding product commit) | Tests fail on the then-current product commit. Failing output captured at dispatch. |
-| AC2 | After the fix, that focused regression passes without weakening its assertion. | `npx vitest run test/avatar-request-deadline.test.ts` on each fix commit | All tests pass: 4/4 after initial, 17/17 after correction, 33/33 after causal bounding. |
-| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `npx vitest run` (full suite) | All tests pass: 59 files, 1097 passed, 1 skipped. |
+| AC2 | After the fix, that focused regression passes without weakening its assertion. | `npx vitest run test/avatar-request-deadline.test.ts` on each fix commit | All tests pass: 4/4 after initial, 17/17 after correction, 33/33 after causal bounding, 40/40 after timer cleanup. |
+| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `npx vitest run` (full suite) | All tests pass: 59 files, 1104 passed, 1 skipped. |
 | AC4 | The change set addresses only `W8-BUDGET-001` and does not bundle another findings.md id. | `git diff BASE...HEAD` | Product change limited to `src/services/avatar.ts`. Test: `test/avatar-request-deadline.test.ts`. Spec: `WORKHORSE-SPEC.md`. |
-| AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | Verify branch name is `WEB-1712`, base is `5a5527c7`, and no commit references testing-campaign | Branch: `WEB-1712`; base: `5a5527c7`; no cherry-pick commits. |
+| AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | Verify branch name is `WEB-1712`, base is `5a5527c7`, and no commit references testing-campaign | Pending — branch is `WEB-1712`, base `5a5527c7`, no testing-campaign content. No upstream/PR exists yet; this is a postmaster landing concern. |
 
 ## Tasks
 
