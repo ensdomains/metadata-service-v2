@@ -19,7 +19,7 @@ async function avatar(maxAvatarBytes: string | undefined, body: Uint8Array): Pro
   const { default: app } = await import('../../src/index');
   const { AvatarResolver } = await import('@ensdomains/ens-avatar');
   vi.spyOn(AvatarResolver.prototype, 'getAvatar').mockResolvedValue('https://cdn.example/red-team.png');
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { headers: { 'content-type': 'image/png' } })));
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(Buffer.from(body), { headers: { 'content-type': 'image/png' } })));
   const env = {
     ...createMockEnv(),
     RATE_LIMIT_DISABLED: 'true',
