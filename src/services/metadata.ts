@@ -834,7 +834,7 @@ export class MetadataService {
         error instanceof NotFoundError && error.definitive === true;
       if (!definitive) fallbackResponse.hierarchyErrorCache = true;
       await this.cache.set(cacheKey, fallbackResponse, {
-        ttl: definitive ? CacheTTL.normal : CacheTTL.error,
+        ttl: definitive ? CacheTTL.ensnode : CacheTTL.error,
       });
       return fallbackResponse;
     }
