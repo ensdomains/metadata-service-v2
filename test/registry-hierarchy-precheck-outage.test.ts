@@ -40,7 +40,8 @@ vi.mock('../src/services/rasterize', () => ({
 }));
 
 import { MetadataService } from '../src/services/metadata';
-import { UpstreamError } from '../src/services/errors';
+import { BlockchainService } from '../src/services/blockchain';
+import { UpstreamError, RequestDeadlineError } from '../src/services/errors';
 import app from '../src/index';
 
 const ZERO_OWNER = '0x0000000000000000000000000000000000000000';
@@ -122,5 +123,68 @@ describe('GET /registry-hierarchy/:name when checkExpiry throws UpstreamError', 
     });
 
     expect(getRegistryHierarchy).not.toHaveBeenCalled();
+  });
+});
+
+const PLACEHOLDER = {
+  name: 'precheck-outage.eth',
+  hierarchy: [
+    {
+      name: 'eth',
+      owner: ZERO_OWNER,
+      resolver: MAINNET_RESOLVER,
+      level: 1,
+    },
+    {
+      name: 'precheck-outage.eth',
+      owner: ZERO_OWNER,
+      resolver: MAINNET_RESOLVER,
+      level: 2,
+    },
+  ],
+};
+
+async function expectShortCachedPlaceholder(path: string, body: typeof PLACEHOLDER) {
+  const getRegistryHierarchy = vi.spyOn(MetadataService.prototype, 'getRegistryHierarchy');
+  const { ctx, flush } = makeCtx();
+  const res = await app.request(path, undefined, env, ctx);
+  await flush();
+
+  expect(res.status).toBe(200);
+  expect(res.headers.get('Cache-Control')).toBe('public, max-age=30');
+  expect(await res.json()).toEqual(body);
+  expect(edgeWrites).toHaveLength(1);
+  expect(edgeWrites[0].response.status).toBe(200);
+  expect(edgeWrites[0].response.headers.get('Cache-Control')).toBe('public, max-age=30');
+  expect(await edgeWrites[0].response.clone().json()).toEqual(body);
+  expect(getRegistryHierarchy).not.toHaveBeenCalled();
+}
+
+describe('GET /registry-hierarchy/:name when the real expiry pre-check cannot read upstream state', () => {
+  it('does not fail open on mainnet: a getExpiry UpstreamError becomes the 30s placeholder and does not call hierarchy', async () => {
+    vi.spyOn(BlockchainService.prototype, 'getExpiry').mockRejectedValue(
+      new UpstreamError('all RPCs failed'),
+    );
+
+    await expectShortCachedPlaceholder(PATH, PLACEHOLDER);
+  });
+
+  it('does not fail open on sepolia: a getV2Registration RequestDeadlineError becomes the 30s placeholder', async () => {
+    vi.spyOn(BlockchainService.prototype, 'getV2Registration').mockRejectedValue(
+      new RequestDeadlineError('deadline during v2 read'),
+    );
+    const sepoliaResolver = '0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5';
+    const body = {
+      name: 'precheck-outage.eth',
+      hierarchy: [
+        { name: 'eth', owner: ZERO_OWNER, resolver: sepoliaResolver, level: 1 },
+        { name: 'precheck-outage.eth', owner: ZERO_OWNER, resolver: sepoliaResolver, level: 2 },
+      ],
+    };
+
+    await expectShortCachedPlaceholder(
+      '/registry-hierarchy/precheck-outage.eth?network=sepolia',
+      body,
+    );
   });
 });

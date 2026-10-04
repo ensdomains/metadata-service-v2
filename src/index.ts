@@ -735,7 +735,9 @@ app.get(
 
     try {
       try {
-        await metadataService.checkExpiry(name);
+        // Default checkExpiry fails open, which would skip this catch and cache
+        // whatever hierarchy returns as a healthy 200. Surface the unreadable read.
+        await metadataService.checkExpiry(name, { throwOnUnreadable: true });
       } catch (error) {
         if (!(error instanceof UpstreamError)) throw error;
 
