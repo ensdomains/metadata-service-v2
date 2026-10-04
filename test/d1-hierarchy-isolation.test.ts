@@ -209,6 +209,27 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
   // Sibling roots sharing eth would inherit each other's sync_version.
   // store a.eth twice → version 2, store b.eth once → version 1 for b.eth's eth.
 
+  // storeHierarchy deletes root rows before INSERT, so the MAX subquery
+  // finds nothing for a repeated same-root store. The per-root version must
+  // survive the DELETE — capture old version before clearing or use a durable
+  // source. Repeated same-root stores must yield 1,2 not 1,1.
+
+  it('repeated same-root storeHierarchy increments sync_version (1,2 not 1,1)', async () => {
+    const { db, sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(db, 'mainnet');
+
+    await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
+    // Second store of same domain — version must increment.
+    await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
+
+    const aEthVersion = (sqlite.prepare(
+      'SELECT sync_version FROM registry_hierarchy WHERE network = ? AND id = ? AND root_domain_id = ?'
+    ).get('mainnet', namehash('eth'), namehash('a.eth')) as { sync_version: number }).sync_version;
+    // On HEAD: DELETE clears rows, subquery finds nothing, COALESCE→1.
+    // After fix: version captured before DELETE, incremented to 2.
+    expect(aEthVersion).toBe(2);
+  });
+
   it('sync_version is per-root: sibling roots have independent version sequences', async () => {
     const { db, sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
     const d1 = new D1Service(db, 'mainnet');
@@ -233,27 +254,65 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
     expect(bEthVersion).toBe(1);
   });
 
-  // --- P2 (boundary): getHierarchyCount uses > but isFresh uses <= ---
-  // A row exactly at the max-age boundary is fresh by isFresh (inclusive)
-  // but excluded by getHierarchyCount (exclusive), causing redundant sync.
+  // --- P2 (boundary): getHierarchyCount boundary must be exactly isFresh parity ---
+  // isFresh returns (Date.now() - last_updated <= readMaxAgeMs), i.e.
+  // last_updated >= cutoff where cutoff = Date.now() - readMaxAgeMs.
+  // getHierarchyCount must use >= (inclusive), not > (exclusive).
+  // Use frozen clock so the test is deterministic — live Date.now can
+  // cause the row to drift past the boundary between insertion and query.
 
-  it('getHierarchyCount includes rows exactly at the freshness boundary, matching isFresh', async () => {
-    const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
-    const d1 = new D1Service(
-      { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])) }) }) } as unknown as D1Database,
-      'mainnet'
-    );
+  const TEST_NOW = 2000000000000; // fixed reference time
+  const READ_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 604800000 ms
 
-    const rootId = namehash('a.eth');
-    // Write a row exactly at the freshness boundary (7 days ago).
-    const boundaryTs = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    sqlite.prepare(`INSERT INTO registry_hierarchy (network, id, name, owner, resolver, level, parent_id, root_domain_id, last_updated, sync_version)
-      VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${boundaryTs}, 1)`).run(namehash('eth'), rootId);
+  function frozenSqliteD1() {
+    const { sqlite, db } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    return { sqlite, db };
+  }
 
-    // isFresh uses <= (inclusive), so the row IS fresh.
-    // getHierarchyCount must also return 1 (use >= not >).
-    const count = await (d1 as any).getHierarchyCount('a.eth');
-    expect(count).toBe(1);
+  it('getHierarchyCount includes row exactly at freshness boundary (inclusive)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(TEST_NOW);
+    try {
+      const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+      const d1 = new D1Service(
+        { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])) }) }) } as unknown as D1Database,
+        'mainnet'
+      );
+
+      const rootId = namehash('a.eth');
+      // Row exactly at the boundary: cutoff = TEST_NOW - READ_MAX_AGE.
+      const boundaryTs = TEST_NOW - READ_MAX_AGE;
+      sqlite.prepare(`INSERT INTO registry_hierarchy (network, id, name, owner, resolver, level, parent_id, root_domain_id, last_updated, sync_version)
+        VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${boundaryTs}, 1)`).run(namehash('eth'), rootId);
+
+      const count = (d1 as any).getHierarchyCount('a.eth');
+      expect(count).resolves.toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('getHierarchyCount excludes row 1ms past freshness boundary (exclusive)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(TEST_NOW);
+    try {
+      const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+      const d1 = new D1Service(
+        { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])) }) }) } as unknown as D1Database,
+        'mainnet'
+      );
+
+      const rootId = namehash('a.eth');
+      // Row 1ms past the boundary: last_updated = (TEST_NOW - READ_MAX_AGE) - 1.
+      const pastBoundaryTs = TEST_NOW - READ_MAX_AGE - 1;
+      sqlite.prepare(`INSERT INTO registry_hierarchy (network, id, name, owner, resolver, level, parent_id, root_domain_id, last_updated, sync_version)
+        VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${pastBoundaryTs}, 1)`).run(namehash('eth'), rootId);
+
+      const count = (d1 as any).getHierarchyCount('a.eth');
+      expect(count).resolves.toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -596,5 +655,74 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
 
     const rows = await realD1.getHierarchy('a.eth');
     expect(rows.map((r: { name: string }) => r.name)).toEqual(['eth', 'a.eth']);
+  });
+
+  // --- Route wiring: deleting c.executionCtx from index.ts survives all tests ---
+  // The route must pass executionCtx so recovery is registered with waitUntil.
+  // Verify the source file contains the wiring call site.
+
+  it('index.ts routes /registry-hierarchy/:name with c.executionCtx to getRegistryHierarchy', () => {
+    const indexSource = readFileSync(
+      new URL('../src/index.ts', import.meta.url),
+      'utf8',
+    );
+    // The exact call site: metadataService.getRegistryHierarchy(name, c.executionCtx)
+    expect(indexSource).toMatch(
+      /getRegistryHierarchy\s*\(\s*\w+\s*,\s*c\.executionCtx\s*\)/,
+    );
+  });
+
+  // --- Causal containment: kill premature-resolution mutant ---
+  // If the promise registered with waitUntil is already resolved before
+  // the IIFE runs the count check and sync, this test must fail.
+
+  it('registered promise is NOT settled before the IIFE count check and sync complete', async () => {
+    let syncResolve!: (v: unknown) => void;
+    const syncPromise = new Promise((resolve) => { syncResolve = resolve; });
+    const syncHierarchyMock = vi.fn().mockReturnValue(syncPromise);
+
+    // Track whether getHierarchyCount was called — proves the IIFE runs.
+    let countCalled = false;
+    const countPromise = new Promise<number>((resolve) => {
+      // Resolve asynchronously so we can observe pending state.
+      queueMicrotask(() => { countCalled = true; resolve(0); });
+    });
+
+    const svc = new MetadataService(
+      { indexerV2Endpoint: 'https://indexer.test/graphql', indexerV2ApiVersion: 'v2', indexerV1Endpoint: 'https://v1.test/subgraph', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: true },
+      { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
+      { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
+    );
+    const s = svc as unknown as Internals;
+    vi.spyOn(s.fallback, 'getRegistryHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
+    vi.spyOn(s.cache, 'get').mockResolvedValue(null);
+    vi.spyOn(s.cache, 'set').mockResolvedValue(undefined);
+    s.d1 = {
+      getHierarchy: vi.fn().mockResolvedValue([]),
+      getHierarchyCount: vi.fn().mockImplementation(() => countPromise),
+    } as unknown as D1Service;
+    s.sync = { syncHierarchy: syncHierarchyMock };
+
+    let registeredPromise: Promise<unknown> | null = null;
+    const waitUntil = vi.fn((p: Promise<unknown>) => { registeredPromise = p; });
+    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
+
+    try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {}
+
+    // The registered promise must exist.
+    expect(registeredPromise).not.toBeNull();
+
+    // Drain microtasks so the IIFE's count check runs (but syncPromise stays pending).
+    await Promise.resolve();
+
+    // getHierarchyCount must have been called (proves the IIFE executed).
+    expect(countCalled).toBe(true);
+
+    // syncHierarchy must have been called with the deferred promise.
+    expect(syncHierarchyMock).toHaveBeenCalledWith('a.eth');
+
+    // Clean up.
+    syncResolve({ operation: 'hierarchy', processed: 1, stored: 1, errors: 0, duration: 0 });
+    await expect(registeredPromise!).resolves.not.toThrow();
   });
 });
