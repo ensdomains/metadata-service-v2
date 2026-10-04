@@ -15,9 +15,9 @@ import {
   type PublicClient,
 } from 'viem';
 import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
-import { timeLeftForAttempt } from './request-budget';
+import { remainingRequestTime, timeLeftForAttempt } from './request-budget';
 import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayStatus } from './ccip-request';
-import { UpstreamError } from './errors';
+import { RequestDeadlineError, UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
 import { toSafeImage } from './media-safety';
@@ -783,11 +783,19 @@ export class AvatarService {
     if (uri.startsWith('http')) {
       // Validates the URL and every redirect hop (scheme, private hosts, this
       // service's own hostnames); a blocked URL throws and degrades to "none".
+      const left = remainingRequestTime();
+      const mediaTimeoutMs = Number.isFinite(left) ? Math.min(7000, left) : 7000;
+      const inBudget = Number.isFinite(left);
       const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
-        signal: AbortSignal.timeout(7000),
+        signal: AbortSignal.timeout(mediaTimeoutMs),
         headers: {
           'user-agent': 'ENS-Metadata-V2/1.0.0',
         },
+      }, undefined, () => timeLeftForAttempt(`${kind} fetch for ${name}`)).catch((err) => {
+        if (inBudget && err instanceof DOMException && err.name === 'TimeoutError') {
+          throw new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`);
+        }
+        throw err;
       });
 
       if (!response.ok) {
