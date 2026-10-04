@@ -224,6 +224,22 @@ describe('downstream TTL: R2 absolute deadline cap (P2)', () => {
     (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null); (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
     const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(21600); expect(eMax(IMG)).toBe(300);
   });
+
+  // ── KV stale with stored deadline caps TTLs ───────────────────────
+
+  it('/image: KV stale hit with authoritativeDeadlineMs=now+150s caps client 150 edge 150', async () => {
+    const dl = now + 150_000;
+    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(JSON.stringify({
+      svg: '<svg w="518" h="518"></svg>', createdAt: dl - 400_000, softTtl: 60, avatarHash: '', migrationStatus: 'migrated',
+      authoritativeDeadlineMs: dl,
+    }));
+    (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
+    const r = await get(IMG); expect(r.status).toBe(200);
+    // Client max-age must be capped: min(21600, floor((now+150s-now)/1s)) = 150
+    expect(cMax(r)).toBe(150);
+    // Edge must be capped: min(300, 150) = 150
+    expect(eMax(IMG)).toBe(150);
+  });
 });
 
 // ---- SWR revalidation verdicts (metadata-cache) --------------------------------

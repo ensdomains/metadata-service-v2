@@ -814,6 +814,83 @@ describe('ImageCacheService', () => {
       });
     });
 
+    // ── KV preservation: backfill stores deadline, KV read returns it ─
+
+    describe('KV absolute deadline preservation on backfill→read', () => {
+      const EXACT_DEADLINE = 1_700_000_000_000;
+
+      it('R2 backfill writes authoritativeDeadlineMs into KV envelope', async () => {
+        const saved = fixedNow;
+        fixedNow = EXACT_DEADLINE - 400_000;
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          (svgCacheKv.get as Mock).mockResolvedValue(null);
+          // R2 object with 3200s age → remaining 400s → deadline = uploaded + 3600s = fixedNow
+          vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', 3_200_000));
+          await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          await Promise.all(waitUntilPromises);
+          const entry = JSON.parse((svgCacheKv.put as Mock).mock.calls[0][1] as string);
+          expect(entry.authoritativeDeadlineMs).toBe(EXACT_DEADLINE);
+        } finally { fixedNow = saved; dateNowSpy?.mockReturnValue(fixedNow); }
+      });
+
+      it('KV read returns the authoritativeDeadlineMs from the stored envelope', async () => {
+        const saved = fixedNow;
+        fixedNow = EXACT_DEADLINE - 200_000;
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          // Simulate a KV hit with a stored deadline
+          (svgCacheKv.get as Mock).mockResolvedValue(JSON.stringify({
+            svg: '<svg>Stored</svg>',
+            createdAt: EXACT_DEADLINE - 400_000,
+            softTtl: 60,
+            avatarHash: '',
+            migrationStatus: 'unmigrated',
+            authoritativeDeadlineMs: EXACT_DEADLINE,
+          }));
+          const result = await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          // Result must carry the deadline so routes cap downstream TTLs
+          expect((result as any).authoritativeDeadlineMs).toBe(EXACT_DEADLINE);
+        } finally { fixedNow = saved; dateNowSpy?.mockReturnValue(fixedNow); }
+      });
+
+      it('KV read skips an expired (deadline <= now) marked entry', async () => {
+        const saved = fixedNow;
+        fixedNow = EXACT_DEADLINE + 1; // past deadline
+        dateNowSpy?.mockReturnValue(fixedNow);
+        try {
+          (svgCacheKv.get as Mock).mockResolvedValue(JSON.stringify({
+            svg: '<svg>Expired</svg>',
+            createdAt: EXACT_DEADLINE - 400_000,
+            softTtl: 60,
+            avatarHash: '',
+            migrationStatus: 'unmigrated',
+            authoritativeDeadlineMs: EXACT_DEADLINE,
+          }));
+          vi.mocked(r2Bucket.get).mockResolvedValue(null); // L2 miss → L3
+          const result = await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+          // Must fall through to L3, not serve expired bytes
+          expect(result.svg).not.toBe('<svg>Expired</svg>');
+          expect(result.cacheStatus).toBe('miss');
+        } finally { fixedNow = saved; dateNowSpy?.mockReturnValue(fixedNow); }
+      });
+
+      it('fresh origin KV entry without deadline field works normally', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(JSON.stringify({
+          svg: '<svg>Fresh</svg>',
+          createdAt: Date.now(),
+          softTtl: 300,
+          avatarHash: '',
+          migrationStatus: 'unmigrated',
+        }));
+        const result = await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+        expect(result.cacheStatus).toBe('hit');
+        expect(result.svg).toBe('<svg>Fresh</svg>');
+        // No deadline — routes use full TTLs (existing behavior)
+        expect((result as any).authoritativeDeadlineMs).toBeUndefined();
+      });
+    });
+
     // Guaranteed by vitest lifecycle to run after every per-test afterEach
     // in this describe block, regardless of execution order.  No timing
     // assumptions: identity comparison against the original function
