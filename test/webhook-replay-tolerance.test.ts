@@ -152,3 +152,83 @@ describe('webhook replay tolerance configuration', () => {
     expectNoPurge(rejected);
   });
 });
+
+describe('webhook replay tolerance via public POST /webhook route', () => {
+  const SECRET_HEX = '0'.repeat(64);
+
+  async function loadApp() {
+    vi.resetModules();
+    return (await import('../src/index')).default;
+  }
+
+  async function signBody(secretHex: string, ts: number, body: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      hexToBytes(secretHex) as BufferSource,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const sig = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(`${ts}.${body}`) as BufferSource,
+    );
+    const hex = [...new Uint8Array(sig)]
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    return `sha256=${hex}`;
+  }
+
+  function makeEnv(overrides: Record<string, unknown>) {
+    return {
+      METADATA_CACHE: { delete: vi.fn(async () => {}), deleteByPrefix: vi.fn(async () => {}), get: vi.fn(), put: vi.fn(), list: vi.fn(), getWithMetadata: vi.fn() },
+      SVG_CACHE: { list: vi.fn(async () => ({ keys: [], list_complete: true })), delete: vi.fn(async () => {}), get: vi.fn(), put: vi.fn(), getWithMetadata: vi.fn() },
+      ASSET_BUCKET: { delete: vi.fn(), deleteByPrefix: vi.fn(async () => {}) },
+      DB: { prepare: vi.fn(() => ({ bind: vi.fn(() => ({ first: vi.fn(async () => null), all: vi.fn(async () => ({ results: [], success: true })), run: vi.fn(async () => ({ success: true })) })) })), batch: vi.fn() },
+      ENSNODE_MAINNET_URL: 'https://api.ensnode.test/graphql',
+      ENSNODE_SEPOLIA_V2_URL: 'https://api.sepolia.ensnode.test/graphql',
+      MAINNET_RPC_URL: 'https://mainnet.test.rpc',
+      SEPOLIA_RPC_URL: 'https://sepolia.test.rpc',
+      LOG_LEVEL: 'error',
+      RATE_LIMIT_DISABLED: 'true',
+      ...overrides,
+    } as unknown as Record<string, unknown>;
+  }
+
+  it('rejects a one-year-old signed envelope when WEBHOOK_TOLERANCE_SECS is a malformed huge-number-with-garbage value', async () => {
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const ts = nowSecs - 365 * 24 * 3600; // 1 year old
+    const body = JSON.stringify({
+      event_type: 'NameRegistered',
+      protocol: 'v2',
+      block_number: 100,
+      tx_hash: '0xabc',
+      log_index: 0,
+      contract_address: '0xdef',
+      name: 'stale-window.eth',
+      namehash: '0x123',
+      data: '{}',
+      timestamp: ts,
+    });
+    const sig = await signBody(SECRET_HEX, ts, body);
+
+    const env = makeEnv({
+      WEBHOOK_SECRET: SECRET_HEX,
+      WEBHOOK_TOLERANCE_SECS: '999999999999999999999junk',
+    });
+    const app = await loadApp();
+
+    const res = await app.request('/webhook', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Timestamp': String(ts),
+        'X-Webhook-Signature': sig,
+      },
+      body,
+    }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
+
+    expect(res.status).toBe(401);
+  });
+});
