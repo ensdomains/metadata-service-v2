@@ -219,6 +219,9 @@ export class WebhookService {
     if (typeof payload.event_type !== 'string' || payload.event_type.length === 0) {
       return { valid: false, error: 'Missing or invalid event_type' };
     }
+    if (typeof payload.protocol !== 'string' || (payload.protocol !== 'v1' && payload.protocol !== 'v2')) {
+      return { valid: false, error: 'Invalid protocol; must be "v1" or "v2"' };
+    }
     if (typeof payload.timestamp !== 'number') {
       return { valid: false, error: 'Missing or invalid timestamp' };
     }
