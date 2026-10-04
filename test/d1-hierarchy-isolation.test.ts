@@ -250,6 +250,105 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
     // On HEAD with pre-read: both reads get 0, both write 1, final = 1.
     // After atomic fix: version derivation is serialized, final >= 2.
     expect(version).toBeGreaterThanOrEqual(2);
+
+    // Both eth rows exist (one per concurrent store's version). Verify
+    // there are exactly 2 versions present (distinct).
+    const allVersions = sqlite.prepare(
+      'SELECT sync_version FROM registry_hierarchy WHERE network = ? AND id = ? AND root_domain_id = ?'
+    ).all('mainnet', namehash('eth'), namehash('a.eth')) as Array<{ sync_version: number }>;
+    // After atomic INSERT-first: at least one row with version >= 2 exists.
+    // Both concurrent stores committed via INSERT OR REPLACE on the same PK,
+    // so exactly one row survives — with the last writer's version (>=2).
+    expect(allVersions).toHaveLength(1);
+    // The surviving version must be exactly 2 (not 1 from pre-read race).
+    expect(allVersions[0].sync_version).toBe(2);
+  });
+
+  // P1: pre-read oldIds outside batch: interleaving long(3)→short(2)
+  // leaves stale sub.a.eth. In-batch DELETE fixes this.
+
+  function threeLevels() {
+    return [
+      ethAncestor(),
+      aEthDomain(),
+      { name: 'sub.a.eth', owner: OWNER, resolver: ZERO, level: 3 },
+    ];
+  }
+
+  it('hierarchy shrink: storing 2 levels after 3 removes the stale 3rd row', async () => {
+    const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(
+      { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])), all: async () => ({ results: sqlite.prepare(s).all(...(a as never[])), success: true, meta: {} }), run: async () => ({ success: true, results: [], meta: sqlite.prepare(s).run(...(a as never[])) }) }) }),
+        batch: async (stmts: Array<{ run: () => Promise<unknown> }>) => Promise.all(stmts.map((s) => s.run())),
+      } as unknown as D1Database,
+      'mainnet'
+    );
+
+    // Store 3 levels first.
+    await d1.storeHierarchy('a.eth', threeLevels());
+    expect((await d1.getHierarchy('a.eth')).map(r => r.name)).toEqual(['eth', 'a.eth', 'sub.a.eth']);
+
+    // Shrink to 2 levels.
+    await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
+
+    const names = (await d1.getHierarchy('a.eth')).map(r => r.name);
+    expect(names).toEqual(['eth', 'a.eth']);
+  });
+
+  // P1: Concurrent shrink — long(3) and short(2) both pre-read empty.
+  // Short's complement DELETE catches nothing; long's sub.a.eth remains.
+  it('concurrent long(3)→short(2) overlap: stale 3rd row removed by in-batch DELETE', async () => {
+    const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(
+      { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])), all: async () => ({ results: sqlite.prepare(s).all(...(a as never[])), success: true, meta: {} }), run: async () => ({ success: true, results: [], meta: sqlite.prepare(s).run(...(a as never[])) }) }) }),
+        batch: async (stmts: Array<{ run: () => Promise<unknown> }>) => Promise.all(stmts.map((s) => s.run())),
+      } as unknown as D1Database,
+      'mainnet'
+    );
+
+    await Promise.all([
+      d1.storeHierarchy('a.eth', threeLevels()),
+      d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]),
+    ]);
+
+    const names = (await d1.getHierarchy('a.eth')).map(r => r.name);
+    // On HEAD with pre-read complement: both see empty, no DELETE,
+    // sub.a.eth from the long store survives. After in-batch DELETE:
+    // exactly 2 levels remain.
+    expect(names).toEqual(['eth', 'a.eth']);
+  });
+
+  it('hierarchy shrink does not affect a sibling root sharing the ancestor', async () => {
+    const { db } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(db, 'mainnet');
+
+    const bThree = [
+      ethAncestor(),
+      bEthDomain(),
+      { name: 'sub.b.eth', owner: OWNER, resolver: ZERO, level: 3 },
+    ];
+
+    // b.eth has 3 levels.
+    await d1.storeHierarchy('b.eth', bThree);
+    // a.eth has 3, then shrinks to 2.
+    await d1.storeHierarchy('a.eth', threeLevels());
+    await d1.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
+
+    // b.eth must still have 3 levels.
+    expect((await d1.getHierarchy('b.eth')).map(r => r.name)).toEqual(['eth', 'b.eth', 'sub.b.eth']);
+  });
+
+  it('hierarchy shrink does not affect rows on a different network', async () => {
+    const { db } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1m = new D1Service(db, 'mainnet');
+    const d1s = new D1Service(db, 'sepolia');
+
+    await d1s.storeHierarchy('a.eth', threeLevels());
+    await d1m.storeHierarchy('a.eth', threeLevels());
+    await d1m.storeHierarchy('a.eth', [ethAncestor(), aEthDomain()]);
+
+    // sepolia must still have 3 levels.
+    expect((await d1s.getHierarchy('a.eth')).map(r => r.name)).toEqual(['eth', 'a.eth', 'sub.a.eth']);
   });
 
   it('sync_version is per-root: sibling roots have independent version sequences', async () => {
@@ -730,15 +829,13 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
   // If the promise registered with waitUntil is already resolved before
   // the IIFE runs the count check and sync, this test must fail.
 
-  it('registered promise is NOT settled before the IIFE count check and sync complete', async () => {
+  it('registered promise is NOT settled before syncResolve and IS settled after — kills waitUntil(Promise.resolve())', async () => {
     let syncResolve!: (v: unknown) => void;
     const syncPromise = new Promise((resolve) => { syncResolve = resolve; });
     const syncHierarchyMock = vi.fn().mockReturnValue(syncPromise);
 
-    // Track whether getHierarchyCount was called — proves the IIFE runs.
     let countCalled = false;
     const countPromise = new Promise<number>((resolve) => {
-      // Resolve asynchronously so we can observe pending state.
       queueMicrotask(() => { countCalled = true; resolve(0); });
     });
 
@@ -758,25 +855,28 @@ describe('getRegistryHierarchy D1 recovery (round 3)', () => {
     s.sync = { syncHierarchy: syncHierarchyMock };
 
     let registeredPromise: Promise<unknown> | null = null;
-    const waitUntil = vi.fn((p: Promise<unknown>) => { registeredPromise = p; });
+    let promiseSettled = false;
+    const waitUntil = vi.fn((p: Promise<unknown>) => {
+      registeredPromise = p;
+      p.then(() => { promiseSettled = true; });
+    });
     const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
 
     try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {}
 
-    // The registered promise must exist.
     expect(registeredPromise).not.toBeNull();
-
-    // Drain microtasks so the IIFE's count check runs (but syncPromise stays pending).
     await Promise.resolve();
-
-    // getHierarchyCount must have been called (proves the IIFE executed).
     expect(countCalled).toBe(true);
-
-    // syncHierarchy must have been called with the deferred promise.
     expect(syncHierarchyMock).toHaveBeenCalledWith('a.eth');
 
-    // Clean up.
+    // Before syncResolve: the registered promise must still be pending.
+    // promiseSettled is set by .then() — must be false before resolution.
+    expect(promiseSettled).toBe(false);
+
     syncResolve({ operation: 'hierarchy', processed: 1, stored: 1, errors: 0, duration: 0 });
     await expect(registeredPromise!).resolves.not.toThrow();
+
+    // After syncResolve: the registered promise must now be settled.
+    expect(promiseSettled).toBe(true);
   });
 });
