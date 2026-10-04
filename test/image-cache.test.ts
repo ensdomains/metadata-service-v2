@@ -875,6 +875,44 @@ describe('ImageCacheService', () => {
         } finally { fixedNow = saved; dateNowSpy?.mockReturnValue(fixedNow); }
       });
 
+      // ── malformed deadline: must never serve sentinel bytes ─────────
+
+      const SENTINEL = '<svg>MALFORMED-SHOULD-NEVER-SERVE</svg>';
+      const VALID_L2 = '<svg width="518" height="518"></svg>';
+
+      const MALFORMED_CASES: [string, any][] = [
+        ['null', null],
+        ['string numeric', '1700000000000'],
+        ['string non-numeric', 'not-a-number'],
+        ['object', { ms: 1700000000000 }],
+        ['array', [1700000000000]],
+        ['boolean true', true],
+        ['boolean false', false],
+      ];
+
+      it.each(MALFORMED_CASES)('malformed authoritativeDeadlineMs=%s: falls through, never serves sentinel', async (_label, badValue) => {
+        (svgCacheKv.get as Mock).mockResolvedValue(JSON.stringify({
+          svg: SENTINEL,
+          createdAt: Date.now(),
+          softTtl: 300,
+          avatarHash: '',
+          migrationStatus: 'unmigrated',
+          authoritativeDeadlineMs: badValue,
+        }));
+        // R2 returns valid SVG → L2 hit should serve that, not sentinel
+        vi.mocked(r2Bucket.get).mockResolvedValue({
+          text: vi.fn().mockResolvedValue(VALID_L2),
+          arrayBuffer: vi.fn(),
+          body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(),
+          uploaded: new Date(),
+        } as unknown as R2ObjectBody);
+
+        const result = await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+        expect(result.svg).not.toBe(SENTINEL);
+        expect(result.svg).toBe(VALID_L2);
+        expect(result.cacheStatus).toBe('stale');
+      });
+
       it('fresh origin KV entry without deadline field works normally', async () => {
         (svgCacheKv.get as Mock).mockResolvedValue(JSON.stringify({
           svg: '<svg>Fresh</svg>',
