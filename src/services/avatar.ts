@@ -674,14 +674,27 @@ export class AvatarService {
     const scope: OutageScope = {};
     let result: T | null;
     const timeLeft = timeLeftForAttempt(what);
+
+    // The media timeout is created inside runInOutageScope (so the outage
+    // scope is preserved) but its handle is tracked here so the outer finally
+    // can clear it even when the deadline wins the race first.
+    let mediaTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      result = await runInOutageScope(scope, () =>
-        raceRequestDeadline(
-          this.withMediaTimeout(work(), `${what} timed out for ${name}`),
+      result = await runInOutageScope(scope, () => {
+        const timeout = new Promise<never>((_, reject) => {
+          mediaTimer = setTimeout(
+            () => reject(new UpstreamError(`${what} timed out for ${name}`)),
+            MEDIA_RESOLVE_TIMEOUT_MS,
+          );
+        });
+        return raceRequestDeadline(
+          Promise.race([work(), timeout]).finally(() => {
+            if (mediaTimer !== undefined) clearTimeout(mediaTimer);
+          }),
           timeLeft,
           what,
-        ),
-      );
+        );
+      });
     } catch (error) {
       if (isDefinitiveMiss(error, scope.outage !== undefined)) {
         console.warn(`${what} found no usable record for ${name}:`, error);
@@ -689,6 +702,8 @@ export class AvatarService {
       }
       console.warn(`${what} failed for ${name}:`, error);
       throw error instanceof UpstreamError ? error : new UpstreamError(`${what} failed for ${name}`, { cause: error });
+    } finally {
+      if (mediaTimer !== undefined) clearTimeout(mediaTimer);
     }
     if (!result && scope.outage !== undefined) {
       console.warn(`${what} failed for ${name}:`, scope.outage);
@@ -703,12 +718,13 @@ export class AvatarService {
    * request timeout. Rejects with UpstreamError(`timeoutMessage`) on expiry.
    */
   private withMediaTimeout<T>(work: Promise<T>, timeoutMessage: string): Promise<T> {
-    return Promise.race([
-      work,
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new UpstreamError(timeoutMessage)), MEDIA_RESOLVE_TIMEOUT_MS),
-      ),
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new UpstreamError(timeoutMessage)), MEDIA_RESOLVE_TIMEOUT_MS);
+    });
+    return Promise.race([work, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
   }
 
   /**
