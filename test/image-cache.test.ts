@@ -862,4 +862,92 @@ describe('ImageCacheService', () => {
       expect(() => svc.getAvatarImage('sentinel.eth'), 'AvatarService mock must be intact').not.toThrow();
     });
   });
+
+  // P1 deployment gap: pre-fix v2 KV entries written with backfill-time
+  // createdAt / full TTL remain L1 hits after deploy, bypassing R2 deadline
+  // enforcement.  The fix bumps CARD_CACHE_VERSION so old v2 keys miss and
+  // fall through to authoritative L2/L3.  No explicit old-key deletion is
+  // required — orphaned v2 keys expire on their own TTL or via the
+  // version-agnostic invalidation prefix.
+  describe('W8-CACHE-004: cache generation bump (v2 legacy isolation)', () => {
+    function legacyV2Entry(svg: string, migrationStatus: string): string {
+      return JSON.stringify({
+        svg,
+        createdAt: Date.now(), // pre-fix backfill-time reset
+        softTtl: migrationStatus === 'unmigrated' ? 300 : 21600,
+        avatarHash: '',
+        migrationStatus,
+      });
+    }
+
+    // Simulate the real KV namespace: old v2 keys return pre-fix entries,
+    // any other generation keys miss.
+    function mockV2OnlyGet(entry: string): void {
+      (svgCacheKv.get as Mock).mockImplementation((key: string) => {
+        if (key.endsWith(':v2')) return Promise.resolve(entry);
+        return Promise.resolve(null);
+      });
+    }
+
+    it('does not serve a legacy v2 unmigrated KV entry after generation bump', async () => {
+      mockV2OnlyGet(legacyV2Entry('<svg>Legacy v2 Stale</svg>', 'unmigrated'));
+      vi.mocked(r2Bucket.get).mockResolvedValue(null); // L2 miss
+
+      const result = await imageCacheService.getImage('legacy.eth', defaultOptions, executionCtx);
+
+      // Must miss v2, fall through to L3 origin, never serve pre-fix bytes
+      expect(result.svg).not.toBe('<svg>Legacy v2 Stale</svg>');
+      expect(result.cacheStatus).toBe('miss');
+    });
+
+    it('does not serve a legacy v2 migrated KV entry after generation bump', async () => {
+      mockV2OnlyGet(legacyV2Entry('<svg>Legacy Mig v2</svg>', 'migrated'));
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+
+      const result = await imageCacheService.getImage('legacy.eth', { name: 'legacy.eth', migrationStatus: 'migrated' as const }, executionCtx);
+
+      expect(result.svg).not.toBe('<svg>Legacy Mig v2</svg>');
+      expect(result.cacheStatus).toBe('miss');
+    });
+
+    it('does not serve a legacy v2 native KV entry after generation bump', async () => {
+      mockV2OnlyGet(legacyV2Entry('<svg>Legacy Nat v2</svg>', 'native'));
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+
+      const result = await imageCacheService.getImage('legacy.eth', { name: 'legacy.eth', migrationStatus: 'native' as const }, executionCtx);
+
+      expect(result.svg).not.toBe('<svg>Legacy Nat v2</svg>');
+      expect(result.cacheStatus).toBe('miss');
+    });
+
+    it('serves a fresh current-generation KV entry as L1 hit', async () => {
+      const fresh = JSON.stringify({
+        svg: '<svg>Fresh Generation</svg>',
+        createdAt: Date.now(),
+        softTtl: 300,
+        avatarHash: '',
+        migrationStatus: 'unmigrated',
+      });
+      (svgCacheKv.get as Mock).mockResolvedValue(fresh);
+
+      const result = await imageCacheService.getImage('fresh.eth', defaultOptions, executionCtx);
+
+      expect(result.cacheStatus).toBe('hit');
+      expect(result.svg).toBe('<svg>Fresh Generation</svg>');
+    });
+
+    it('writes back with the same generation key it reads (no write/read split)', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null); // L1 miss
+      vi.mocked(r2Bucket.get).mockResolvedValue(null); // L2 miss
+
+      await imageCacheService.getImage('wb.eth', defaultOptions, executionCtx);
+      await Promise.all(waitUntilPromises);
+
+      // Read key (KV get) and write key (KV put) must share the same
+      // generation suffix — a write-only or read-only bump would diverge.
+      const readKey = (svgCacheKv.get as Mock).mock.calls[0][0] as string;
+      const writeKey = (svgCacheKv.put as Mock).mock.calls[0][0] as string;
+      expect(writeKey).toBe(readKey);
+    });
+  });
 });
