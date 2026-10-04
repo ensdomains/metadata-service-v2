@@ -29,7 +29,6 @@ CREATE TABLE registry_hierarchy (
 );
 
 CREATE INDEX idx_hierarchy_root ON registry_hierarchy(network, root_domain_id);
-CREATE INDEX idx_hierarchy_root_level ON registry_hierarchy(network, root_domain_id, level);
 CREATE INDEX idx_hierarchy_parent ON registry_hierarchy(network, parent_id);
 CREATE INDEX idx_hierarchy_level ON registry_hierarchy(network, level);
 CREATE INDEX idx_hierarchy_updated ON registry_hierarchy(network, last_updated);

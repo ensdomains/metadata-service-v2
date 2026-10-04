@@ -46,15 +46,6 @@ export class SyncService {
       if (!force) {
         const existing = await this.d1.getDomain(name);
         if (existing && (Date.now() - existing.last_updated) < this.config.staleThreshold) {
-          // Domain is fresh, but hierarchy may be empty after migration 003
-          // dropped the registry_hierarchy table. Fire a non-blocking backfill
-          // so getHierarchy does not return empty during upstream outages.
-          const hierarchyCount = await this.d1.getHierarchyCount(name);
-          if (hierarchyCount === 0) {
-            this.syncHierarchy(name).catch(err =>
-              console.warn(`Background hierarchy backfill for ${name} failed:`, err)
-            );
-          }
           return {
             operation: 'domains',
             processed: 1,
