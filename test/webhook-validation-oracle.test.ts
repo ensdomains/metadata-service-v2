@@ -67,7 +67,7 @@ describe('W8-WEBHOOK-002 oracle: identity field type validation at handler level
     const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ block_number: null }))));
 
     expect(res.status).toBe(400);
-    const body = await res.json();
+    const body = (await res.json()) as { error?: unknown };
     expect(body.error).toBeTruthy();
 
     // Not a single cache operation must have run.
