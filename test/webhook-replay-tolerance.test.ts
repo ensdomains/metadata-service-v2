@@ -180,11 +180,32 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     return `sha256=${hex}`;
   }
 
-  function makeEnv(overrides: Record<string, unknown>) {
-    return {
-      METADATA_CACHE: { delete: vi.fn(async () => {}), deleteByPrefix: vi.fn(async () => {}), get: vi.fn(), put: vi.fn(), list: vi.fn(), getWithMetadata: vi.fn() },
-      SVG_CACHE: { list: vi.fn(async () => ({ keys: [], list_complete: true })), delete: vi.fn(async () => {}), get: vi.fn(), put: vi.fn(), getWithMetadata: vi.fn() },
-      ASSET_BUCKET: { delete: vi.fn(), deleteByPrefix: vi.fn(async () => {}) },
+  function makeFakesAndEnv(overrides: Record<string, unknown>) {
+    const metadataKv = {
+      delete: vi.fn(async () => {}),
+      list: vi.fn(async () => ({ keys: [] as { name: string }[], list_complete: true })),
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => {}),
+      getWithMetadata: vi.fn(async () => ({ value: null, metadata: null })),
+    };
+    const svgKv = {
+      delete: vi.fn(async () => {}),
+      list: vi.fn(async () => ({ keys: [] as { name: string }[], list_complete: true })),
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => {}),
+      getWithMetadata: vi.fn(async () => ({ value: null, metadata: null })),
+    };
+    const r2 = {
+      delete: vi.fn(async () => {}),
+      list: vi.fn(async () => ({ objects: [] as { key: string }[], truncated: false, cursor: undefined })),
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => ({ key: '', etag: '', size: 0, httpMetadata: {} })),
+      head: vi.fn(async () => null),
+    };
+    const env = {
+      METADATA_CACHE: metadataKv,
+      SVG_CACHE: svgKv,
+      ASSET_BUCKET: r2,
       DB: { prepare: vi.fn(() => ({ bind: vi.fn(() => ({ first: vi.fn(async () => null), all: vi.fn(async () => ({ results: [], success: true })), run: vi.fn(async () => ({ success: true })) })) })), batch: vi.fn() },
       ENSNODE_MAINNET_URL: 'https://api.ensnode.test/graphql',
       ENSNODE_SEPOLIA_V2_URL: 'https://api.sepolia.ensnode.test/graphql',
@@ -194,15 +215,11 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       RATE_LIMIT_DISABLED: 'true',
       ...overrides,
     } as unknown as Record<string, unknown>;
+    return { env, mocks: { metadataKv, svgKv, r2 } };
   }
 
-  it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS has a garbage suffix that parseInt would accept', async () => {
-    // '300junk' → parseInt = 300, which is finite, a safe integer, and ≤ max.
-    // Without the whole-string regex guard, a 121s-old envelope would be
-    // accepted (200). Removing only the regex guard surfaces this failure.
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const ts = nowSecs - 121;
-    const body = JSON.stringify({
+  function makeBody(ts: number) {
+    return JSON.stringify({
       event_type: 'NameRegistered',
       protocol: 'v2',
       block_number: 100,
@@ -214,9 +231,24 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       data: '{}',
       timestamp: ts,
     });
+  }
+
+  function assertNoPurge(mocks: ReturnType<typeof makeFakesAndEnv>['mocks']) {
+    expect.soft(mocks.metadataKv.delete).not.toHaveBeenCalled();
+    expect.soft(mocks.metadataKv.list).not.toHaveBeenCalled();
+    expect.soft(mocks.svgKv.delete).not.toHaveBeenCalled();
+    expect.soft(mocks.svgKv.list).not.toHaveBeenCalled();
+    expect.soft(mocks.r2.delete).not.toHaveBeenCalled();
+    expect.soft(mocks.r2.list).not.toHaveBeenCalled();
+  }
+
+  it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS has a garbage suffix that parseInt would accept', async () => {
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const ts = nowSecs - 121;
+    const body = makeBody(ts);
     const sig = await signBody(SECRET_HEX, ts, body);
 
-    const env = makeEnv({
+    const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '300junk',
     });
@@ -232,31 +264,17 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       body,
     }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
 
-    expect(res.status).toBe(401);
+    expect.soft(res.status).toBe(401);
+    assertNoPurge(mocks);
   });
 
   it('rejects a 121s-old signed envelope when WEBHOOK_TOLERANCE_SECS is one above the maximum accepted tolerance', async () => {
-    // '86401' passes regex, isFinite, and isSafeInteger but exceeds
-    // MAX_TOLERANCE_SECS (86400). Without the max bound guard, a 121s-old
-    // envelope would be accepted (200). Removing only the max check surfaces
-    // this failure.
     const nowSecs = Math.floor(Date.now() / 1000);
     const ts = nowSecs - 121;
-    const body = JSON.stringify({
-      event_type: 'NameRegistered',
-      protocol: 'v2',
-      block_number: 100,
-      tx_hash: '0xabc',
-      log_index: 0,
-      contract_address: '0xdef',
-      name: 'stale-window.eth',
-      namehash: '0x123',
-      data: '{}',
-      timestamp: ts,
-    });
+    const body = makeBody(ts);
     const sig = await signBody(SECRET_HEX, ts, body);
 
-    const env = makeEnv({
+    const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '86401',
     });
@@ -272,34 +290,28 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       body,
     }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
 
-    expect(res.status).toBe(401);
+    expect.soft(res.status).toBe(401);
+    assertNoPurge(mocks);
   });
 
-  it('accepts and purges a fresh signed envelope when WEBHOOK_TOLERANCE_SECS is a negative unsafe integer', async () => {
-    // '-9007199254740993' → parseInt = -9007199254740992, which is not a safe
-    // integer (outside ±2^53-1). Without the isSafeInteger guard it would pass
-    // as a huge negative tolerance that rejects even fresh requests (401). With
-    // the guard it falls back to the 120s default, and a fresh correctly signed
-    // envelope is accepted (200 + purge).
+  it('accepts and executes every purge path for a fresh correctly-signed envelope whose toleranceSecs falls back to the 120s default', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const ts = nowSecs;
-    const body = JSON.stringify({
-      event_type: 'NameRegistered',
-      protocol: 'v2',
-      block_number: 100,
-      tx_hash: '0xabc',
-      log_index: 0,
-      contract_address: '0xdef',
-      name: 'stale-window.eth',
-      namehash: '0x123',
-      data: '{}',
-      timestamp: ts,
-    });
+    const body = makeBody(ts);
     const sig = await signBody(SECRET_HEX, ts, body);
 
-    const env = makeEnv({
+    const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '-9007199254740993',
+    });
+    mocks.svgKv.list.mockResolvedValue({
+      keys: [{ name: 'svg:stale-window.eth:native:518:518' }],
+      list_complete: true,
+    });
+    mocks.r2.list.mockResolvedValue({
+      objects: [{ key: 'avatars/stale-window.eth:mainnet' }],
+      truncated: false,
+      cursor: undefined,
     });
     const app = await loadApp();
 
@@ -313,6 +325,12 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
       body,
     }, env, { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext);
 
-    expect(res.status).toBe(200);
+    expect.soft(res.status).toBe(200);
+    expect.soft(mocks.metadataKv.delete).toHaveBeenCalledTimes(10);
+    expect.soft(mocks.metadataKv.list).toHaveBeenCalledTimes(1);
+    expect.soft(mocks.svgKv.list).toHaveBeenCalledTimes(1);
+    expect.soft(mocks.svgKv.delete).toHaveBeenCalledTimes(1);
+    expect.soft(mocks.r2.list).toHaveBeenCalledTimes(2);
+    expect.soft(mocks.r2.delete).toHaveBeenCalledTimes(2);
   });
 });
