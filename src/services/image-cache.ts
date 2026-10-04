@@ -115,7 +115,7 @@ export class ImageCacheService {
 
     // --- L2: R2 lookup ---
     try {
-      const r2Svg = await this.storage.getSvgByKey(cacheKey);
+      const r2Svg = await this.storage.getSvgByKey(cacheKey, ttlConfig.r2MaxAge);
       if (r2Svg) {
         console.log(`[image-cache] L2 HIT ${name} (${Date.now() - start}ms) → backfilling L1`);
         // Backfill L1 in background
