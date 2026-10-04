@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MetadataService } from '../src/services/metadata';
+import { MetadataService, isDegradedMigrationStatus } from '../src/services/metadata';
 import { NotFoundError } from '../src/services/errors';
 import { MIGRATION_STATUS } from '../src/types';
 
@@ -91,16 +91,11 @@ describe('W3-ROUTES-006: D1 rescue degraded migration status', () => {
     expect(result.status).toBe('migrated');
 
     // CRITICAL ASSERTION: the response must be marked as degraded.
-    // isDegradedMigrationStatus checks the non-enumerable _provenance flag.
+    // isDegradedMigrationStatus checks the non-enumerable Symbol flag.
     // On the baseline at main, this assertion FAILS because the D1 rescue
-    // does not set _provenance at all.
+    // does not set the degraded marker at all.
     //
-    // We test this by checking if the response carries the _provenance
-    // flag expected by the route handler. After the fix,
-    // isDegradedMigrationStatus must return true for this response.
-    const hasDegradedProvenance = (result as Record<string, unknown>)._provenance === 'degraded';
-
-    // This is the regression assertion: must be true after the fix.
-    expect(hasDegradedProvenance).toBe(true);
+    // After the fix, isDegradedMigrationStatus must return true.
+    expect(isDegradedMigrationStatus(result)).toBe(true);
   });
 });
