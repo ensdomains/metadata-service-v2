@@ -87,12 +87,14 @@ describe('D1Service canonicalizes names on writes', () => {
       { name: 'ETH', owner: ZERO, resolver: ZERO, level: 1 },
       { name: 'Fox.ETH', owner: OWNER, resolver: ZERO, level: 2 },
     ]);
-    // DELETE by root id, then one INSERT per level.
-    expect(calls[0].sql).toContain('DELETE');
-    expect(calls[0].args).toEqual(['mainnet', namehash('fox.eth')]);
-    expect(calls[1].args.slice(0, 3)).toEqual(['mainnet', namehash('eth'), 'eth']);
-    expect(calls[2].args.slice(0, 3)).toEqual(['mainnet', namehash('fox.eth'), 'fox.eth']);
-    expect(calls[2].args[6]).toBe(namehash('eth')); // parent_id resolved from the canonical level-1 name
+    // First query: SELECT existing sync_versions (added for per-root versioning).
+    // Then DELETE by root id, then one INSERT per level.
+    expect(calls[0].sql).toContain('SELECT');
+    expect(calls[1].sql).toContain('DELETE');
+    expect(calls[1].args).toEqual(['mainnet', namehash('fox.eth')]);
+    expect(calls[2].args.slice(0, 3)).toEqual(['mainnet', namehash('eth'), 'eth']);
+    expect(calls[3].args.slice(0, 3)).toEqual(['mainnet', namehash('fox.eth'), 'fox.eth']);
+    expect(calls[3].args[6]).toBe(namehash('eth')); // parent_id resolved from the canonical level-1 name
   });
 
   it('a read after a write with different casing hits the same key', async () => {

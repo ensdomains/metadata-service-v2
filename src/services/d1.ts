@@ -255,6 +255,17 @@ export class D1Service {
   }>): Promise<void> {
     const rootDomainId = namehash(canonicalizeName(name));
 
+    // Query existing sync_versions before the DELETE so repeated same-root
+    // stores increment correctly (the DELETE in the batch clears rows before
+    // the INSERT subquery would see them). Fetch all at once per root.
+    const oldVersions = await this.db.prepare(
+      'SELECT id, sync_version FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2'
+    ).bind(this.network, rootDomainId).all<{ id: string; sync_version: number }>();
+    const versionMap = new Map<string, number>();
+    for (const row of (oldVersions.results || [])) {
+      versionMap.set(row.id, row.sync_version);
+    }
+
     // Clear the existing hierarchy for this domain and insert the new records,
     // in one batch (one round trip, one transaction).
     const statements = [
@@ -263,9 +274,12 @@ export class D1Service {
     ];
 
     for (const level of hierarchy) {
+      const id = namehash(canonicalizeName(level.name));
+      const nextVersion = (versionMap.get(id) ?? 0) + 1;
+
       const record: Omit<D1HierarchyRecord, 'sync_version'> = {
         network: this.network,
-        id: namehash(canonicalizeName(level.name)),
+        id,
         name: canonicalizeName(level.name),
         owner: level.owner,
         resolver: level.resolver,
@@ -280,14 +294,13 @@ export class D1Service {
           network, id, name, owner, resolver, level, parent_id, root_domain_id,
           last_updated, sync_version
         ) VALUES (
-          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE network = ?1 AND id = ?2 AND root_domain_id = ?8), 0) + 1
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
         )
       `);
 
       statements.push(stmt.bind(
         record.network, record.id, record.name, record.owner, record.resolver, record.level,
-        record.parent_id, record.root_domain_id, record.last_updated
+        record.parent_id, record.root_domain_id, record.last_updated, nextVersion
       ));
     }
 
