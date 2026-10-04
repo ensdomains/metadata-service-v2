@@ -61,4 +61,4 @@ Core production and primary test files (the exact diff also contains required ro
 
 ## Final evidence
 
-Final append-only history: **52 commits**. Exact scope: **13 files, +778/-27**. Focused/full/typecheck/lint/build and edge/TTL mutants passed. Rejected attempts, forbidden-stash attempt, and explicit reverts remain durable evidence. Fresh external closure is still required.
+Final append-only history: **55 commits**. Exact scope: **13 files, +790/-27**. Focused/full/typecheck/lint/build and edge/TTL mutants passed. Rejected attempts, forbidden-stash attempt, and explicit reverts remain durable evidence. Fresh external closure is still required.
