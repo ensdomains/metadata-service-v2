@@ -2,64 +2,67 @@
 
 ## Summary
 
-Fix a bug in the `/registry-hierarchy/:name` route handler where an `UpstreamError` thrown during the pre-service expiry check (`checkExpiry`) causes a 503 error response instead of a graceful 200 placeholder hierarchy. The route's README contract says it "never answers 404 or 503". This fix ensures that contract holds by returning a two-level zero-owner placeholder when the upstream pre-check fails, with appropriate short-lived cache headers and no call to the hierarchy service after the failure.
+Make `GET /registry-hierarchy/:name` total when its pre-service expiry check cannot read upstream state. If `MetadataService.checkExpiry()` throws `UpstreamError`, the route must return the normal degraded hierarchy placeholder rather than a 503 error response.
+
+For `GET /registry-hierarchy/precheck-outage.eth?network=mainnet`, the response must be HTTP 200 with a two-level, zero-owner placeholder and literal `Cache-Control: public, max-age=30`. The same short-lived header must be present on the response captured for the edge-cache write. The hierarchy service must not run after the failed expiry pre-check.
 
 ## Technical context
 
-- **Language and version**: TypeScript 5.6.3, Node >=18
-- **Runtime**: Cloudflare Workers (Hono)
-- **Dependencies used or added**: None added. Uses existing `UpstreamError` from `src/services/errors.ts`, `CachePresets` from `src/utils/cache-headers.ts`.
-- **Testing**: `pnpm run test` (vitest). Write a focused regression test that demonstrates the bug on main baseline (fails), then the fix makes it pass.
-- **Constraints**: 
-  - TDD: write failing test first, record it, then fix
-  - One finding only (W3-ROUTES-007); no other finding changes
-  - No cherry-picks or copies from the testing-campaign branch
-  - Fix must not weaken the regression test assertion
-  - Do not bundle drive-by refactors
-  - Degraded/outage responses must not be cached as healthy success
+- TypeScript service running as a Cloudflare Worker with Hono.
+- Relevant production route is in `src/index.ts`.
+- Existing error and cache abstractions include `UpstreamError` and the short-lived error cache policy.
+- No dependencies are required.
+- Project gate: `pnpm run test`.
 
-## Direction check
+## Constraints
 
-| Constraint | How met |
-|---|---|
-| TDD: failing test first, then fix | Spec prescribes two commits: (1) add regression test that fails on main, record the failure; (2) fix the catch block |
-| One finding only | Only W3-ROUTES-007 is addressed |
-| No cherry-picks from testing-campaign | Regression test and fix are written fresh against main |
-| Fix must not weaken regression | The regression test asserts 200 placeholder; after the fix it must pass without change |
-| No drive-by refactors | Only the catch block in the registry-hierarchy route is changed |
-| Outage responses not cached as healthy | Placeholder uses error-cache TTL (`max-age=30`) and is edge-cached, not marked with success TTL |
+- Start from committed `main`, on a branch named for WEB-1672.
+- Follow TDD: add the focused regression first, run it against the unfixed main-based code, and record the expected failure before any product-fix commit.
+- Write the regression and fix fresh against main. Do not copy, cherry-pick, or transplant the testing-campaign implementation or tests.
+- Address only `W3-ROUTES-007`; do not include another finding or a drive-by refactor.
+- Keep the regression's behavioral assertions unchanged when making it pass.
+- Treat the placeholder as a degraded response: its client and edge-cache TTL is 30 seconds, not a healthy-success TTL.
 
-## Structure
+## Behavioral decisions
 
-Files changed:
-- `test/registry-hierarchy-outage.test.ts` — NEW: focused regression test
-- `src/index.ts` — MODIFIED: catch block in `/registry-hierarchy/:name` route handler (lines ~728-734)
+1. **Failure boundary**: This behavior applies when the route's pre-service `checkExpiry()` call throws `UpstreamError`. It must not turn unrelated failures into successful placeholders.
+2. **HTTP result**: The route returns status 200 rather than the generic 503 error JSON.
+3. **Placeholder**: The body is a two-level hierarchy for the requested second-level `.eth` name and its `eth` parent, with zero-address owners at both levels. Preserve the route's established hierarchy response schema and placeholder defaults for fields not specified here.
+4. **Caching**: The client response and the response passed to the edge-cache write both have the literal header `Cache-Control: public, max-age=30`. The degraded placeholder is written to the edge cache using that short-lived policy.
+5. **Short circuit**: Once the expiry pre-check fails, the hierarchy service is not called.
+6. **Existing behavior**: Preserve behavior for successful expiry checks and errors outside this finding.
 
-## Decisions
+## Test requirements
 
-1. **Test location**: New file `test/registry-hierarchy-outage.test.ts` rather than modifying an existing test file. The finding references `test/routes-decision-table.test.ts` which does not exist on main; a new focused test file keeps the regression isolated and clearly scoped.
+Add a focused route-level regression that drives the reported HTTP request through the worker with controlled dependencies:
 
-2. **Test approach**: Service-level test, constructing `MetadataService` directly with mocked blockchain dependencies following the pattern in `test/outage-taxonomy.test.ts` and `test/expiry-gates.test.ts`. The test mocks the blockchain tier to throw `UpstreamError`, then verifies that `getRegistryHierarchy` does not propagate the error to the route as 503 but instead returns a placeholder. Additionally, a route-level assertion verifies the HTTP response is 200 with correct cache headers.
+- request: `GET /registry-hierarchy/precheck-outage.eth?network=mainnet`;
+- arrange for `MetadataService.checkExpiry()` to throw `UpstreamError`;
+- capture the response supplied to the edge-cache write;
+- spy on the hierarchy-service call;
+- assert status 200;
+- assert the response is the two-level placeholder for `precheck-outage.eth` and `eth`, with zero-address owners at both levels;
+- assert the client response has exactly `Cache-Control: public, max-age=30`;
+- assert the captured edge response has exactly `Cache-Control: public, max-age=30`;
+- assert one degraded placeholder edge write occurs;
+- assert the hierarchy service is not called.
 
-3. **Placeholder structure**: A two-level hierarchy: the requested name (level 2) with zero-address owner and default resolver, and `eth` (level 1) with zero-address owner and default resolver. This matches the structure described in the finding.
-
-4. **Cache headers**: The placeholder response uses `Cache-Control: public, max-age=30` — the error-cache TTL, as stated in the finding. The placeholder is written to the edge cache via `edgeCachePut` so the short-lived degraded response is served consistently per colo.
-
-5. **Fix scope**: The catch block in the registry-hierarchy route handler adds handling for `UpstreamError` before the generic error path. When the error is `UpstreamError`, a two-level placeholder is constructed and returned as 200 with `CachePresets.error()` headers and edge cache write — without calling `getRegistryHierarchy`.
+The pre-fix run must fail because the current route returns 503 rather than this placeholder behavior. Record that command, exit status, and relevant failure output in the run record before committing any production fix. After the fix, rerun the same test without weakening or replacing its assertions.
 
 ## Showing each criterion
 
-| # | Criterion, as the ticket words it | Check (command and input) | Expected output |
-|---|---|---|---|
-| AC1 | A new focused regression test on a branch cut from main fails on the main baseline in the way this finding describes, and that failing run is recorded in the run record before any product fix commit. | `pnpm run test test/registry-hierarchy-outage.test.ts` — on the commit that adds only the regression test, before any product fix | Test fails with assertion error: expected 200, got 503 (or equivalent). Record the failure output. |
-| AC2 | After the fix, that same focused regression test passes without weakening its assertion of the finding's expected behavior. | `pnpm run test test/registry-hierarchy-outage.test.ts` — on the commit with the product fix | Test passes: status 200, body has two-level placeholder with zero owners, `Cache-Control: public, max-age=30`, and `getRegistryHierarchy` was not called after the failed pre-check |
-| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `pnpm run test` | All tests pass, exit code 0 |
-| AC4 | The change set addresses only `W3-ROUTES-007` and does not bundle another findings.md id. | `git diff BASE...HEAD --stat` | Only `src/index.ts` (catch block change) and `test/registry-hierarchy-outage.test.ts` (new test) are changed |
-| AC5 | The pull request is opened against main from a branch named after this ticket, with no cherry-picks from testing-campaign required to explain the diff. | Inspect the diff and commit history | No cherry-pick markers, no commits from testing-campaign |
+| # | Criterion | Evidence |
+|---|---|---|
+| AC1 | A new focused regression on a branch cut from main fails on the main baseline as reported, and the failure is recorded before any product fix commit. | Main ancestry/branch evidence plus the recorded focused-test command, nonzero exit status, and expected 503-versus-200 failure from the test-only state. |
+| AC2 | The unchanged focused regression passes after the fix and covers the complete expected behavior. | Passing focused run asserting the 200 two-level zero-owner placeholder, literal client and captured-edge cache headers, edge write, and no hierarchy-service call. |
+| AC3 | `pnpm run test` passes at branch head. | Full gate output with exit code 0. |
+| AC4 | Only `W3-ROUTES-007` is addressed. | Base-to-head diff contains only the focused regression and minimal route fix, with no other finding IDs or unrelated refactors. |
+| AC5 | The pull request is main-based and independently explainable. | PR targets `main`, source branch is named for WEB-1672, and history/diff contains no testing-campaign cherry-picks. |
 
 ## Tasks
 
-- [ ] T001 [P] [AC1] Write `test/registry-hierarchy-outage.test.ts`: a focused regression test that constructs a `MetadataService` with mocked blockchain services set to throw `UpstreamError` on `checkExpiry`, calls the service path equivalent to the route handler, and asserts the result is a 200 placeholder hierarchy (not 503). Record the test failing on main baseline.
-- [ ] T002 [AC2] Fix `src/index.ts` catch block in `/registry-hierarchy/:name` route handler: when `error` is `UpstreamError`, construct a two-level zero-owner placeholder, set `Cache-Control: public, max-age=30` via `CachePresets.error()`, write to edge cache via `edgeCachePut`, and return 200 — without calling `getRegistryHierarchy`.
-- [ ] T003 [AC4] Verify the diff touches only the intended files: `src/index.ts` and `test/registry-hierarchy-outage.test.ts`.
-- [ ] T004 [AC3] Run `pnpm run test` and verify all tests pass at the ticket branch head.
+- [ ] T001 [AC1] Add the focused route-level regression and record its expected failure on the unfixed main-based code before any production-fix commit.
+- [ ] T002 [AC2] Make the minimal route change needed to return and short-cache the degraded placeholder after a pre-service `UpstreamError`, without invoking the hierarchy service.
+- [ ] T003 [AC2] Rerun the same focused regression unchanged and record its passing result.
+- [ ] T004 [AC3] Run `pnpm run test` at branch head and record a passing result.
+- [ ] T005 [AC4, AC5] Review the base-to-head diff, history, branch name, and PR base to confirm the change is isolated to W3-ROUTES-007 and based directly on main.
