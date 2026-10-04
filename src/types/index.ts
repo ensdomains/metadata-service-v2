@@ -41,6 +41,10 @@ export interface SvgCacheEntry {
   softTtl: number;      // seconds — serve but revalidate after this
   avatarHash: string;   // SHA-256 hex of avatar content (empty if no avatar)
   migrationStatus: string;
+  // Absolute authoritative deadline (epoch ms) — R2 upload + r2MaxAge*1000.
+  // Set by R2 backfill; absent for fresh L3 origin entries.  KV read validates
+  // it is a finite number and skips expired entries.
+  authoritativeDeadlineMs?: number;
 }
 
 // Parameters used to build image cache keys

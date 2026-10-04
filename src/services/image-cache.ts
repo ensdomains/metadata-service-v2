@@ -101,19 +101,36 @@ export class ImageCacheService {
         const entry: SvgCacheEntry = JSON.parse(kvRaw);
         const ageSeconds = (Date.now() - entry.createdAt) / 1000;
 
-        if (ageSeconds < entry.softTtl) {
-          console.log(`[image-cache] L1 HIT ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
-          return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'hit', ttlConfig, avatarFailed: false };
+        // Validate and extract absolute deadline from KV envelope.
+        // Malformed or expired entries are skipped — fall through to L2.
+        let entryDeadlineMs: number | undefined;
+        if (typeof entry.authoritativeDeadlineMs === 'number' && isFinite(entry.authoritativeDeadlineMs)) {
+          if (entry.authoritativeDeadlineMs <= Date.now()) {
+            console.log(`[image-cache] L1 SKIP ${name}: marked entry expired at deadline ${entry.authoritativeDeadlineMs} (now ${Date.now()})`);
+            // Fall through to L2 — don't serve expired R2-backfilled data.
+          } else {
+            entryDeadlineMs = entry.authoritativeDeadlineMs;
+          }
         }
+        // entryDeadlineMs stays undefined for: malformed (non-numeric/
+        // non-finite), expired, or absent (fresh-origin) entries.
 
-        // Stale — return immediately, revalidate in background
-        console.log(`[image-cache] L1 STALE ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
-        executionCtx.waitUntil(
-          this.revalidate(name, options, cacheKey, params, ttlConfig).catch((err) =>
-            console.error(`[image-cache] background revalidate failed for ${name}:`, err),
-          ),
-        );
-        return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
+        if (entryDeadlineMs !== undefined || !('authoritativeDeadlineMs' in entry)) {
+          if (ageSeconds < entry.softTtl) {
+            console.log(`[image-cache] L1 HIT ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
+            return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'hit', ttlConfig, avatarFailed: false, authoritativeDeadlineMs: entryDeadlineMs };
+          }
+
+          // Stale — return immediately, revalidate in background
+          console.log(`[image-cache] L1 STALE ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
+          executionCtx.waitUntil(
+            this.revalidate(name, options, cacheKey, params, ttlConfig).catch((err) =>
+              console.error(`[image-cache] background revalidate failed for ${name}:`, err),
+            ),
+          );
+          return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false, authoritativeDeadlineMs: entryDeadlineMs };
+        }
+        // entry had a malformed/expired authoritativeDeadlineMs — skip to L2
       }
     } catch (err) {
       console.error(`[image-cache] KV read error for ${cacheKey}:`, err);
@@ -316,6 +333,7 @@ export class ImageCacheService {
         softTtl: Math.max(1, Math.floor(Math.min(ttlConfig.softTtl, remaining))),
         avatarHash,
         migrationStatus,
+        authoritativeDeadlineMs: uploadedAtMs + ttlConfig.r2MaxAge * 1000,
       };
       await this.svgCacheKv.put(cacheKey, JSON.stringify(entry), {
         expiration: Math.floor(uploadedAtMs / 1000) + ttlConfig.r2MaxAge,
