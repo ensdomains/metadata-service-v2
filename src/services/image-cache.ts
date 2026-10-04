@@ -115,16 +115,16 @@ export class ImageCacheService {
 
     // --- L2: R2 lookup ---
     try {
-      const r2Svg = await this.storage.getSvgByKey(cacheKey, ttlConfig.r2MaxAge);
-      if (r2Svg) {
+      const r2Result = await this.storage.getSvgByKey(cacheKey, ttlConfig.r2MaxAge);
+      if (r2Result) {
         console.log(`[image-cache] L2 HIT ${name} (${Date.now() - start}ms) → backfilling L1`);
-        // Backfill L1 in background
+        // Backfill L1 in background, capping KV lifetime to remaining R2 TTL
         executionCtx.waitUntil(
-          this.writeKv(cacheKey, r2Svg, '', params.migrationStatus, ttlConfig).catch((err) =>
+          this.writeKv(cacheKey, r2Result.svg, '', params.migrationStatus, ttlConfig, r2Result.ageSeconds).catch((err) =>
             console.error(`[image-cache] KV backfill failed for ${cacheKey}:`, err),
           ),
         );
-        return { svg: r2Svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
+        return { svg: r2Result.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
       }
     } catch (err) {
       console.error(`[image-cache] R2 read error for ${cacheKey}:`, err);
@@ -274,23 +274,46 @@ export class ImageCacheService {
     await this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig);
   }
 
-  // Write SVG to KV
+  // Write SVG to KV.
+  // When r2AgeSeconds is provided, the data is being backfilled from an R2
+  // object of that age.  The KV entry's createdAt is back-dated so L1 age
+  // checks reflect the true data age, and softTtl / expirationTtl are capped
+  // to the remaining R2 lifetime.  Backfill is skipped entirely when the
+  // remaining lifetime is below Cloudflare KV's 60 s minimum expirationTtl.
   private async writeKv(
     cacheKey: string,
     svg: string,
     avatarHash: string,
     migrationStatus: string,
     ttlConfig: TtlConfig,
+    r2AgeSeconds?: number,
   ): Promise<void> {
+    let softTtl = ttlConfig.softTtl;
+    let hardTtl = ttlConfig.hardTtl;
+    let createdAt = Date.now();
+
+    if (r2AgeSeconds !== undefined && r2AgeSeconds >= 0) {
+      const remaining = Math.max(0, ttlConfig.r2MaxAge - r2AgeSeconds);
+      // Cloudflare KV minimum expirationTtl is 60 s.  If the remaining
+      // lifetime is below that floor, skip backfill rather than silently
+      // extending the lifetime through the floor.
+      if (remaining < 60) return;
+      softTtl = Math.max(1, Math.min(ttlConfig.softTtl, remaining));
+      hardTtl = Math.min(ttlConfig.hardTtl, remaining);
+      // Back-date createdAt so L1 age checks reflect the true data age
+      // rather than resetting it to zero.
+      createdAt = Date.now() - r2AgeSeconds * 1000;
+    }
+
     const entry: SvgCacheEntry = {
       svg,
-      createdAt: Date.now(),
-      softTtl: ttlConfig.softTtl,
+      createdAt,
+      softTtl,
       avatarHash,
       migrationStatus,
     };
     await this.svgCacheKv.put(cacheKey, JSON.stringify(entry), {
-      expirationTtl: ttlConfig.hardTtl,
+      expirationTtl: hardTtl,
     });
   }
 

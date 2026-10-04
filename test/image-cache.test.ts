@@ -487,9 +487,9 @@ describe('ImageCacheService', () => {
 
         expect(result.cacheStatus).toBe('stale');
         expect(result.svg).toBe('<svg>Fresh R2</svg>');
-        // L2-hit backfills KV with the R2 SVG in background
+        // Remaining lifetime < 60 s — backfill skipped (Cloudflare KV minimum)
         await Promise.all(waitUntilPromises);
-        expect(svgCacheKv.put).toHaveBeenCalled();
+        expect((svgCacheKv.put as Mock).mock.calls.length).toBe(0);
       });
 
       it('rejects R2 at exactly r2MaxAge, falls through to L3, persists fresh SVG (age == maxAge, RFC 9111 stale)', async () => {
@@ -543,8 +543,9 @@ describe('ImageCacheService', () => {
 
         expect(result.cacheStatus).toBe('stale');
         expect(result.svg).toBe('<svg>Mig Fresh R2</svg>');
+        // Remaining lifetime < 60 s — backfill skipped
         await Promise.all(waitUntilPromises);
-        expect(svgCacheKv.put).toHaveBeenCalled();
+        expect((svgCacheKv.put as Mock).mock.calls.length).toBe(0);
       });
 
       it('rejects R2 at exactly r2MaxAge, falls through to L3, persists fresh SVG (age == maxAge, RFC 9111 stale)', async () => {
@@ -610,9 +611,9 @@ describe('ImageCacheService', () => {
         vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Zero-Age R2</svg>', 0));
 
         // >= rejects age 0 at boundary 0 (0 > 0 would be false and serve)
-        const svg = await storage.getSvgByKey('zero-test', 0);
+        const result = await storage.getSvgByKey('zero-test', 0);
 
-        expect(svg).toBeNull();
+        expect(result).toBeNull();
       });
     });
 
@@ -622,10 +623,11 @@ describe('ImageCacheService', () => {
       it('serves an R2 object regardless of age when maxAgeSeconds is not passed', async () => {
         vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Ancient R2</svg>', 10_000_000));
 
-        const svg = await storage.getSvgByKey('ancient-test');
+        const result = await storage.getSvgByKey('ancient-test');
 
         // Undefined maxAgeSeconds means unbounded — serve regardless of age
-        expect(svg).toBe('<svg>Ancient R2</svg>');
+        expect(result).not.toBeNull();
+        expect(result!.svg).toBe('<svg>Ancient R2</svg>');
       });
     });
 
