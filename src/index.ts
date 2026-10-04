@@ -244,7 +244,8 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
   if (cached) return cached;
 
   // Invalid/garbage value → undefined → AvatarService uses its built-in default.
-  const parsedMax = parseInt(env.MAX_AVATAR_BYTES ?? '', 10);
+  const maxAvatarBytesValue = env.MAX_AVATAR_BYTES ?? '';
+  const parsedMax = /^\s*\d+\s*$/.test(maxAvatarBytesValue) ? Number(maxAvatarBytesValue) : NaN;
   const maxAvatarBytes = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : undefined;
   // v2 universal resolver (when configured for this network) so native-v2 names'
   // avatar/header records resolve; AvatarService ignores the unset placeholder.
