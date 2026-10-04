@@ -26,7 +26,7 @@ import {
   type HttpTransportConfig,
 } from 'viem';
 import { assertFetchableMediaUrl, fetchMediaUrl, readBodyCapped } from './media-fetch';
-import { takeCcipBytes, takeCcipRequest, takeOffchainLookup } from './request-budget';
+import { takeCcipBytes, takeCcipRequest, takeOffchainLookup, timeLeftForAttempt } from './request-budget';
 
 export const CCIP_TIMEOUT_MS = 8_000;
 // Real gateway responses (signed resolver results, proofs) are kilobytes.
@@ -88,6 +88,7 @@ export async function guardedCcipRequest({ data, sender, urls }: CcipRequestPara
       refused ??= new CcipGatewayError({ body, details: (err as Error).message, status: REFUSED_GATEWAY_STATUS, url });
       continue;
     }
+    timeLeftForAttempt('CCIP gateway fetch');
     try {
       const response = await fetchMediaUrl(target, {
         method,
