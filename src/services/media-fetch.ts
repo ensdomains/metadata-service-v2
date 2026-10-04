@@ -178,7 +178,11 @@ export async function fetchMediaUrl(
     const method = (request.method ?? 'GET').toUpperCase();
     if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
       const headers = { ...request.headers };
-      for (const key of Object.keys(headers)) if (key.toLowerCase() === 'content-type') delete headers[key];
+      for (const key of Object.keys(headers)) {
+        if (['content-encoding', 'content-language', 'content-location', 'content-type'].includes(key.toLowerCase())) {
+          delete headers[key];
+        }
+      }
       request = { ...request, method: method === 'HEAD' ? 'HEAD' : 'GET', body: undefined, headers };
     }
   }
