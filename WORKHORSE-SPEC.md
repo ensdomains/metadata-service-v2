@@ -66,6 +66,7 @@ query-param parsing in the rasterize handler.
 ## Commit history
 
 ```
+00f6f51 docs: correct WORKHORSE-SPEC to match committed matrix
 ceec071 test: add non-square valid and exactly-one-invalid cases
 1cb8b19 refactor: read rasterize w/h params once per dimension
 ee9dee7 test: harden W8-RASTER-001 matrix
@@ -76,9 +77,10 @@ c40e4e5 test: red — W8-RASTER-001 six-case TDD matrix on main base
 5a5527c Merge pull request #54 (main HEAD BASE)
 ```
 
-7 linear commits on `5a5527c7e7ac7c20140bdd81757c5bd075bd389a`.
-3 files changed: `src/index.ts` (+6/−2), `test/rasterize-svg-avatar.test.ts`
-(+191/−6), `WORKHORSE-SPEC.md` (+138).
+8 linear commits on `5a5527c7e7ac7c20140bdd81757c5bd075bd389a` (final will
+be 9 including this correction). Pre-correction diff:
+`WORKHORSE-SPEC.md` +206/−0, `src/index.ts` +4/−2,
+`test/rasterize-svg-avatar.test.ts` +189/−2 — aggregate +399/−4.
 
 ## Test matrix (20 cases)
 
@@ -155,20 +157,21 @@ the SVG rewrite only fires for square sizes.
 
 ## Mutant coverage (9 mutants, all killed by committed tests)
 
-Each mutant was temporarily applied against `1cb8b19`, tests were run to
-confirm failure, then the mutant was reverted. No mutant commits exist.
+Each mutant was independently recreated at the final reviewed head, tests
+were run to confirm failure, then the mutant was reverted. No mutant commits
+exist.
 
 | # | Mutant | Change | Tests killed |
 |---|--------|--------|-------------|
 | 1 | Exclusive lower bound | `>=100` → `>100` | T5c, T5d, T6b, T7 |
 | 2 | No-leading-zero parser | `/^\d+$/` → `/^[1-9]\d*$/` | T7 |
-| 3 | Upper off-by-one | `<=2000` → `<2000` | T6c |
+| 3 | Upper off-by-one | `<=2000` → `<2000` | T5c, T5d, T6c |
 | 4 | Permissive parser | Regex guard removed (bare `parseInt`) | T1, T2, T3a, T3b |
-| 5 | Width-only `hasCustomSize` | Remove `outputHeight` from guard | T2, T4b |
-| 6 | Height-only `hasCustomSize` | Remove `outputWidth` from guard | T1, T4a, T6e |
+| 5 | Width-only `hasCustomSize` | Remove `outputHeight` from guard | T2, T4b, T6f, T6h |
+| 6 | Height-only `hasCustomSize` | Remove `outputWidth` from guard | T1, T4a, T6e, T6g, T6i |
 | 7 | Square-only | Add `&& outputWidth === outputHeight` | T5b, T5c, T5d |
-| 8 | Width-bound removed | Skip height range check | T6f, T6h |
-| 9 | Height-bound removed | Skip width range check | T6e, T6g, T6i |
+| 8 | Remove height bounds | Skip height range check | T6f, T6h |
+| 9 | Remove width bounds | Skip width range check | T6e, T6g, T6i |
 
 ## Gates
 
@@ -187,6 +190,7 @@ T1, T2, T3 failed as expected.
 | `ee9dee7` (harden) | 58 | 1077 | 1 |
 | `1cb8b19` (refactor) | 58 | 1077 | 1 |
 | `ceec071` (non-square/one-invalid) | 58 | 1084 | 1 |
+| `00f6f51` (spec correction, HEAD) | 58 | 1084 | 1 |
 
 ### Typecheck and lint
 ```
