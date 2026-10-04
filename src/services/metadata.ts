@@ -339,9 +339,10 @@ export class MetadataService {
     const verdictKey = expiryVerdictKey(canonical);
     if (this.expiryVerdicts.isLive(verdictKey)) return;
 
-    // Capture the generation before any chain read so a store that completes
-    // after an intervening eviction is discarded (W8-EXPIRY-001).
-    const token = this.expiryVerdicts.readGeneration();
+    // Register an active read for this key before any chain read, so an
+    // eviction for this key discards a late store (W8-EXPIRY-001) but an
+    // eviction for an unrelated key does not (P2 correction).
+    const token = this.expiryVerdicts.startRead(verdictKey);
 
     // The fail-open returns below cache nothing; settleExpiry caches a live verdict.
     if (this.blockchain.isV2Configured(this.network)) {
@@ -350,6 +351,7 @@ export class MetadataService {
         v2 = await this.blockchain.getV2Registration(this.network, canonical);
       } catch (error) {
         console.warn(`[expiry] v2 registration unreadable for ${canonical} — failing open (no 410):`, error);
+        this.expiryVerdicts.finishRead(verdictKey, token);
         return;
       }
       if (v2 && v2.status === 2) {
@@ -365,6 +367,7 @@ export class MetadataService {
       expiry = await this.blockchain.getExpiry(this.network, hash);
     } catch (error) {
       console.warn(`Failed to check expiry for ${canonical}:`, error);
+      this.expiryVerdicts.finishRead(verdictKey, token);
       return;
     }
     this.settleExpiry(canonical, verdictKey, expiry, token);
@@ -372,11 +375,12 @@ export class MetadataService {
 
   // Throws DomainExpiredError (→ 410) if an expiry read from the chain (unix
   // seconds; 0 when there is none) has passed, and caches the live verdict
-  // otherwise. The `token` is the generation captured before the chain read;
-  // a store after an intervening eviction is silently dropped.
+  // otherwise. The `token` is the active-read registration from startRead;
+  // setLive consumes it, finishRead releases it on the expired path.
   private settleExpiry(canonical: string, verdictKey: string, expiry: bigint, token: number): void {
     const expiryMs = Number(expiry) * 1000;
     if (expiry && expiryMs < Date.now()) {
+      this.expiryVerdicts.finishRead(verdictKey, token);
       throw new DomainExpiredError(canonical, new Date(expiryMs));
     }
     this.expiryVerdicts.setLive(verdictKey, expiry ? expiryMs : null, token);

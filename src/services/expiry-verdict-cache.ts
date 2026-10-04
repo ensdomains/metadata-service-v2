@@ -48,10 +48,14 @@ export class ExpiryVerdictCache {
   // follows insertion order, so re-inserting on every hit keeps the least
   // recently used entry first.
   private entries = new Map<string, number>();
-  // Monotonically increasing generation, incremented on every eviction so an
-  // in-flight chain read that started before eviction cannot store its verdict
-  // afterward and satisfy the next request (W8-EXPIRY-001).
-  private generation = 0;
+  // Per-key set of active-read tokens. An in-flight chain read registers a
+  // token before starting; setLive checks the token is still active for that
+  // key. delete() clears the set for the evicted key only, so an unrelated
+  // eviction never invalidates an in-flight read for a different name.
+  // Tokens are always removed via setLive (success) or finishRead
+  // (fail-open/error), so the map never holds a key with an empty set.
+  private activeReads = new Map<string, Set<number>>();
+  private nextToken = 0;
 
   constructor(
     private readonly ttlMs = EXPIRY_VERDICT_TTL_MS,
@@ -68,17 +72,40 @@ export class ExpiryVerdictCache {
     return true;
   }
 
-  /** Returns the current generation for an in-flight read to carry. */
-  readGeneration(): number {
-    return this.generation;
+  /** Registers an active read for `key` and returns a token that setLive
+   *  must present to store a verdict. The caller must call finishRead on
+   *  every path that does not reach setLive (fail-open, error). */
+  startRead(key: string): number {
+    const token = ++this.nextToken;
+    let set = this.activeReads.get(key);
+    if (!set) {
+      set = new Set();
+      this.activeReads.set(key, set);
+    }
+    set.add(token);
+    return token;
+  }
+
+  /** Releases an active-read token without storing a verdict (fail-open /
+   *  error path). Idempotent — safe to call even if the token was already
+   *  consumed by setLive or evicted. */
+  finishRead(key: string, token: number): void {
+    const set = this.activeReads.get(key);
+    if (!set) return;
+    set.delete(token);
+    if (set.size === 0) this.activeReads.delete(key);
   }
 
   /** Stores a live verdict read from the chain; `expiryMs` is the name's
-   *  expiry instant, or null when the chain reported none. When `token` is
-   *  provided the store is a no-op unless it still equals the current
-   *  generation (an eviction between read-start and settle skips the store). */
-  setLive(key: string, expiryMs: number | null, token?: number): void {
-    if (token !== undefined && token !== this.generation) return;
+   *  expiry instant, or null when the chain reported none. `token` must be
+   *  the value from startRead for this key. When the token is no longer
+   *  active (evicted before this read completed), the store is silently
+   *  dropped — the next checkExpiry will start a fresh read. */
+  setLive(key: string, expiryMs: number | null, token: number): void {
+    const set = this.activeReads.get(key);
+    if (!set || !set.has(token)) return;
+    set.delete(token);
+    if (set.size === 0) this.activeReads.delete(key);
     const now = Date.now();
     const lifetime = expiryMs === null ? this.ttlMs : Math.min(this.ttlMs, expiryMs - now);
     this.entries.delete(key);
@@ -89,8 +116,10 @@ export class ExpiryVerdictCache {
     }
   }
 
+  /** Evicts the cached verdict for `key` and invalidates every in-flight
+   *  read for the same key so none of them can store afterward. */
   delete(key: string): void {
-    this.generation++;
+    this.activeReads.delete(key);
     this.entries.delete(key);
   }
 
