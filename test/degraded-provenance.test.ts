@@ -149,7 +149,7 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
     sync_version: 1,
   };
 
-  it('AC1: on main baseline, degraded D1 rescue returns normal Cache-Control (demonstrates the bug)', async () => {
+  it('AC1: degraded D1 rescue after non-definitive live miss returns short-lived Cache-Control', async () => {
     // Simulate the finding's exact conditions:
     // - FallbackService throws NotFoundError({ definitive: false })
     vi.spyOn(FallbackService.prototype, 'getDomainMetadata').mockRejectedValue(
@@ -171,30 +171,23 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
 
     const cc = res.headers.get('Cache-Control') ?? '';
 
-    // THIS IS THE BUG: on main baseline, the degraded response gets the normal
-    // Cache-Control with long TTLs instead of max-age=30.
-    // We assert what currently happens (the bug) — the test will fail after the fix.
+    // FIX VERIFICATION: degraded D1 rescue gets short TTL
     expect(cc).toMatch(/max-age=\d+/);
-
-    // The bug: max-age is the normal per-migration-status TTL (3600 for UNMIGRATED),
-    // not the degraded 30s.
     const maxAgeMatch = /max-age=(\d+)/.exec(cc);
     expect(maxAgeMatch).not.toBeNull();
     const maxAge = Number(maxAgeMatch![1]);
-    // BUG EXPECTATION: currently maxAge is 3600 (UNMIGRATED softTtl), not 30
-    // After the fix, this assertion should fail and be replaced with expect(maxAge).toBe(30)
-    expect(maxAge).toBeGreaterThan(30);
+    expect(maxAge).toBe(30);
 
-    // The bug: edge cache stores with 300s max-age, not 30s
+    // FIX VERIFICATION: edge cache stores with max-age ≤ 30
     const edgeEntry = edgeStore.get('http://localhost/sepolia/registry/non-definitive-metadata.eth');
     expect(edgeEntry).toBeDefined();
-    expect(edgeEntry!.maxAge).toBeGreaterThan(30);
+    expect(edgeEntry!.maxAge).not.toBeNull();
+    expect(edgeEntry!.maxAge).toBeLessThanOrEqual(30);
 
-    // The bug: KV is written with expirationTtl: 604800 (UNMIGRATED hardTtl), not ≤ 30
+    // FIX VERIFICATION: no long-lived KV metadata write
     const metadataKvPuts = kvPuts.filter(p => p.key.startsWith('meta:'));
-    expect(metadataKvPuts.length).toBeGreaterThan(0);
     const longLivedPuts = metadataKvPuts.filter(p => (p.expirationTtl ?? 0) > 30);
-    expect(longLivedPuts.length).toBeGreaterThan(0);
+    expect(longLivedPuts.length).toBe(0);
   });
 
   it('AC2: after fix, degraded D1 rescue returns Cache-Control: max-age=30 and no long-lived KV write', async () => {
