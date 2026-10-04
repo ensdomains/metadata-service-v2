@@ -229,6 +229,12 @@ export class WebhookService {
       return { valid: false, error: 'Event must include a name or namehash' };
     }
 
+    // namehash is documented as string|null. A boolean, number, object, array,
+    // or missing field must not reach cache purge even when a valid name is present.
+    if (payload.namehash !== null && typeof payload.namehash !== 'string') {
+      return { valid: false, error: 'Missing or invalid namehash' };
+    }
+
     // When a name is present, it must be a well-formed ENS name (one over the
     // service's length or depth limits is acknowledged in handleWebhook).
     if (payload.name != null && typeof payload.name !== 'string') {
