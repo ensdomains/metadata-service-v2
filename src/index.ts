@@ -715,7 +715,15 @@ app.get(
 
     try {
       await metadataService.checkExpiry(name);
+    } catch (error) {
+      if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
+        const errorCacheHeaders = CachePresets.error();
+        Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
+      }
+      return httpError(c, error, "Failed to resolve registry hierarchy");
+    }
 
+    try {
       const hierarchy = await metadataService.getRegistryHierarchy(name);
 
       const cacheHeaders = CachePresets.hierarchy(name);
@@ -730,10 +738,7 @@ app.get(
       // W3-ROUTES-010: the registry-hierarchy route must stay total — return
       // a 200 root-first zero-owner placeholder when the hierarchy service
       // itself reports absence, outage, or deadline after a successful expiry
-      // check. Only DomainExpiredError still reaches httpError.
-      if (error instanceof DomainExpiredError) {
-        return httpError(c, error, "Failed to resolve registry hierarchy");
-      }
+      // check.
       if (
         error instanceof NotFoundError ||
         error instanceof UpstreamError
