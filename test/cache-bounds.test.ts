@@ -119,7 +119,7 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     // Client-facing header keeps the long, purgeable-tier TTL...
     expect(res.headers.get('Cache-Control')).toContain('max-age=21600');
     // ...but the edge copy is capped (edgeCachePut rewrites Cache-Control).
-    const entry = edgeStore.get('http://localhost/sepolia/registry/fox.eth/image');
+    const entry = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/image'));
     expect(entry).toBeDefined();
     expect(entry!.maxAge).toBeLessThanOrEqual(300);
   });
@@ -135,7 +135,7 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
 
     // ...while every caches.default write is bounded by EDGE_CACHE_MAX_AGE_SECS=300
     // because the webhook cannot purge other colos.
-    const entry = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize');
+    const entry = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/rasterize'));
     expect(entry).toBeDefined();
     expect(entry!.maxAge).not.toBeNull();
     expect(entry!.maxAge).toBeLessThanOrEqual(300);
@@ -163,8 +163,8 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     expect(res.status).toBe(200);
     await flush(); // run the real purge/warm waitUntil block
 
-    const plain = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize');
-    const sized = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize?w=518&h=518');
+    const plain = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/rasterize'));
+    const sized = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/rasterize?w=518&h=518'));
 
     // The exact query-less URL IS purged (in this colo)...
     expect(plain).toBeUndefined();
@@ -433,7 +433,6 @@ describe('getV2Registries: discovery failure after cache TTL', () => {
 // v2 SVG/PNG entries miss after deployment.  The discriminator is appended as
 // __ecv=v3 query parameter on every internal match/put/purge and must never
 // reach the client-visible URL or headers.
-const EDGE_DISCRIMINATOR = '__ecv=v3';
 function v3EdgeKey(base: string): string {
   const u = new URL(base);
   u.searchParams.set('__ecv', 'v3');
@@ -564,9 +563,9 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
     const text = await res.text();
     expect(text).not.toContain('__ecv');
     // No __ecv in headers
-    for (const [k] of res.headers.entries()) {
+    res.headers.forEach((_, k) => {
       expect(k).not.toContain('__ecv');
       expect(res.headers.get(k)).not.toContain('__ecv');
-    }
+    });
   });
 });
