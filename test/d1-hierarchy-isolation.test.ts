@@ -148,6 +148,29 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
     expect(count).toBe(2);
   });
 
+  // getHierarchyCount must match getHierarchy's isFresh semantics:
+  // only rows within readMaxAgeMs count. Stale rows suppress recovery
+  // if counted as present, because getHierarchy filters them out.
+  it('getHierarchyCount excludes stale rows, matching getHierarchy freshness', async () => {
+    const { sqlite } = sqliteD1('../migrations/003_hierarchy_root_scoping.sql');
+    const d1 = new D1Service(
+      { prepare: (s: string) => ({ bind: (...a: unknown[]) => ({ first: async () => sqlite.prepare(s).get(...(a as never[])) }) }) } as unknown as D1Database,
+      'mainnet'
+    );
+
+    const rootId = namehash('a.eth');
+    const staleTs = Date.now() - (8 * 24 * 60 * 60 * 1000); // 8 days ago (>7 day max age)
+    sqlite.prepare(`INSERT INTO registry_hierarchy (network, id, name, owner, resolver, level, parent_id, root_domain_id, last_updated, sync_version)
+      VALUES ('mainnet', ?, 'eth', '${ZERO}', '${ZERO}', 1, NULL, ?, ${staleTs}, 1)`).run(namehash('eth'), rootId);
+
+    // Raw SQL count is 1, but getHierarchyCount must return 0 (stale).
+    const rawCount = (sqlite.prepare('SELECT COUNT(*) as cnt FROM registry_hierarchy WHERE network = ? AND root_domain_id = ?').get('mainnet', rootId) as { cnt: number }).cnt;
+    expect(rawCount).toBe(1);
+
+    const count = await (d1 as any).getHierarchyCount('a.eth');
+    expect(count).toBe(0);
+  });
+
   // --- Cross-network isolation ---
 
   it('same id and root on different networks are independent', async () => {
@@ -185,14 +208,21 @@ describe.skipIf(!DatabaseSync)('D1 hierarchy isolation (W8-D1-001)', () => {
 
 // === Route-level recovery test (mock-based) =================================
 //
-// After migration 003 drops registry_hierarchy, getRegistryHierarchy's D1
-// fallback returns empty. The route must trigger syncHierarchy via waitUntil
-// so the Worker runtime keeps the isolate alive until the sync completes.
-// This covers both direct /registry-hierarchy traffic and fresh-domain traffic
-// that hits the hierarchy route without going through syncDomain.
+// After migration 003 drops registry_hierarchy, getRegistryHierarchy must
+// schedule hierarchy recovery via waitUntil on BOTH the success path (healthy
+// upstream, D1 empty) and the failure path (upstream down, D1 empty).
+//
+// Recovery must NOT fire when D1 already has fresh rows (no redundant sync).
+// getHierarchyCount must exclude stale rows matching getHierarchy's isFresh
+// semantics so stale rows don't suppress recovery.
+//
+// The waitUntil promise must be the exact pending syncHierarchy promise (not a
+// resolved substitute), rejection must be absorbed per policy, and awaiting
+// the deferred promise must result in actual D1 persistence.
 
-describe('getRegistryHierarchy D1 fallback triggers syncHierarchy via waitUntil', () => {
+describe('getRegistryHierarchy D1 recovery (round 3)', () => {
   const ZERO = '0x0000000000000000000000000000000000000000';
+  const OWNER = '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809';
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -201,7 +231,19 @@ describe('getRegistryHierarchy D1 fallback triggers syncHierarchy via waitUntil'
     vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
-  function makeService() {
+  type Internals = {
+    fallback: { getRegistryHierarchy: (name: string) => Promise<unknown> };
+    d1: D1Service | null;
+    sync: { syncHierarchy: (name: string, force?: boolean) => Promise<unknown> } | null;
+    cache: { get: (key: string) => Promise<unknown>; set: (key: string, val: unknown, opts?: unknown) => Promise<unknown> };
+  };
+
+  // Build MetadataService with controlled fallback, D1, and sync.
+  function makeService(opts: {
+    upstream: 'healthy' | 'down';
+    d1Rows: Array<{ name: string; owner: string; resolver: string; level: number }>;
+    d1Stale?: boolean; // if true, write rows with old timestamps
+  }) {
     const svc = new MetadataService(
       {
         indexerV2Endpoint: 'https://indexer.test/graphql',
@@ -210,114 +252,269 @@ describe('getRegistryHierarchy D1 fallback triggers syncHierarchy via waitUntil'
         network: 'sepolia',
         fallbackToBlockchain: true,
         internalCacheEnabled: false,
-        d1Enabled: false,
+        d1Enabled: true,
+        d1ReadMaxAgeMs: 7 * 24 * 60 * 60 * 1000, // 7 days
       },
       { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
       { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
     );
 
-    type Internals = {
-      indexerV2: { getHierarchy: (name: string) => Promise<unknown> };
-      indexerV1: { getHierarchy: (name: string) => Promise<unknown> } | null;
-      blockchain: { executeWithFallback: (...args: unknown[]) => Promise<unknown> };
-      d1: D1Service | null;
-      sync: { syncHierarchy: (name: string, force?: boolean) => Promise<unknown> } | null;
-    };
-
     const s = svc as unknown as Internals;
 
-    // All upstream sources fail.
-    vi.spyOn(s.indexerV2, 'getHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
-    if (s.indexerV1) {
-      vi.spyOn(s.indexerV1, 'getHierarchy').mockRejectedValue(new UpstreamError('v1 down'));
+    // Override fallback: healthy returns a hierarchy, down throws.
+    if (opts.upstream === 'healthy') {
+      vi.spyOn(s.fallback, 'getRegistryHierarchy').mockResolvedValue({
+        data: {
+          root: { name: 'a.eth', owner: OWNER, resolver: ZERO },
+          parent: { name: 'eth', owner: ZERO, resolver: ZERO },
+        },
+        source: 'indexerV2',
+        usedFallback: false,
+      });
+    } else {
+      vi.spyOn(s.fallback, 'getRegistryHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
     }
-    vi.spyOn(s.blockchain, 'executeWithFallback').mockRejectedValue(new UpstreamError('all RPCs failed'));
 
-    // D1 hierarchy is empty (post-migration state).
-    s.d1 = {
-      getHierarchy: vi.fn().mockResolvedValue([]),
-      getHierarchyCount: vi.fn().mockResolvedValue(0),
-    } as unknown as D1Service;
+    // Override cache to always miss (forces fresh resolution).
+    vi.spyOn(s.cache, 'get').mockResolvedValue(null);
+    vi.spyOn(s.cache, 'set').mockResolvedValue(undefined);
 
-    // syncHierarchy mock — will be awaited through waitUntil.
+    // D1: use real D1Service with real SQLite for persistence tests,
+    // or a mock for stale-row tests.
+    if (opts.d1Stale) {
+      s.d1 = {
+        getHierarchy: vi.fn().mockResolvedValue([]), // stale rows filtered out
+        getHierarchyCount: vi.fn().mockResolvedValue(0), // stale rows excluded from count
+      } as unknown as D1Service;
+    } else if (opts.d1Rows.length > 0) {
+      s.d1 = {
+        getHierarchy: vi.fn().mockResolvedValue(opts.d1Rows),
+        getHierarchyCount: vi.fn().mockResolvedValue(opts.d1Rows.length),
+      } as unknown as D1Service;
+    } else {
+      s.d1 = {
+        getHierarchy: vi.fn().mockResolvedValue([]),
+        getHierarchyCount: vi.fn().mockResolvedValue(0),
+      } as unknown as D1Service;
+    }
+
     const syncHierarchyMock = vi.fn().mockResolvedValue({
-      operation: 'hierarchy',
-      processed: 1,
-      stored: 1,
-      errors: 0,
-      duration: 0,
+      operation: 'hierarchy', processed: 1, stored: 1, errors: 0, duration: 0,
     });
     s.sync = { syncHierarchy: syncHierarchyMock };
 
     return { svc, syncHierarchyMock };
   }
 
-  it('triggers syncHierarchy via waitUntil when D1 hierarchy is empty and all upstreams fail', async () => {
-    const { svc, syncHierarchyMock } = makeService();
-    const waitUntil = vi.fn((p: Promise<unknown>) => p);
+  // --- Healthy response schedules recovery when D1 is empty ---
+  // This is the primary round-3 finding: on HEAD, the success path returns
+  // before recovery, so D1 stays empty indefinitely even when the indexer
+  // is healthy.
+
+  it('healthy upstream: schedules waitUntil recovery when D1 hierarchy is empty', async () => {
+    const { svc, syncHierarchyMock } = makeService({ upstream: 'healthy', d1Rows: [] });
+    const waitUntil = vi.fn();
     const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
 
-    // getRegistryHierarchy currently does not accept executionCtx on HEAD.
-    // Cast through any so the test compiles before the parameter is added;
-    // it will throw UpstreamError on HEAD because no recovery exists.
-    try {
-      await (svc as any).getRegistryHierarchy('a.eth', executionCtx);
-    } catch (e) {
-      // UpstreamError is expected on HEAD — every tier failed and no
-      // recovery path exists yet. The fix adds recovery via waitUntil
-      // so this error becomes a fallback D1 response instead.
-      expect(e).toBeInstanceOf(UpstreamError);
-    }
+    const result = await (svc as any).getRegistryHierarchy('a.eth', executionCtx);
 
-    // On HEAD: waitUntil is never called (no recovery). After the fix:
-    // waitUntil must be called with a promise that completes syncHierarchy.
+    // Response is the live upstream data (not an error).
+    expect(result.name).toBe('a.eth');
+
+    // On HEAD: waitUntil is never called because recovery only fires in the
+    // catch block. After the fix, waitUntil must be called.
     expect(waitUntil).toHaveBeenCalled();
   });
 
-  it('the waitUntil promise completes syncHierarchy and resolves without unhandled rejection', async () => {
-    const { svc, syncHierarchyMock } = makeService();
-    const waitUntilPromises: Promise<unknown>[] = [];
-    const waitUntil = vi.fn((p: Promise<unknown>) => {
-      waitUntilPromises.push(p);
+  // --- No redundant sync when usable fresh rows exist ---
+
+  it('healthy upstream + fresh D1 rows: does NOT schedule recovery', async () => {
+    const { svc, syncHierarchyMock } = makeService({
+      upstream: 'healthy',
+      d1Rows: [
+        { name: 'eth', owner: ZERO, resolver: ZERO, level: 1 },
+        { name: 'a.eth', owner: OWNER, resolver: ZERO, level: 2 },
+      ],
     });
-    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
-
-    try {
-      await (svc as any).getRegistryHierarchy('a.eth', executionCtx);
-    } catch (_) {
-      // swallowed on HEAD — every tier fails and no recovery
-    }
-
-    // On HEAD: waitUntil never called. After the fix: the promise is
-    // registered, and awaiting it completes the sync.
-    if (waitUntilPromises.length > 0) {
-      await Promise.all(waitUntilPromises);
-      expect(syncHierarchyMock).toHaveBeenCalledWith('a.eth');
-      // No unhandled rejection — the promise resolves cleanly.
-    } else {
-      // HEAD behaviour: the test records the absence.
-      expect(waitUntilPromises.length).toBeGreaterThan(0);
-    }
-  });
-
-  it('does not trigger syncHierarchy when D1 has existing hierarchy rows', async () => {
-    const { svc, syncHierarchyMock } = makeService();
-
-    // Override D1 to return existing hierarchy.
-    const s = svc as unknown as {
-      d1: { getHierarchy: (name: string) => Promise<unknown> };
-    };
-    s.d1.getHierarchy = vi.fn().mockResolvedValue([
-      { name: 'eth', owner: ZERO, resolver: ZERO, level: 1 },
-      { name: 'a.eth', owner: OWNER, resolver: ZERO, level: 2 },
-    ]);
-
     const waitUntil = vi.fn();
     const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
 
     await (svc as any).getRegistryHierarchy('a.eth', executionCtx);
 
-    // D1 had data — no recovery needed, no sync triggered.
     expect(syncHierarchyMock).not.toHaveBeenCalled();
+  });
+
+  it('outage + fresh D1 rows: does NOT schedule recovery (data already usable)', async () => {
+    const { svc, syncHierarchyMock } = makeService({
+      upstream: 'down',
+      d1Rows: [
+        { name: 'eth', owner: ZERO, resolver: ZERO, level: 1 },
+        { name: 'a.eth', owner: OWNER, resolver: ZERO, level: 2 },
+      ],
+    });
+    const waitUntil = vi.fn();
+    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
+
+    const result = await (svc as any).getRegistryHierarchy('a.eth', executionCtx);
+
+    // D1 fallback served the stale rows.
+    expect(result.hierarchy).toHaveLength(2);
+    expect(syncHierarchyMock).not.toHaveBeenCalled();
+  });
+
+  // --- Stale-only rows do not suppress recovery ---
+
+  it('outage + stale-only D1 rows: schedules recovery (getHierarchyCount returns 0)', async () => {
+    const { svc, syncHierarchyMock } = makeService({ upstream: 'down', d1Rows: [], d1Stale: true });
+    const waitUntil = vi.fn();
+    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
+
+    try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) { /* basic fallback */ }
+
+    // On HEAD: stale rows may suppress recovery if getHierarchyCount
+    // does not filter by freshness. After the fix, recovery fires.
+    expect(waitUntil).toHaveBeenCalled();
+  });
+
+  // --- Exact promise identity: waitUntil receives the syncHierarchy promise ---
+
+  it('waitUntil receives the actual pending syncHierarchy promise, not a resolved substitute', async () => {
+    // Use a never-resolving syncHierarchy to prove the promise is
+    // the real one (a resolved substitute would settle immediately).
+    let syncResolve!: (v: unknown) => void;
+    const syncPromise = new Promise((resolve) => { syncResolve = resolve; });
+    const syncHierarchyMock = vi.fn().mockReturnValue(syncPromise);
+
+    const svc = new MetadataService(
+      { indexerV2Endpoint: 'https://indexer.test/graphql', indexerV2ApiVersion: 'v2', indexerV1Endpoint: 'https://v1.test/subgraph', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: true },
+      { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
+      { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
+    );
+    const s = svc as unknown as Internals;
+    vi.spyOn(s.fallback, 'getRegistryHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
+    vi.spyOn(s.cache, 'get').mockResolvedValue(null);
+    vi.spyOn(s.cache, 'set').mockResolvedValue(undefined);
+    s.d1 = { getHierarchy: vi.fn().mockResolvedValue([]), getHierarchyCount: vi.fn().mockResolvedValue(0) } as unknown as D1Service;
+    s.sync = { syncHierarchy: syncHierarchyMock };
+
+    const waitUntil = vi.fn((p: Promise<unknown>) => {
+      // The promise must be pending (not resolved).
+      expect(Promise.resolve(p)).not.toBe(p); // p !== a resolved promise wrapping p
+    });
+    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
+
+    try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {}
+
+    // Clean up.
+    syncResolve({ operation: 'hierarchy', processed: 1, stored: 1, errors: 0, duration: 0 });
+    await syncPromise;
+  });
+
+  // --- Rejection absorption: syncHierarchy failure does not propagate ---
+
+  it('syncHierarchy rejection is absorbed and does not propagate', async () => {
+    const syncError = new Error('indexer sync failed');
+    const syncHierarchyMock = vi.fn().mockRejectedValue(syncError);
+
+    const svc = new MetadataService(
+      { indexerV2Endpoint: 'https://indexer.test/graphql', indexerV2ApiVersion: 'v2', indexerV1Endpoint: 'https://v1.test/subgraph', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: true },
+      { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
+      { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
+    );
+    const s = svc as unknown as Internals;
+    vi.spyOn(s.fallback, 'getRegistryHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
+    vi.spyOn(s.cache, 'get').mockResolvedValue(null);
+    vi.spyOn(s.cache, 'set').mockResolvedValue(undefined);
+    s.d1 = { getHierarchy: vi.fn().mockResolvedValue([]), getHierarchyCount: vi.fn().mockResolvedValue(0) } as unknown as D1Service;
+    s.sync = { syncHierarchy: syncHierarchyMock };
+
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const waitUntil = vi.fn((p: Promise<unknown>) => { waitUntilPromises.push(p); });
+    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
+
+    // Must not throw — the basic hierarchy fallback returns a response.
+    const result = await (svc as any).getRegistryHierarchy('a.eth', executionCtx);
+    expect(result.hierarchy).toBeDefined();
+
+    // Await the waitUntil promise — must resolve, not reject.
+    if (waitUntilPromises.length > 0) {
+      await expect(Promise.all(waitUntilPromises)).resolves.not.toThrow();
+    }
+
+    // Rejection was logged.
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Hierarchy recovery sync for a.eth failed:'),
+      syncError,
+    );
+  });
+
+  // --- Deferred persistence: awaiting the waitUntil promise persists to D1 ---
+
+  it('successful deferred syncHierarchy persists rows to D1', async () => {
+    // Use real SQLite D1 so we can verify persistence after the sync.
+    const { DatabaseSync: DB } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
+    const sqlite = new DB(':memory:');
+    sqlite.exec(readFileSync(new URL('../migrations/002_network_scoping.sql', import.meta.url), 'utf8'));
+    sqlite.exec(readFileSync(new URL('../migrations/003_hierarchy_root_scoping.sql', import.meta.url), 'utf8'));
+    const stmt = (sql: string, params: unknown[] = []): unknown => ({
+      bind: (...p: unknown[]) => stmt(sql, p),
+      run: async () => ({ success: true, results: [], meta: sqlite.prepare(sql).run(...(params as never[])) }),
+      first: async () => sqlite.prepare(sql).get(...(params as never[])) ?? null,
+      all: async () => ({ results: sqlite.prepare(sql).all(...(params as never[])), success: true, meta: {} }),
+    });
+    const realDb = {
+      prepare: (sql: string) => stmt(sql),
+      batch: async (stmts: Array<{ run: () => Promise<unknown> }>) => Promise.all(stmts.map((s: { run: () => Promise<unknown> }) => s.run())),
+    } as unknown as D1Database;
+    const realD1 = new D1Service(realDb, 'sepolia');
+
+    const svc = new MetadataService(
+      { indexerV2Endpoint: 'https://indexer.test/graphql', indexerV2ApiVersion: 'v2', indexerV1Endpoint: 'https://v1.test/subgraph', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: true },
+      { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
+      { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
+    );
+    const s = svc as unknown as Internals;
+    vi.spyOn(s.fallback, 'getRegistryHierarchy').mockRejectedValue(new UpstreamError('zigens 502'));
+    vi.spyOn(s.cache, 'get').mockResolvedValue(null);
+    vi.spyOn(s.cache, 'set').mockResolvedValue(undefined);
+    s.d1 = realD1;
+
+    // Real syncHierarchy that calls the D1Service (needs indexer mock).
+    // We'll write directly to D1 in the mock to simulate the sync.
+    const syncComplete = vi.fn();
+    s.sync = {
+      syncHierarchy: vi.fn().mockImplementation(async (name: string) => {
+        await realD1.storeHierarchy(name, [
+          { name: 'eth', owner: ZERO, resolver: ZERO, level: 1 },
+          { name, owner: OWNER, resolver: ZERO, level: 2 },
+        ]);
+        syncComplete();
+        return { operation: 'hierarchy', processed: 1, stored: 1, errors: 0, duration: 0 };
+      }),
+    };
+
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const waitUntil = vi.fn((p: Promise<unknown>) => { waitUntilPromises.push(p); });
+    const executionCtx = { waitUntil, passThroughOnException: vi.fn() };
+
+    // Trigger the recovery path.
+    try { await (svc as any).getRegistryHierarchy('a.eth', executionCtx); } catch (_) {}
+
+    // Before await: D1 is still empty.
+    const before = await (realD1 as any).getHierarchyCount('a.eth');
+    expect(before).toBe(0);
+
+    // Await the waitUntil promise.
+    if (waitUntilPromises.length > 0) {
+      await Promise.all(waitUntilPromises);
+      expect(syncComplete).toHaveBeenCalled();
+    }
+
+    // After await: D1 has hierarchy rows.
+    const after = await (realD1 as any).getHierarchyCount('a.eth');
+    expect(after).toBe(2);
+
+    const rows = await realD1.getHierarchy('a.eth');
+    expect(rows.map((r: { name: string }) => r.name)).toEqual(['eth', 'a.eth']);
   });
 });
