@@ -453,6 +453,9 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
   // ── round-trip: miss → put → hit ──────────────────────────────────
 
   it('/image: round-trip miss→put→hit stores at v3 key and subsequent request hits', async () => {
+    const getImageSpy = vi.mocked(ImageCacheService.prototype.getImage);
+    const before = getImageSpy.mock.calls.length;
+
     const r1 = await get(IMG);
     expect(r1.status).toBe(200);
     const body1 = await r1.text();
@@ -464,9 +467,16 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
     // Second request must hit stored entry and return identical body
     const r2 = await get(IMG);
     expect(await r2.text()).toBe(body1);
+
+    // getImage must be called exactly once: first request renders,
+    // second hits the edge cache and never reaches the origin.
+    expect(getImageSpy.mock.calls.length - before, 'render origin called exactly once').toBe(1);
   });
 
   it('/rasterize: round-trip miss→put→hit stores at v3 key', async () => {
+    const getImageSpy = vi.mocked(ImageCacheService.prototype.getImage);
+    const before = getImageSpy.mock.calls.length;
+
     const r1 = await get(RAS);
     expect(r1.status).toBe(200);
     const b1 = new Uint8Array(await r1.arrayBuffer());
@@ -477,6 +487,8 @@ describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
 
     const r2 = await get(RAS);
     expect(new Uint8Array(await r2.arrayBuffer())).toEqual(b1);
+
+    expect(getImageSpy.mock.calls.length - before, 'render origin called exactly once').toBe(1);
   });
 
   // ── unversioned miss, v3 hit ──────────────────────────────────────
