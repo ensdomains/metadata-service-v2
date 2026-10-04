@@ -60,4 +60,12 @@ describe('MAX_AVATAR_BYTES garbage falls back to the 25 MiB default', () => {
     const res = await avatar('2', png(PNG_MAGIC.length));
     expect(res.status).toBe(404);
   });
+
+  it('rejects an unsafe integer and falls back to the default cap', async () => {
+    // "9007199254740993" rounds to 9007199254740992 under IEEE-754;
+    // the parser must treat it as garbage and use the 25 MiB default.
+    const overDefault = png(DEFAULT_CAP + 1);
+    const res = await avatar('9007199254740993', overDefault);
+    expect(res.status).toBe(404);
+  });
 });
