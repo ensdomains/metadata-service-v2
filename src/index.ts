@@ -725,14 +725,27 @@ app.get(
 
     try {
       const hierarchy = await metadataService.getRegistryHierarchy(name);
+      const record = hierarchy as typeof hierarchy & {
+        hierarchyErrorCache?: true;
+      };
+      // The service returns a placeholder instead of throwing when every
+      // source fails. That hint must not become public JSON.
+      const degraded = record.hierarchyErrorCache === true;
+      delete record.hierarchyErrorCache;
 
-      const cacheHeaders = CachePresets.hierarchy(name);
+      const cacheHeaders = degraded
+        ? CachePresets.error()
+        : CachePresets.hierarchy(name);
       Object.entries(cacheHeaders).forEach(([key, value]) => {
         c.header(key, value);
       });
 
       const res = c.json(hierarchy);
-      edgeCachePut(c, res);
+      edgeCachePut(
+        c,
+        res,
+        degraded ? CacheTTL.error : EDGE_CACHE_MAX_AGE_SECS,
+      );
       return res;
     } catch (error) {
       // W3-ROUTES-010: the registry-hierarchy route must stay total — return
@@ -765,6 +778,10 @@ app.get(
           definitive ? EDGE_CACHE_MAX_AGE_SECS : CacheTTL.error,
         );
         return res;
+      }
+      if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
+        const errorCacheHeaders = CachePresets.error();
+        Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
       }
       return httpError(c, error, "Failed to resolve registry hierarchy");
     }

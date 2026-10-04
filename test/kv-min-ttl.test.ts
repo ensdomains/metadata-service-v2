@@ -130,14 +130,13 @@ describe('MetadataService.getRegistryHierarchy when every cache write fails', ()
 
     const zero = '0x0000000000000000000000000000000000000000';
     const resolver = expect.stringMatching(/^0x[0-9a-fA-F]{40}$/);
-    expect(result).toEqual({
-      name: 'sub.nick.eth',
-      hierarchy: [
-        { name: 'eth', owner: zero, resolver, level: 1 },
-        { name: 'nick.eth', owner: zero, resolver, level: 2 },
-        { name: 'sub.nick.eth', owner: zero, resolver, level: 3 },
-      ],
-    });
+    expect(result.name).toBe('sub.nick.eth');
+    expect(result.hierarchy).toEqual([
+      { name: 'eth', owner: zero, resolver, level: 1 },
+      { name: 'nick.eth', owner: zero, resolver, level: 2 },
+      { name: 'sub.nick.eth', owner: zero, resolver, level: 3 },
+    ]);
+    expect(result).toHaveProperty('hierarchyErrorCache', true);
     expect(kv.put).toHaveBeenCalledTimes(1);
   });
 });

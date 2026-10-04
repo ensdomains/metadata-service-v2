@@ -823,9 +823,19 @@ export class MetadataService {
         error,
       );
 
-      // Generate basic hierarchy as last resort
-      const fallbackResponse = this.generateBasicHierarchy(name);
-      await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
+      // Last-resort placeholder. The route must not cache an outage as a
+      // healthy hierarchy. hierarchyErrorCache survives the KV round trip and
+      // is stripped before the public JSON. A definitive miss is a clean
+      // answer and keeps the normal policy.
+      const fallbackResponse: RegistryHierarchyResponse & {
+        hierarchyErrorCache?: true;
+      } = this.generateBasicHierarchy(name);
+      const definitive =
+        error instanceof NotFoundError && error.definitive === true;
+      if (!definitive) fallbackResponse.hierarchyErrorCache = true;
+      await this.cache.set(cacheKey, fallbackResponse, {
+        ttl: definitive ? CacheTTL.normal : CacheTTL.error,
+      });
       return fallbackResponse;
     }
   }

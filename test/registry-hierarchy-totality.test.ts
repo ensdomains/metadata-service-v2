@@ -43,6 +43,7 @@ vi.mock('../src/services/font', () => ({
 }));
 
 import { MetadataService } from '../src/services/metadata';
+import { FallbackService } from '../src/services/fallback';
 import { WebhookService } from '../src/services/webhook';
 import app from '../src/index';
 
@@ -203,5 +204,34 @@ describe('GET /registry-hierarchy/:name totality (W3-ROUTES-010)', () => {
     expect(getHierarchy).not.toHaveBeenCalled();
     const body2 = await res2.json();
     expectPlaceholderHierarchy(body2, name);
+  });
+
+  it('keeps the 30s error policy when hierarchy throws an unexpected error', async () => {
+    getHierarchy.mockRejectedValueOnce(new Error('kv read failed'));
+
+    const res = await send('/registry-hierarchy/kv-down.eth?network=mainnet');
+
+    expect(res.status).toBe(500);
+    expect(maxAgeOf(res.headers.get('Cache-Control'))).toBe(30);
+    expect(edgeStore.size).toBe(0);
+  });
+
+  it('applies the 30s edge policy when the real hierarchy method reports an outage', async () => {
+    getHierarchy.mockRestore();
+    const fallback = vi
+      .spyOn(FallbackService.prototype, 'getRegistryHierarchy')
+      .mockRejectedValue(new UpstreamError('indexer and RPC down'));
+    try {
+      const res = await send('/registry-hierarchy/swallowed-outage.eth?network=mainnet');
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expectPlaceholderHierarchy(body, 'swallowed-outage.eth');
+      expect(body).not.toHaveProperty('hierarchyErrorCache');
+      expect(body).not.toHaveProperty('_provenance');
+      expect(maxAgeOf(res.headers.get('Cache-Control'))).toBe(30);
+      expect(storedEdgeMaxAge()).toBe(30);
+    } finally {
+      fallback.mockRestore();
+    }
   });
 });
