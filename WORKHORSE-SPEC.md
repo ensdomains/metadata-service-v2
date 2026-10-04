@@ -31,7 +31,7 @@ A non-finite override must not disable that window. This run falls back to the d
 |---|---|
 | `test/webhook-replay-tolerance.test.ts` | New focused regression. Does not edit the existing webhook suites. |
 | `src/services/webhook.ts` | A non-finite `toleranceSecs` must not be used as the replay window. |
-| `src/index.ts` | A malformed non-empty `WEBHOOK_TOLERANCE_SECS` must not be passed through as `NaN`. |
+| `src/index.ts` | A malformed, excessively large, or non-safe-integer `WEBHOOK_TOLERANCE_SECS` must not be passed through. Whole-string digit validation, safe-integer guard, and a documented maximum of 86400 seconds. |
 
 No other files. A lane that can meet both requirements without a new helper may leave the shape as it is. Do not add a dependency. Do not change signature verification, payload validation, body size, auth, or any other finding.
 
@@ -54,6 +54,8 @@ None. The ticket's direction is met as stated.
 6. **The gate is finite.** `package.json` `test` is `vitest`, which stays in watch mode unless CI is set. GitHub Actions sets CI. The showing commands export `CI=true` so the same script exits. That is the project gate, not a different suite.
 
 7. **Landing.** The lane does not push and does not open a pull request. No commit is a cherry-pick. The ticket branch that will target main is `WEB-1705`.
+
+8. **Maximum accepted tolerance.** A `WEBHOOK_TOLERANCE_SECS` value that parses to a non-safe-integer (`Number.isSafeInteger` → false) or exceeds the documented maximum of 86400 seconds (24 hours) is treated as unset and falls back to the secure 120-second default. This supersedes Decision 2's "a finite number is still an override" for values exceeding the maximum; ordinary finite overrides including 0, 300, and 86400 remain honored. The env parser rejects non-safe-integers to close the `parseInt` precision gap (e.g., `"999999999999999999999"` → `1e+21`, a non-safe-integer). This constraint was added by external security review (round 2, P2): a digit-only huge value passes the whole-string regex but still disables replay protection.
 
 ## Showing each criterion
 

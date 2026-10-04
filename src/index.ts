@@ -307,7 +307,8 @@ function getServices(env: Env, network: NetworkName): FullServices {
   // accepted replay-tolerance (86400s = 24h). Such values fall back to the
   // secure DEFAULT_TOLERANCE_SECS (120s). Ordinary finite overrides unchanged.
   const MAX_TOLERANCE_SECS = 86400;
-  const webhookToleranceSecs = Number.isFinite(parsedWebhookTolerance) &&
+  const webhookToleranceSecs = typeof parsedWebhookTolerance === 'number' &&
+    Number.isFinite(parsedWebhookTolerance) &&
     Number.isSafeInteger(parsedWebhookTolerance) &&
     parsedWebhookTolerance <= MAX_TOLERANCE_SECS
     ? parsedWebhookTolerance
