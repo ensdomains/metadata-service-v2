@@ -349,67 +349,84 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
 
   // ── stale-envelope rejection tests ────────────────────────────────────
 
-  it('300junk-garbage tolerance: rejects 121s-old, zero purge, zero bg work, zero edge warming', async () => {
+  it('300junk-garbage tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '300junk',
     });
-    const edgeDelete = vi.fn(async () => true);
-    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
+    const edgePurge = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgePurge, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
-    expect.soft(edgeDelete).not.toHaveBeenCalled();
+    expect.soft(edgePurge).not.toHaveBeenCalled();
   });
 
-  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero bg work, zero edge warming', async () => {
+  it('86401 above-max tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '86401',
     });
-    const edgeDelete = vi.fn(async () => true);
-    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
+    const edgePurge = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgePurge, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
-    expect.soft(edgeDelete).not.toHaveBeenCalled();
+    expect.soft(edgePurge).not.toHaveBeenCalled();
   });
 
-  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero bg work, zero edge warming', async () => {
+  it('positive digit-only huge tolerance: rejects 121s-old, zero purge, zero bg work, zero edge purge', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '999999999999999999999',
     });
-    const edgeDelete = vi.fn(async () => true);
-    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
+    const edgePurge = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgePurge, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
     expect.soft(res.status).toBe(401);
     assertNoPurge(mocks);
     expect.soft(bg).toHaveLength(0);
-    expect.soft(edgeDelete).not.toHaveBeenCalled();
+    expect.soft(edgePurge).not.toHaveBeenCalled();
   });
 
   // ── acceptance tests ──────────────────────────────────────────────────
 
-  it('86400 inclusive max: accepts age 121, full purge, bg drained, edge warming', async () => {
+  function assertEdgePurge(edgePurge: ReturnType<typeof vi.fn>, name: string) {
+    // Purges all SUPPORTED_NETWORKS × {registry,namewrapper} × {image,rasterize}
+    // origin is derived from c.req.url (http://localhost in app.request tests)
+    expect.soft(edgePurge).toHaveBeenCalledTimes(8);
+    const urls = edgePurge.mock.calls.map((c: any) => (c[0] as Request).url);
+    for (const net of ['mainnet', 'sepolia']) {
+      for (const rt of ['registry', 'namewrapper']) {
+        for (const kind of ['image', 'rasterize']) {
+          expect.soft(urls).toContain(
+            `http://localhost/${net}/${rt}/${name}/${kind}`,
+          );
+        }
+      }
+    }
+    expect.soft(urls.every((u: string) => u.includes(name))).toBe(true);
+  }
+
+  it('86400 inclusive max: accepts age 121, full purge, bg drained, exact edge purge URLs', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '86400',
     });
-    const edgeDelete = vi.fn(async () => true);
-    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
+    const edgePurge = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgePurge, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs - 121);
 
@@ -418,17 +435,17 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect.soft(bg.length).toBeGreaterThanOrEqual(1);
     const settled = await Promise.allSettled(bg);
     expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
-    expect.soft(edgeDelete).toHaveBeenCalled();
+    assertEdgePurge(edgePurge, NAME);
   });
 
-  it('negative unsafe-int fallback: accepts fresh, full purge, bg drained, edge warming', async () => {
+  it('negative unsafe-int fallback: accepts fresh, full purge, bg drained, exact edge purge URLs', async () => {
     const nowSecs = Math.floor(Date.now() / 1000);
     const { env, mocks } = makeFakesAndEnv({
       WEBHOOK_SECRET: SECRET_HEX,
       WEBHOOK_TOLERANCE_SECS: '-9007199254740993',
     });
-    const edgeDelete = vi.fn(async () => true);
-    vi.stubGlobal('caches', { default: { delete: edgeDelete, put: vi.fn(), match: vi.fn() } });
+    const edgePurge = vi.fn(async () => true);
+    vi.stubGlobal('caches', { default: { delete: edgePurge, put: vi.fn(), match: vi.fn() } });
     const app = await loadApp();
     const { res, bg } = await postWebhook(app, env, nowSecs);
 
@@ -437,6 +454,6 @@ describe('webhook replay tolerance via public POST /webhook route', () => {
     expect.soft(bg.length).toBeGreaterThanOrEqual(1);
     const settled = await Promise.allSettled(bg);
     expect.soft(settled.every(s => s.status === 'fulfilled')).toBe(true);
-    expect.soft(edgeDelete).toHaveBeenCalled();
+    assertEdgePurge(edgePurge, NAME);
   });
 });
