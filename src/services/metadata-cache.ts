@@ -7,11 +7,17 @@ import { SUPPORTED_NETWORKS } from '../config/networks';
 import { NotFoundError } from './errors';
 import { DomainExpiredError, type MetadataResolution } from './metadata';
 
+// Entries written before degraded D1 rescues were kept out of KV have no schema.
+// Serving one as a healthy hit would republish that rescue for its remaining
+// hard TTL (up to 30 days). Only this generation is a healthy cache.
+export const METADATA_CACHE_SCHEMA = 2;
+
 interface MetadataCacheEntry {
   metadata: MetadataResponse;
   createdAt: number;   // epoch ms
   softTtl: number;     // seconds
   migrationStatus: string;
+  schema?: number;
 }
 
 interface TtlConfig {
@@ -86,22 +92,33 @@ export class MetadataCacheService {
       const raw = await this.kv.get(cacheKey);
       if (raw) {
         const entry: MetadataCacheEntry = JSON.parse(raw);
-        const ageSeconds = (Date.now() - entry.createdAt) / 1000;
-        const ttlConfig = getTtlConfig(entry.migrationStatus);
+        // A pre-fix entry cannot be told from a healthy one, and the bug stored
+        // degraded rescues in this shape. Drop it and resolve again.
+        if (entry.schema !== METADATA_CACHE_SCHEMA) {
+          console.log(`[metadata-cache] dropping pre-fix entry for ${identifier}`);
+          executionCtx.waitUntil(
+            this.kv.delete(cacheKey).catch((err) =>
+              console.error(`[metadata-cache] failed to drop pre-fix entry ${cacheKey}:`, err),
+            ),
+          );
+        } else {
+          const ageSeconds = (Date.now() - entry.createdAt) / 1000;
+          const ttlConfig = getTtlConfig(entry.migrationStatus);
 
-        if (ageSeconds < entry.softTtl) {
-          console.log(`[metadata-cache] HIT ${identifier} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
-          return { metadata: entry.metadata, cacheStatus: 'hit', ttlConfig, degraded: false };
+          if (ageSeconds < entry.softTtl) {
+            console.log(`[metadata-cache] HIT ${identifier} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
+            return { metadata: entry.metadata, cacheStatus: 'hit', ttlConfig, degraded: false };
+          }
+
+          // Stale — return immediately, revalidate in background
+          console.log(`[metadata-cache] STALE ${identifier} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
+          executionCtx.waitUntil(
+            this.revalidate(cacheKey, fetchMetadata).catch((err) =>
+              console.error(`[metadata-cache] background revalidate failed for ${identifier}:`, err),
+            ),
+          );
+          return { metadata: entry.metadata, cacheStatus: 'stale', ttlConfig, degraded: false };
         }
-
-        // Stale — return immediately, revalidate in background
-        console.log(`[metadata-cache] STALE ${identifier} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
-        executionCtx.waitUntil(
-          this.revalidate(cacheKey, fetchMetadata).catch((err) =>
-            console.error(`[metadata-cache] background revalidate failed for ${identifier}:`, err),
-          ),
-        );
-        return { metadata: entry.metadata, cacheStatus: 'stale', ttlConfig, degraded: false };
       }
     } catch (err) {
       console.error(`[metadata-cache] KV read error for ${cacheKey}:`, err);
@@ -184,6 +201,7 @@ export class MetadataCacheService {
       createdAt: Date.now(),
       softTtl: ttlConfig.softTtl,
       migrationStatus,
+      schema: METADATA_CACHE_SCHEMA,
     };
     await this.kv.put(cacheKey, JSON.stringify(entry), {
       expirationTtl: ttlConfig.hardTtl,

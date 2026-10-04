@@ -106,6 +106,26 @@ async function getRoute(path: string) {
   return res;
 }
 
+// The finding's expected publication contract, literal, not a numeric bound.
+async function expectDegradedContract(res: Response) {
+  expect(res.status).toBe(200);
+  expect(res.headers.get('Cache-Control')).toBe('public, max-age=30');
+
+  const body = await res.json() as Record<string, unknown>;
+  expect(body.name).toBe('non-definitive-metadata.eth');
+  expect(body).not.toHaveProperty('provenance');
+  expect(body).not.toHaveProperty('metadata');
+  expect(JSON.stringify(body)).not.toContain('degraded-d1');
+
+  const edgeEntry = edgeStore.get('http://localhost/sepolia/registry/non-definitive-metadata.eth');
+  expect(edgeEntry).toBeDefined();
+  expect(edgeEntry!.response.headers.get('Cache-Control')).toBe('public, max-age=30');
+  expect(edgeEntry!.maxAge).toBe(30);
+
+  const metadataKvPuts = kvPuts.filter(p => p.key.startsWith('meta:'));
+  expect(metadataKvPuts).toEqual([]);
+}
+
 describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -139,12 +159,9 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
     id: '0xabc123',
     name: 'non-definitive-metadata.eth',
     status: MIGRATION_STATUS.UNMIGRATED,
-    owner: undefined,
-    expiration_date: undefined,
-    migration_date: undefined,
-    label_name: 'non-definitive-metadata',
-    labelhash: '0xdef456',
-    registry_type: 'registry',
+    owner: null,
+    expiration_date: null,
+    migration_date: null,
     last_updated: Date.now(),
     sync_version: 1,
   };
@@ -165,29 +182,7 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
     vi.spyOn(MetadataService.prototype, 'checkExpiry').mockResolvedValue(undefined);
 
     const res = await getRoute('/sepolia/registry/non-definitive-metadata.eth');
-
-    // The response should be 200 with valid metadata
-    expect(res.status).toBe(200);
-
-    const cc = res.headers.get('Cache-Control') ?? '';
-
-    // FIX VERIFICATION: degraded D1 rescue gets short TTL
-    expect(cc).toMatch(/max-age=\d+/);
-    const maxAgeMatch = /max-age=(\d+)/.exec(cc);
-    expect(maxAgeMatch).not.toBeNull();
-    const maxAge = Number(maxAgeMatch![1]);
-    expect(maxAge).toBe(30);
-
-    // FIX VERIFICATION: edge cache stores with max-age ≤ 30
-    const edgeEntry = edgeStore.get('http://localhost/sepolia/registry/non-definitive-metadata.eth');
-    expect(edgeEntry).toBeDefined();
-    expect(edgeEntry!.maxAge).not.toBeNull();
-    expect(edgeEntry!.maxAge).toBeLessThanOrEqual(30);
-
-    // FIX VERIFICATION: no long-lived KV metadata write
-    const metadataKvPuts = kvPuts.filter(p => p.key.startsWith('meta:'));
-    const longLivedPuts = metadataKvPuts.filter(p => (p.expirationTtl ?? 0) > 30);
-    expect(longLivedPuts.length).toBe(0);
+    await expectDegradedContract(res);
   });
 
   it('AC2: after fix, degraded D1 rescue returns Cache-Control: max-age=30 and no long-lived KV write', async () => {
@@ -202,27 +197,35 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
     vi.spyOn(MetadataService.prototype, 'checkExpiry').mockResolvedValue(undefined);
 
     const res = await getRoute('/sepolia/registry/non-definitive-metadata.eth');
+    await expectDegradedContract(res);
+  });
 
-    expect(res.status).toBe(200);
+  it('does not publish a pre-fix metadata KV entry as healthy success', async () => {
+    kvStore.set(
+      'meta:sepolia:registry:non-definitive-metadata.eth',
+      JSON.stringify({
+        metadata: {
+          name: 'poisoned-pre-fix.eth',
+          description: 'stored by the bug',
+          attributes: [],
+        },
+        createdAt: Date.now(),
+        softTtl: 3600,
+        migrationStatus: 'unmigrated',
+      }),
+    );
+    vi.spyOn(FallbackService.prototype, 'getDomainMetadata').mockRejectedValue(
+      new NotFoundError('non-definitive miss', { definitive: false }),
+    );
+    vi.spyOn(D1Service.prototype, 'getDomain').mockResolvedValue(d1DomainRecord);
+    vi.spyOn(D1Service.prototype, 'getMigrationStatus').mockResolvedValue(d1MigrationRecord);
+    const { MetadataService } = await import('../src/services/metadata');
+    vi.spyOn(MetadataService.prototype, 'checkExpiry').mockResolvedValue(undefined);
 
-    const cc = res.headers.get('Cache-Control') ?? '';
+    const res = await getRoute('/sepolia/registry/non-definitive-metadata.eth');
 
-    // FIX EXPECTATION: after the fix, max-age must be exactly 30
-    const maxAgeMatch = /max-age=(\d+)/.exec(cc);
-    expect(maxAgeMatch).not.toBeNull();
-    const maxAge = Number(maxAgeMatch![1]);
-    expect(maxAge).toBe(30);
-
-    // FIX EXPECTATION: edge cache stores with max-age ≤ 30
-    const edgeEntry = edgeStore.get('http://localhost/sepolia/registry/non-definitive-metadata.eth');
-    expect(edgeEntry).toBeDefined();
-    expect(edgeEntry!.maxAge).not.toBeNull();
-    expect(edgeEntry!.maxAge).toBeLessThanOrEqual(30);
-
-    // FIX EXPECTATION: no KV metadata write with expirationTtl > 30
-    const metadataKvPuts = kvPuts.filter(p => p.key.startsWith('meta:'));
-    const longLivedPuts = metadataKvPuts.filter(p => (p.expirationTtl ?? 0) > 30);
-    expect(longLivedPuts.length).toBe(0);
+    expect(res.headers.get('X-Cache-Status')).toBe('miss');
+    await expectDegradedContract(res);
   });
 
   it('normal (non-degraded) responses keep normal Cache-Control TTLs', async () => {
@@ -230,7 +233,9 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
     // Mock a successful getDomainMetadata call
     vi.spyOn(FallbackService.prototype, 'getDomainMetadata').mockResolvedValue({
       data: {
+        id: '0xabc',
         name: 'fox.eth',
+        labelName: 'fox',
         labelhash: '0xabc',
         isMigrated: true,
         owner: { id: '0xowner' },
@@ -238,6 +243,7 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
       },
       source: 'indexerV2' as const,
       usedFallback: false,
+      fallthroughs: 0,
       v2Consulted: true,
     });
 
@@ -247,7 +253,7 @@ describe('W3-ROUTES-005: degraded provenance from D1 rescue', () => {
 
     // Need to prevent blockchain calls
     const { BlockchainService } = await import('../src/services/blockchain');
-    vi.spyOn(BlockchainService.prototype, 'getV2Registries').mockResolvedValue(new Map());
+    vi.spyOn(BlockchainService.prototype, 'getV2Registries').mockResolvedValue(null);
 
     const res = await getRoute('/sepolia/registry/fox.eth');
 
