@@ -592,16 +592,19 @@ describe.skipIf(!hasSqlite)('D1 reads treat rows older than the read max age as 
 
   // ---- envSecsToMs guard-gap regressions on the D1 read path ---------------
 
-  // Discrimination via console.warn: when the guard rejects the env value it
-  // logs "[config] ignoring D1_READ_MAX_AGE_SECS=…". The max value is accepted
-  // (no warn); max+1, unsafe-int, and safe-secs/unsafe-ms are rejected (warn).
-  // The app.request exercises the real MetadataService → D1Service path.
-  const warnOnRead = async (env: Record<string, unknown>) => {
+  // Prove D1 freshness via forced upstream outage: when the indexer is down,
+  // the only data source is D1. A row older than the 7-day default but younger
+  // than 10 years discriminates the cap from its fallback.
+  const readFreshness = async (env: Record<string, unknown>) => {
     const sqlite = openSqlite();
-    seedDomain(sqlite, 'sepolia', 'sub.fox.eth', Date.now() - 30 * 60 * 1000);
-    stubIndexer();
-    const warn = vi.fn();
-    vi.stubGlobal('console', { ...console, warn });
+    // 8-day-old row: older than 7-day default, younger than 10-year max.
+    seedDomain(sqlite, 'sepolia', 'sub.fox.eth', Date.now() - 8 * DAY);
+    // Force indexer outage: every fetch for the indexer throws.
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).startsWith('https://zigens.test/') || String(url).startsWith('https://api.'))
+        throw new Error('indexer outage');
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
     try {
       const app = await loadApp();
       const { ctx, drain } = makeCtx();
@@ -609,28 +612,32 @@ describe.skipIf(!hasSqlite)('D1 reads treat rows older than the read max age as 
         '/sepolia/registry/sub.fox.eth', undefined,
         makeEnv({ DB: makeSqliteD1(sqlite).d1, ...env }), ctx as unknown as ExecutionContext,
       );
-      expect(res.status).toBe(200);
       await drain();
-      return warn.mock.calls.some((c: unknown[]) => String(c[0]).includes('ignoring D1_READ_MAX_AGE_SECS'));
+      return res.status;
     } finally {
       vi.unstubAllGlobals();
     }
   };
 
-  it('accepts the exact operational maximum for D1 read freshness (no config warn)', async () => {
-    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: String(MAX_ENV_SECS) })).toBe(false);
+  it('serves from D1 at the exact operational maximum (10 years) under upstream outage', async () => {
+    // 8-day row < 10-year max → D1 serves → HTTP 200.
+    // A >= MAX_ENV_SECS mutant would reject the max, fall back to 7-day default,
+    // and the 8-day row would be stale → outage → 503. Kills the mutant.
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: String(MAX_ENV_SECS) })).toBe(200);
   });
 
-  it('rejects max+1 for D1 read freshness (config warn emitted)', async () => {
-    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: String(MAX_PLUS_ONE) })).toBe(true);
+  it('rejects max+1 for D1 read freshness under upstream outage (falls back to 7-day default, outage → 503)', async () => {
+    // Cap rejects 315360001 → 7-day default. 8-day row > 7 days → stale → outage → 503.
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: String(MAX_PLUS_ONE) })).toBe(503);
   });
 
-  it('rejects an unsafe-integer digit string for D1 read freshness (config warn emitted)', async () => {
-    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: '9'.repeat(16) })).toBe(true);
+  it('rejects an unsafe-integer digit string for D1 read freshness under upstream outage (outage → 503)', async () => {
+    // '9'.repeat(16) → unsafe int → rejected → 7-day default → stale → outage → 503.
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: '9'.repeat(16) })).toBe(503);
   });
 
-  it('rejects safe seconds whose millisecond product is unsafe for D1 read freshness (config warn emitted)', async () => {
-    expect(await warnOnRead({ D1_READ_MAX_AGE_SECS: String(SAFE_SECS_UNSAFE_MS) })).toBe(true);
+  it('rejects safe seconds / unsafe ms for D1 read freshness under upstream outage (outage → 503)', async () => {
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: String(SAFE_SECS_UNSAFE_MS) })).toBe(503);
   });
 });
 
