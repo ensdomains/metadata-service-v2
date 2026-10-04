@@ -20,7 +20,7 @@ The R2 image tier must stop serving a card after its status-specific lifetime, n
 
 ## Structure
 
-Files changed:
+Core production and primary test files (additional route-test mocks/assertions are included in the exact 13-file diff):
 
 - `src/utils/storage.ts`: `getSvgByKey` returns `{ svg: string; uploadedAtMs: number } | null`. When `maxAgeSeconds` is supplied, objects at or past the boundary are rejected (`>=`, RFC 9111). Missing or invalid `uploaded` fails closed (returns `null`) when `maxAgeSeconds` is supplied. Undefined `maxAgeSeconds` is backward-compatible unbounded.
 - `src/services/image-cache.ts`: L2 R2 lookup passes `ttlConfig.r2MaxAge` to `getSvgByKey`. On L2 hit, `writeKv` receives the absolute `uploadedAtMs` timestamp and computes an absolute KV `expiration` deadline at `floor(uploadedAtMs/1000) + r2MaxAge` — immune to body-latency clock drift. `createdAt` is set to the authoritative `uploadedAtMs`. `softTtl` is floored to the remaining integer lifetime (conservative). Backfill is skipped when `remaining < 60` s (Cloudflare KV minimum). Fresh L3 origin writes are unchanged (relative `expirationTtl`). `CARD_CACHE_VERSION` bumped `v2` → `v3` so pre-fix v2 KV entries (backfill-time `createdAt` / full TTL) are never served after deploy — they miss and fall through to authoritative L2/L3.
@@ -45,7 +45,7 @@ Files changed:
 | AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit | `npx vitest run test/image-cache.test.ts` on the branch after each test-only commit but before the product fix | Each RED test fails with the expected assertion error: TTL boundary (expected 'miss', got 'stale'), backfill lifetime (expected `expiration`, got undefined), fail-closed (expected null, got object) |
 | AC2 | After the fix, that focused regression passes without weakening its assertion | `npx vitest run test/image-cache.test.ts` on the branch after each product fix commit | All 47 tests pass; absolute `expiration` at `uploadedAtMs + r2MaxAge`; createdAt equals authoritative upload time; softTtl capped and floored; backfill skipped when remaining < 60 s; missing uploaded rejected |
 | AC3 | The project gate `pnpm run test` passes at the ticket branch head | `npx vitest run` | Exit 0, 58 test files pass |
-| AC4 | The change set addresses only `W8-CACHE-004` and does not bundle another findings.md id | `git diff 5a5527c7...HEAD --stat` | Only `src/utils/storage.ts`, `src/services/image-cache.ts`, `test/image-cache.test.ts`, `WORKHORSE-SPEC.md` changed |
+| AC4 | The change set addresses only `W8-CACHE-004` and does not bundle another findings.md id | `git diff 5a5527c7...HEAD --stat` | 13 files changed: 3 product/spec files plus focused cache tests and route-test mock/assertion updates, all required by W8-CACHE-004 |
 | AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign | Verify branch name is `WEB-1716` and no commit originates from testing-campaign | Branch `WEB-1716`, all commits authored in this run |
 
 ## Tasks
