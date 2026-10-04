@@ -772,8 +772,11 @@ const BATCH_TIME_BUDGET_MS = 15_000;
 
 function getMaxBatchNames(env: Env): number {
   // Invalid/garbage value → the default.
-  const parsed = parseInt(env.MAX_BATCH_NAMES ?? '', 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BATCH_NAMES;
+  const configured = env.MAX_BATCH_NAMES ?? '';
+  const parsed = Number(configured);
+  return /^\d+$/.test(configured) && Number.isInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_MAX_BATCH_NAMES;
 }
 
 // A wrapper that runs at most `limit` calls at once; the others wait their turn.
