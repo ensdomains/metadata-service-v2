@@ -312,5 +312,39 @@ describe('WebhookService (zigens contract)', () => {
       const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ name: 'noTld' }))));
       expect(res.status).toBe(400);
     });
+
+    // W8-WEBHOOK-002: identity fields must match their documented primitive
+    // shapes before any purge/warming side effects. The minimized finding is
+    // a fully shaped unauthenticated-dev event for red-team.eth with
+    // block_number: null — that must 400 and must not touch caches.
+    it('rejects block_number: null with 400 and does not invalidate caches', async () => {
+      const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
+      const body = JSON.stringify(validEvent({ name: 'red-team.eth', block_number: null }));
+      const res = await svc.handleWebhook(makeCtx(body));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Missing or invalid block_number' });
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+      expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
+      expect(fakes.metadataCacheKv.delete).not.toHaveBeenCalled();
+      expect(fakes.svgCacheKv.delete).not.toHaveBeenCalled();
+      expect(fakes.storageManager.deleteByPrefix).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['block_number', '100'],
+      ['tx_hash', null],
+      ['log_index', null],
+      ['contract_address', 123],
+      ['data', {}],
+      ['protocol', null],
+      ['protocol', 'v3'],
+    ] as const)('rejects a wrong-typed %s with 400 and does not invalidate caches', async (field, value) => {
+      const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
+      const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ [field]: value }))));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: `Missing or invalid ${field}` });
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+      expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
+    });
   });
 });
