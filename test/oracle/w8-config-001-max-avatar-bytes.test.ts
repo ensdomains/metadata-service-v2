@@ -77,18 +77,18 @@ describe('MAX_AVATAR_BYTES garbage falls back to the 25 MiB default', () => {
     expect(res.status).toBe(404);
   });
 
-  it('accepts a value at the practical maximum and caps at that size', async () => {
-    // 100 MiB (104,857,600) is the largest accepted cap.
+  it('accepts an explicit cap at the 25 MiB maximum', async () => {
+    // 25 MiB (26,214,400) is the hard maximum — the same as the built-in default.
     const body = png(PNG_MAGIC.length);
-    const res = await avatar('104857600', body);
+    const res = await avatar('26214400', body);
     expect(res.status).toBe(200);
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(body);
   });
 
-  it('rejects a value one byte above the practical maximum and falls back to the default', async () => {
-    // 100 MiB + 1 must fall back to the 25 MiB default.
+  it('rejects an explicit cap above 25 MiB and falls back to the default', async () => {
+    // 25 MiB + 1 must fall back to the 25 MiB default.
     const overDefault = png(DEFAULT_CAP + 1);
-    const res = await avatar('104857601', overDefault);
+    const res = await avatar('26214401', overDefault);
     expect(res.status).toBe(404);
   });
 });
