@@ -109,6 +109,7 @@ describe('ImageCacheService', () => {
         bodyUsed: false,
         blob: vi.fn(),
         json: vi.fn(),
+        uploaded: new Date(),
       } as unknown as R2ObjectBody);
 
       const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
@@ -184,6 +185,7 @@ describe('ImageCacheService', () => {
         arrayBuffer: vi.fn(),
         body: null,
         bodyUsed: false,
+        uploaded: new Date(),
       } as unknown as R2ObjectBody);
 
       const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
@@ -607,13 +609,28 @@ describe('ImageCacheService', () => {
     // ── r2MaxAge 0 (degenerate boundary) ─────────────────────────────
 
     describe('r2MaxAge 0 (degenerate boundary)', () => {
-      it('rejects an R2 object uploaded at this instant when maxAgeSeconds is 0 (age 0 >= 0)', async () => {
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Zero-Age R2</svg>', 0));
+      it('rejects age >= 0 when maxAgeSeconds is 0', async () => {
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Z</svg>', 0));
+        expect(await storage.getSvgByKey('z', 0)).toBeNull();
+      });
 
-        // >= rejects age 0 at boundary 0 (0 > 0 would be false and serve)
-        const result = await storage.getSvgByKey('zero-test', 0);
+      it('fails closed when uploaded is missing and maxAgeSeconds supplied', async () => {
+        vi.mocked(r2Bucket.get).mockResolvedValue({
+          text: vi.fn().mockResolvedValue('<svg>Z</svg>'),
+          arrayBuffer: vi.fn(),
+          body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(),
+        } as unknown as R2ObjectBody);
+        expect(await storage.getSvgByKey('z', 3600)).toBeNull();
+      });
 
-        expect(result).toBeNull();
+      it('fails closed when uploaded.getTime() is NaN and maxAgeSeconds supplied', async () => {
+        vi.mocked(r2Bucket.get).mockResolvedValue({
+          text: vi.fn().mockResolvedValue('<svg>Z</svg>'),
+          arrayBuffer: vi.fn(),
+          body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(),
+          uploaded: new Date('invalid'),
+        } as unknown as R2ObjectBody);
+        expect(await storage.getSvgByKey('z', 3600)).toBeNull();
       });
     });
 
@@ -631,115 +648,134 @@ describe('ImageCacheService', () => {
       });
     });
 
-    // ── R2 backfill lifetime capping ───────────────────────────────
-    // When an L2 R2 hit backfills KV, the KV entry must not extend
-    // the data lifetime beyond the original R2 authoritative deadline.
-    // Without capping, writeKv resets createdAt and uses full hardTtl,
-    // so stale bytes can circulate for r2MaxAge + hardTtl instead of
-    // r2MaxAge (e.g., unmigrated 90 min instead of 60 min).
+    // ── R2 backfill lifetime capping + absolute expiration ──────────
+    // R2→L1 backfill must use an absolute KV `expiration` epoch deadline
+    // (immune to body-latency clock drift), back-date createdAt to the
+    // authoritative R2 upload time, floor softTtl to integer, skip when
+    // remaining < 60 s, and fail closed on missing/invalid uploaded.
 
     describe('R2 backfill lifetime capping', () => {
-      function assertL2Backfill(r2AgeMs: number, expectedSoftTtl: number, expectedExpirationTtl: number) {
+      function assertL2Backfill(r2AgeMs: number, r2MaxAge: number, expectedSoftTtl: number) {
         const kvCalls = (svgCacheKv.put as Mock).mock.calls;
         expect(kvCalls.length, 'KV: expected backfill put').toBeGreaterThan(0);
         const entry = JSON.parse(kvCalls[0][1] as string);
-        const kvOptions = kvCalls[0][2] as { expirationTtl?: number } | undefined;
+        const kvOptions = kvCalls[0][2] as { expirationTtl?: number; expiration?: number } | undefined;
 
-        // createdAt must be back-dated to the R2 upload time, not Date.now().
-        // The product code computes: createdAt = Date.now() - r2AgeSeconds * 1000.
-        // With frozen Date.now(), that equals fixedNow - r2AgeMs exactly.
-        const expectedCreatedAt = fixedNow - r2AgeMs;
-        expect(entry.createdAt, 'createdAt must reflect R2 upload age').toBe(expectedCreatedAt);
-
-        // softTtl and expirationTtl capped to remaining lifetime
-        expect(entry.softTtl, 'softTtl must be capped to remaining lifetime').toBe(expectedSoftTtl);
-        expect(kvOptions?.expirationTtl, 'expirationTtl must be capped to remaining lifetime').toBe(expectedExpirationTtl);
+        // createdAt must equal the authoritative R2 upload time
+        expect(entry.createdAt).toBe(fixedNow - r2AgeMs);
+        // softTtl must be floored to integer, capped to remaining lifetime
+        expect(entry.softTtl).toBe(expectedSoftTtl);
+        // Must use absolute `expiration` epoch, not relative expirationTtl
+        expect(kvOptions?.expiration).toBe(Math.floor((fixedNow - r2AgeMs) / 1000) + r2MaxAge);
+        expect(kvOptions?.expirationTtl).toBeUndefined();
+        // migrationStatus must match the options passed in
+        expect(entry.migrationStatus).toBeTruthy();
       }
 
-      // ── unmigrated: skip backfill near expiry ──
+      // ── skip near / boundary ───────────────────────────────────────
 
-      it('skips KV backfill when remaining lifetime is below 60s (Cloudflare minimum)', async () => {
+      it('skips backfill when remaining < 60 s', async () => {
         (svgCacheKv.get as Mock).mockResolvedValue(null);
-        // R2 object 1 ms before expiry: remaining = 0.001 s < 60 s
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Near-Expiry R2</svg>', 3600 * 1000 - 1));
-
-        const result = await imageCacheService.getImage('near.eth', defaultOptions, executionCtx);
-
-        // Still served from L2 (age < r2MaxAge), but backfill must be skipped
-        expect(result.cacheStatus).toBe('stale');
-        expect(result.svg).toBe('<svg>Near-Expiry R2</svg>');
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', 3600 * 1000 - 1));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
         await Promise.all(waitUntilPromises);
-        const kvCalls = (svgCacheKv.put as Mock).mock.calls;
-        expect(kvCalls.length, 'KV backfill must be skipped when remaining < 60s').toBe(0);
+        expect((svgCacheKv.put as Mock).mock.calls.length).toBe(0);
       });
 
-      // ── unmigrated: cap hardTtl when remaining < full hardTtl ──
-
-      it('caps expirationTtl to remaining lifetime when R2 is older than hardTtl but within softTtl range', async () => {
+      it('skips at 59.999 s remaining', async () => {
         (svgCacheKv.get as Mock).mockResolvedValue(null);
-        // R2 at 3000 s age: remaining = 600 s.  softTtl=300 < 600 → stays 300.
-        // hardTtl=1800 > 600 → capped to 600.
-        const r2AgeMs = 3000 * 1000;
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Midlife R2</svg>', r2AgeMs));
-
-        const result = await imageCacheService.getImage('mid.eth', defaultOptions, executionCtx);
-
-        expect(result.cacheStatus).toBe('stale');
-        expect(result.svg).toBe('<svg>Midlife R2</svg>');
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', 3540 * 1000 + 1));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
         await Promise.all(waitUntilPromises);
-        assertL2Backfill(r2AgeMs, 300, 600);
+        expect((svgCacheKv.put as Mock).mock.calls.length).toBe(0);
       });
 
-      // ── unmigrated: cap softTtl when remaining < softTtl ──
-
-      it('caps both softTtl and expirationTtl when remaining is below configured softTtl', async () => {
+      it('backfills at exactly 60 s remaining', async () => {
         (svgCacheKv.get as Mock).mockResolvedValue(null);
-        // R2 at 3500 s age: remaining = 100 s.  Both softTtl=300 and hardTtl=1800
-        // exceed 100 → both capped to 100.
-        const r2AgeMs = 3500 * 1000;
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Late-Life R2</svg>', r2AgeMs));
-
-        const result = await imageCacheService.getImage('late.eth', defaultOptions, executionCtx);
-
-        expect(result.cacheStatus).toBe('stale');
-        expect(result.svg).toBe('<svg>Late-Life R2</svg>');
+        const ms = 3540 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
         await Promise.all(waitUntilPromises);
-        assertL2Backfill(r2AgeMs, 100, 100);
+        assertL2Backfill(ms, 3600, 60);
       });
 
-      // ── migrated: cap hardTtl when remaining < full hardTtl ──
-
-      it('caps migrated expirationTtl to remaining lifetime', async () => {
-        const migratedOptions = { name: 'mig.eth', migrationStatus: 'migrated' as const };
+      it('backfills at 60.001 s remaining', async () => {
         (svgCacheKv.get as Mock).mockResolvedValue(null);
-        // R2 at 50000 s age: remaining = 36400 s.
-        // softTtl=21600 < 36400 → stays 21600.
-        // hardTtl=86400 > 36400 → capped to 36400.
-        const r2AgeMs = 50000 * 1000;
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Mig Midlife R2</svg>', r2AgeMs));
-
-        const result = await imageCacheService.getImage('mig.eth', migratedOptions, executionCtx);
-
-        expect(result.cacheStatus).toBe('stale');
-        expect(result.svg).toBe('<svg>Mig Midlife R2</svg>');
+        const ms = 3540 * 1000 - 1;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
         await Promise.all(waitUntilPromises);
-        assertL2Backfill(r2AgeMs, 21600, 36400);
+        assertL2Backfill(ms, 3600, 60);
       });
 
-      // ── native: same TTL as migrated, separate config path ──
+      // ── unmigrated capping ─────────────────────────────────────────
 
-      it('caps native expirationTtl to remaining lifetime (separate config path)', async () => {
-        const nativeOptions = { name: 'nat.eth', migrationStatus: 'native' as const };
+      it('caps unmigrated when remaining < hardTtl, within softTtl range', async () => {
         (svgCacheKv.get as Mock).mockResolvedValue(null);
-        const r2AgeMs = 50000 * 1000;
-        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>Nat Midlife R2</svg>', r2AgeMs));
-
-        const result = await imageCacheService.getImage('nat.eth', nativeOptions, executionCtx);
-
-        expect(result.cacheStatus).toBe('stale');
-        expect(result.svg).toBe('<svg>Nat Midlife R2</svg>');
+        const ms = 3000 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
         await Promise.all(waitUntilPromises);
-        assertL2Backfill(r2AgeMs, 21600, 36400);
+        assertL2Backfill(ms, 3600, 300);
+      });
+
+      it('caps both unmigrated softTtl and expiration when remaining < softTtl', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        const ms = 3500 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(ms, 3600, 100);
+      });
+
+      // ── migrated capping ───────────────────────────────────────────
+
+      it('caps migrated expiration to remaining', async () => {
+        const opts = { name: 'm.eth', migrationStatus: 'migrated' as const };
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        const ms = 50000 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+        await imageCacheService.getImage('m.eth', opts, executionCtx);
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(ms, 86400, 21600);
+      });
+
+      // ── native capping ─────────────────────────────────────────────
+
+      it('caps native expiration to remaining', async () => {
+        const opts = { name: 'n.eth', migrationStatus: 'native' as const };
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        const ms = 50000 * 1000;
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', ms));
+        await imageCacheService.getImage('n.eth', opts, executionCtx);
+        await Promise.all(waitUntilPromises);
+        assertL2Backfill(ms, 86400, 21600);
+      });
+
+      // ── migrationStatus serialisation ──────────────────────────────
+
+      it('serialises unmigrated status', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', 100 * 1000));
+        await imageCacheService.getImage('x.eth', defaultOptions, executionCtx);
+        await Promise.all(waitUntilPromises);
+        expect(JSON.parse((svgCacheKv.put as Mock).mock.calls[0][1] as string).migrationStatus).toBe('unmigrated');
+      });
+
+      it('serialises migrated status', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', 100 * 1000));
+        await imageCacheService.getImage('x.eth', { name: 'x.eth', migrationStatus: 'migrated' as const }, executionCtx);
+        await Promise.all(waitUntilPromises);
+        expect(JSON.parse((svgCacheKv.put as Mock).mock.calls[0][1] as string).migrationStatus).toBe('migrated');
+      });
+
+      it('serialises native status', async () => {
+        (svgCacheKv.get as Mock).mockResolvedValue(null);
+        vi.mocked(r2Bucket.get).mockResolvedValue(r2Object('<svg>X</svg>', 100 * 1000));
+        await imageCacheService.getImage('x.eth', { name: 'x.eth', migrationStatus: 'native' as const }, executionCtx);
+        await Promise.all(waitUntilPromises);
+        expect(JSON.parse((svgCacheKv.put as Mock).mock.calls[0][1] as string).migrationStatus).toBe('native');
       });
     });
 
