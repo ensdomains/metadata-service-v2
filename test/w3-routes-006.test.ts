@@ -1,21 +1,45 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createMockEnv } from './mocks/hono-env';
+
+// Captured per-colo edge copy. edgeCachePut stores a clone whose Cache-Control
+// is the edge TTL; the response returned to the client keeps its own header.
+const edgeStore = new Map<string, Response>();
+const keyOf = (r: RequestInfo | URL | Request) =>
+  typeof r === 'string' ? r : r instanceof URL ? r.href : (r as Request).url;
+
+const fakeDefaultCache = {
+  async match(req: RequestInfo | URL) {
+    return edgeStore.get(keyOf(req))?.clone();
+  },
+  async put(req: RequestInfo | URL, res: Response) {
+    edgeStore.set(keyOf(req), res.clone());
+  },
+  async delete(req: RequestInfo | URL) {
+    return edgeStore.delete(keyOf(req));
+  },
+};
+(globalThis as unknown as { caches: unknown }).caches = { default: fakeDefaultCache };
+
+vi.mock('../src/services/rasterize', () => ({
+  RasterizeService: class {
+    async rasterize() {
+      return new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    }
+  },
+}));
+
 import { MetadataService, isDegradedMigrationStatus } from '../src/services/metadata';
+import { FallbackService } from '../src/services/fallback';
+import { D1Service } from '../src/services/d1';
 import { NotFoundError } from '../src/services/errors';
 import { MIGRATION_STATUS } from '../src/types';
+import app from '../src/index';
 
-// ---------------------------------------------------------------------------
-// W3-ROUTES-006 regression: D1 rescue after a non-definitive live miss must
-// serve degraded cache headers (max-age=30), not normal healthy-success
-// headers (max-age=300, stale-while-revalidate=30).
-//
-// The test creates a MetadataService with a mocked fallback that throws
-// NotFoundError({ definitive: false }) and a mocked D1 that returns a
-// migrated row. On the baseline at main, the D1 rescue returns a clean
-// (non-degraded) response — no _provenance flag — so the downstream route
-// handler publishes it with normal cache headers indistinguishable from a
-// healthy hit. The fix must mark the rescued response as degraded so the
-// route handler applies CachePresets.error() (max-age=30).
-// ---------------------------------------------------------------------------
+const NAME = 'non-definitive-migration.eth';
+const OWNER = '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809';
+const EXPIRY = '2030-01-01T00:00:00.000Z';
+const PATH = `/migration-status/${NAME}?network=sepolia`;
+const DEGRADED_CACHE = 'public, max-age=30';
 
 function makeKV() {
   return {
@@ -35,37 +59,56 @@ function makeSepoliaMetadataService(): MetadataService {
       network: 'sepolia',
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
-      d1Enabled: false, // D1 is stubbed separately below
+      d1Enabled: false,
     },
     makeKV(),
     { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
   );
 }
 
+function makeAppCtx() {
+  const pending: Promise<unknown>[] = [];
+  return {
+    ctx: {
+      waitUntil(p: Promise<unknown>) {
+        pending.push(p);
+      },
+      passThroughOnException() {},
+    } as unknown as ExecutionContext,
+    flush: () => Promise.all(pending),
+  };
+}
+
+function stubNonDefinitiveD1Rescue() {
+  const miss = new NotFoundError('getMigrationStatus: not found in any source', {
+    definitive: false,
+  });
+  vi.spyOn(FallbackService.prototype, 'getMigrationStatus').mockRejectedValue(miss);
+  vi.spyOn(D1Service.prototype, 'getMigrationStatus').mockResolvedValue({
+    name: NAME,
+    status: MIGRATION_STATUS.MIGRATED,
+    owner: OWNER,
+    expiration_date: EXPIRY,
+  } as Awaited<ReturnType<D1Service['getMigrationStatus']>>);
+  vi.spyOn(MetadataService.prototype, 'checkExpiry').mockResolvedValue(undefined);
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
+  edgeStore.clear();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
 });
 
-describe('W3-ROUTES-006: D1 rescue degraded migration status', () => {
+describe('W3-ROUTES-006: D1 rescue after a non-definitive live miss', () => {
   type Stubbable = {
     fallback: { getMigrationStatus: ReturnType<typeof vi.fn> };
     d1?: { getMigrationStatus: ReturnType<typeof vi.fn> };
   };
 
-  it('D1 rescue after non-definitive miss must be marked as degraded', async () => {
-    // This test fails on the main baseline because the D1 rescue response is
-    // NOT marked as degraded — there is no _provenance flag on the response.
-    // After the fix, the D1 rescue path in getMigrationStatus must call
-    // markDegradedMigrationStatus so the downstream route handler can detect
-    // the degraded response and apply CachePresets.error() (max-age=30).
-
+  it('marks the rescued service value as privately degraded', async () => {
     const svc = makeSepoliaMetadataService();
-
-    // Mock fallback: throw NotFoundError with definitive: false
-    // (primary indexer was skipped — circuit breaker open or unavailable)
     const nonDefinitiveMiss = new NotFoundError(
       'getMigrationStatus: not found in any source',
       { definitive: false },
@@ -73,29 +116,46 @@ describe('W3-ROUTES-006: D1 rescue degraded migration status', () => {
     (svc as unknown as Stubbable).fallback = {
       getMigrationStatus: vi.fn().mockRejectedValue(nonDefinitiveMiss),
     };
-
-    // Mock D1: return a migrated row (rescue succeeds)
     (svc as unknown as Stubbable).d1 = {
       getMigrationStatus: vi.fn().mockResolvedValue({
-        name: 'non-definitive-migration.eth',
+        name: NAME,
         status: 'migrated',
-        owner: '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809',
-        expiration_date: '2030-01-01T00:00:00.000Z',
+        owner: OWNER,
+        expiration_date: EXPIRY,
       }),
     };
 
-    const result = await svc.getMigrationStatus('non-definitive-migration.eth');
+    const result = await svc.getMigrationStatus(NAME);
 
-    // The response should be 200 JSON (migrated status from D1)
-    expect(result.name).toBe('non-definitive-migration.eth');
+    expect(result.name).toBe(NAME);
     expect(result.status).toBe('migrated');
-
-    // CRITICAL ASSERTION: the response must be marked as degraded.
-    // isDegradedMigrationStatus checks the non-enumerable Symbol flag.
-    // On the baseline at main, this assertion FAILS because the D1 rescue
-    // does not set the degraded marker at all.
-    //
-    // After the fix, isDegradedMigrationStatus must return true.
     expect(isDegradedMigrationStatus(result)).toBe(true);
+    expect(JSON.parse(JSON.stringify(result))).toEqual({
+      name: NAME,
+      status: 'migrated',
+      owner: OWNER,
+      expirationDate: EXPIRY,
+    });
+  });
+
+  it('publishes provenance-free JSON with literal client and edge max-age=30', async () => {
+    stubNonDefinitiveD1Rescue();
+    const env = createMockEnv() as unknown as Record<string, unknown>;
+    const { ctx, flush } = makeAppCtx();
+
+    const res = await app.request(PATH, undefined, env, ctx);
+    await flush();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      name: NAME,
+      status: 'migrated',
+      owner: OWNER,
+      expirationDate: EXPIRY,
+    });
+    expect(res.headers.get('Cache-Control')).toBe(DEGRADED_CACHE);
+
+    const edge = edgeStore.get(`http://localhost${PATH}`);
+    expect(edge?.headers.get('Cache-Control')).toBe(DEGRADED_CACHE);
   });
 });
