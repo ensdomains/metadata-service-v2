@@ -19,6 +19,7 @@ import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayS
 import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
+import { timeLeftForAttempt } from './request-budget';
 import { toSafeImage } from './media-safety';
 import { DEFAULT_IPFS_GATEWAY, toLiveGatewayUrl } from './ipfs-gateway';
 
@@ -603,6 +604,7 @@ export class AvatarService {
       return null;
     }
 
+    timeLeftForAttempt(`${kind} resolution`);
     const uri = await this.withLegacyFallback((resolver) => this.resolveRecord(resolver, kind, normalized, name));
     if (!uri) {
       return null;
