@@ -884,7 +884,10 @@ describe('CCIP gateway fetch under the request deadline', () => {
 
     // RED on HEAD 80f8ba3: redirect succeeds, returns 0x01.
     // After fix: error is RequestDeadlineError, explicitly NOT CcipGatewayError.
+    // Kills a mutant that throws UpstreamError with name 'RequestDeadlineError'
+    // (missing the actual RequestDeadlineError prototype).
     expectDeadlineError(out.error);
+    expect(out.error).toBeInstanceOf(RequestDeadlineError);
     if (out.error) {
       expect(out.error).not.toBeInstanceOf(CcipGatewayError);
       expect((out.error as Error).name).toBe('RequestDeadlineError');
