@@ -46,8 +46,8 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 |---|---|---|---|
 | AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `pnpm exec vitest run test/request-deadline.test.ts` on RED commit `e0c0769` at HEAD `80f8ba3` | 7 tests fail with `expected undefined to be an instance of UpstreamError` — redirect hops succeed without deadline check. |
 | AC2 | After the fix, that focused regression passes without weakening its assertion. | `pnpm exec vitest run test/request-deadline.test.ts` on GREEN commit `b1bdbf3` | 49/49 pass (exit 0), including all 10 CCIP gateway deadline tests. |
-| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `pnpm exec vitest run` on final HEAD `e99ccfb` | 58 files, 1074 passed, 1 skipped, exit 0. |
-| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+57), `src/services/ccip-request.ts` (+9 -2), `test/request-deadline.test.ts` (+271 -2). No other finding in commits or code. |
+| AC3 | The project gate passes at the ticket branch implementation/test-hardening head. | `pnpm exec vitest run` at `e99ccfb` (docs-only corrections follow) | 58 files, 1074 passed, 1 skipped, exit 0. |
+| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+59), `src/services/ccip-request.ts` (+9 -2), `test/request-deadline.test.ts` (+271 -2), total +339/-4. No other finding in commits or code. |
 | AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | `git merge-base HEAD testing-campaign` | `5a5527c7e7ac7c20140bdd81757c5bd075bd389a` (BASE — zero commit overlap). |
 
 ## Tasks
