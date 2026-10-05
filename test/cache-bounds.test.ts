@@ -22,6 +22,12 @@ const edgeStore = new Map<string, EdgeEntry>();
 const keyOf = (r: RequestInfo | URL | Request) =>
   typeof r === 'string' ? r : r instanceof URL ? r.href : (r as Request).url;
 
+function v3EdgeKey(base: string): string {
+  const u = new URL(base);
+  u.searchParams.set('__ecv', 'v3');
+  return u.toString();
+}
+
 const fakeDefaultCache = {
   async match(req: RequestInfo | URL) {
     const e = edgeStore.get(keyOf(req));
@@ -119,7 +125,7 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     // Client-facing header keeps the long, purgeable-tier TTL...
     expect(res.headers.get('Cache-Control')).toContain('max-age=21600');
     // ...but the edge copy is capped (edgeCachePut rewrites Cache-Control).
-    const entry = edgeStore.get('http://localhost/sepolia/registry/fox.eth/image');
+    const entry = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/image'));
     expect(entry).toBeDefined();
     expect(entry!.maxAge).toBeLessThanOrEqual(300);
   });
@@ -135,7 +141,7 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
 
     // ...while every caches.default write is bounded by EDGE_CACHE_MAX_AGE_SECS=300
     // because the webhook cannot purge other colos.
-    const entry = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize');
+    const entry = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/rasterize'));
     expect(entry).toBeDefined();
     expect(entry!.maxAge).not.toBeNull();
     expect(entry!.maxAge).toBeLessThanOrEqual(300);
@@ -163,8 +169,8 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     expect(res.status).toBe(200);
     await flush(); // run the real purge/warm waitUntil block
 
-    const plain = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize');
-    const sized = edgeStore.get('http://localhost/sepolia/registry/fox.eth/rasterize?w=518&h=518');
+    const plain = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/rasterize'));
+    const sized = edgeStore.get(v3EdgeKey('http://localhost/sepolia/registry/fox.eth/rasterize?w=518&h=518'));
 
     // The exact query-less URL IS purged (in this colo)...
     expect(plain).toBeUndefined();
@@ -173,6 +179,66 @@ describe('L0 edge-cache TTL bound (EDGE_CACHE_MAX_AGE_SECS = 300)', () => {
     expect(sized).toBeDefined();
     expect(sized!.maxAge).not.toBeNull();
     expect(sized!.maxAge).toBeLessThanOrEqual(300);
+  });
+});
+
+describe('downstream TTL: R2 absolute deadline cap (P2)', () => {
+  const IMG = '/sepolia/registry/fox.eth/image';
+  const RAS = '/sepolia/registry/fox.eth/rasterize';
+  const B = 'http://localhost';
+  let now: number; let ns: any = null, is: any = null, as: any = null;
+
+  function r2(upMs: number) { return { text: vi.fn().mockResolvedValue('<svg w="518" h="518"></svg>'), arrayBuffer: vi.fn(), body: null, bodyUsed: false, blob: vi.fn(), json: vi.fn(), uploaded: new Date(upMs) } as any; }
+  function cMax(r: Response) { const m = /max-age=(\d+)/.exec(r.headers.get('Cache-Control') ?? ''); return m ? Number(m[1]) : -1; }
+  function eMax(p: string) { const e = edgeStore.get(v3EdgeKey(`${B}${p}`)); return e ? e.maxAge : null; }
+
+  beforeEach(async () => {
+    edgeStore.clear(); now = Date.now(); ns = vi.spyOn(Date, 'now').mockReturnValue(now);
+    vi.mocked(ImageCacheService.prototype.getImage).mockRestore();
+    ({ ImageGenerationService: is = class{} } = await import('../src/services/image') as any);
+    ({ AvatarService: as = class{} } = await import('../src/services/avatar') as any);
+    (is as any).prototype.generateDomainImage = vi.fn().mockResolvedValue({ svg: '<svg w="518" h="518"></svg>' });
+    (as as any).prototype.getAvatarImage = vi.fn().mockResolvedValue(null);
+  });
+  afterEach(() => { ns?.mockRestore(); ns = null; delete (is as any)?.prototype?.generateDomainImage; delete (as as any)?.prototype?.getAvatarImage;
+    vi.spyOn(ImageCacheService.prototype, 'getImage').mockImplementation(async function (this: ImageCacheService, _n: any, o: any) {
+      return { svg: '<svg width="518" height="518"></svg>', contentType: 'image/svg+xml', cacheStatus: 'MISS', ttlConfig: this.getTtlConfig((o as any).migrationStatus ?? 'unmigrated') } as any;
+    });
+  });
+
+  function sR2(ms: number) { (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null); (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(r2(ms)); }
+
+  it('/image: ~300s remaining caps client 300 edge 300', async () => { sR2(now - (86_400_000 - 300_000)); const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(300); expect(eMax(IMG)).toBe(300); });
+  it('/image: ~59.999s remaining caps client 59 edge 59', async () => { sR2(now - (86_400_000 - 59_999)); const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(59); expect(eMax(IMG)).toBe(59); });
+  it('/image: ~1ms remaining caps client 0 no edge put', async () => { sR2(now - (86_400_000 - 1)); const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(0); expect(eMax(IMG)).toBeNull(); });
+
+  it('/rasterize: 300.001s nominal + 2ms raster delay → client 299 edge 299', async () => {
+    sR2(now - (86_400_000 - 300_001));
+    const { RasterizeService: RS } = await import('../src/services/rasterize');
+    const o = RS.prototype.rasterize; RS.prototype.rasterize = async function (this: any, ...a: any[]) { ns?.mockReturnValue(now + 2); return (o as any).apply(this, a); };
+    try { const r = await get(RAS); expect(r.status).toBe(200); expect(cMax(r)).toBe(299); expect(eMax(RAS)).toBe(299); }
+    finally { RS.prototype.rasterize = o; ns?.mockReturnValue(now); }
+  });
+
+  it('/image: fresh origin MISS keeps full client 21600 edge 300', async () => {
+    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(null); (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
+    const r = await get(IMG); expect(r.status).toBe(200); expect(cMax(r)).toBe(21600); expect(eMax(IMG)).toBe(300);
+  });
+
+  // ── KV stale with stored deadline caps TTLs ───────────────────────
+
+  it('/image: KV stale hit with authoritativeDeadlineMs=now+150s caps client 150 edge 150', async () => {
+    const dl = now + 150_000;
+    (env.SVG_CACHE as any).get = vi.fn().mockResolvedValue(JSON.stringify({
+      svg: '<svg w="518" h="518"></svg>', createdAt: dl - 400_000, softTtl: 60, avatarHash: '', migrationStatus: 'migrated',
+      authoritativeDeadlineMs: dl,
+    }));
+    (env.ASSET_BUCKET as any).get = vi.fn().mockResolvedValue(null);
+    const r = await get(IMG); expect(r.status).toBe(200);
+    // Client max-age must be capped: min(21600, floor((now+150s-now)/1s)) = 150
+    expect(cMax(r)).toBe(150);
+    // Edge must be capped: min(300, 150) = 150
+    expect(eMax(IMG)).toBe(150);
   });
 });
 
@@ -426,5 +492,148 @@ describe('getV2Registries: discovery failure after cache TTL', () => {
     const rediscovered = await svc.getV2Registries('sepolia');
     expect(rediscovered).toEqual({ root: LIVE.root, eth: LIVE.eth });
     expect(exec).toHaveBeenCalledTimes(2);
+  });
+});
+
+// P2: edge cache discriminator — __ecv=v3 on every caches.default key.
+describe('L0 edge-cache generation discriminator (v3 isolation)', () => {
+  const IMG = '/sepolia/registry/fox.eth/image';
+  const RAS = '/sepolia/registry/fox.eth/rasterize';
+  const B   = 'http://localhost';
+
+  async function purge(name: string) {
+    const { ctx, flush } = makeAppCtx();
+    const r = await app.request('/webhook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, protocol: 'v2', type: 'update' }) }, env, ctx);
+    expect(r.status).toBe(200);
+    await flush();
+  }
+
+  beforeEach(() => { edgeStore.clear(); });
+
+  // ── round-trip: miss → put → hit ──────────────────────────────────
+
+  it('/image: round-trip miss→put→hit stores at v3 key and subsequent request hits', async () => {
+    const getImageSpy = vi.mocked(ImageCacheService.prototype.getImage);
+    const before = getImageSpy.mock.calls.length;
+
+    const r1 = await get(IMG);
+    expect(r1.status).toBe(200);
+    const body1 = await r1.text();
+
+    const v3k = v3EdgeKey(`${B}${IMG}`);
+    expect(edgeStore.has(v3k), 'fresh render must store at v3 key').toBe(true);
+    expect(edgeStore.has(`${B}${IMG}`), 'must not store at unversioned key').toBe(false);
+
+    // Second request must hit stored entry and return identical body
+    const r2 = await get(IMG);
+    expect(await r2.text()).toBe(body1);
+
+    // getImage must be called exactly once: first request renders,
+    // second hits the edge cache and never reaches the origin.
+    expect(getImageSpy.mock.calls.length - before, 'render origin called exactly once').toBe(1);
+  });
+
+  it('/rasterize: round-trip miss→put→hit stores at v3 key', async () => {
+    const getImageSpy = vi.mocked(ImageCacheService.prototype.getImage);
+    const before = getImageSpy.mock.calls.length;
+
+    const r1 = await get(RAS);
+    expect(r1.status).toBe(200);
+    const b1 = new Uint8Array(await r1.arrayBuffer());
+
+    const v3k = v3EdgeKey(`${B}${RAS}`);
+    expect(edgeStore.has(v3k)).toBe(true);
+    expect(edgeStore.has(`${B}${RAS}`)).toBe(false);
+
+    const r2 = await get(RAS);
+    expect(new Uint8Array(await r2.arrayBuffer())).toEqual(b1);
+
+    expect(getImageSpy.mock.calls.length - before, 'render origin called exactly once').toBe(1);
+  });
+
+  // ── unversioned miss, v3 hit ──────────────────────────────────────
+
+  function setE(url: string, body: string, ct = 'image/svg+xml') {
+    edgeStore.set(url, { response: new Response(body, { headers: { 'Content-Type': ct, 'Cache-Control': 'public, max-age=300' } }), maxAge: 300 });
+  }
+
+  it('/image: unversioned pre-v3 edge entry misses', async () => {
+    setE(`${B}${IMG}`, '<svg>OLD-EDGE</svg>');
+    expect(await (await get(IMG)).text()).not.toContain('OLD-EDGE');
+  });
+  it('/image: v3 edge entry hits', async () => {
+    setE(v3EdgeKey(`${B}${IMG}`), '<svg>V3-EDGE</svg>');
+    expect(await (await get(IMG)).text()).toContain('V3-EDGE');
+  });
+  it('/rasterize: unversioned pre-v3 edge entry misses', async () => {
+    setE(`${B}${RAS}`, 'OLDPNG', 'image/png');
+    expect(new TextDecoder().decode(await (await get(RAS)).arrayBuffer())).not.toBe('OLDPNG');
+  });
+  it('/rasterize: v3 edge entry hits', async () => {
+    setE(v3EdgeKey(`${B}${RAS}`), 'V3PNG', 'image/png');
+    expect(new TextDecoder().decode(await (await get(RAS)).arrayBuffer())).toBe('V3PNG');
+  });
+
+  // ── webhook purge ─────────────────────────────────────────────────
+
+  it('webhook purge deletes v3 entries (image+rasterize × registry+namewrapper)', async () => {
+    for (const rt of ['registry', 'namewrapper'])
+      for (const k of ['image', 'rasterize'])
+        setE(v3EdgeKey(`${B}/sepolia/${rt}/fox.eth/${k}`), 'x');
+    await purge('fox.eth');
+    for (const rt of ['registry', 'namewrapper'])
+      for (const k of ['image', 'rasterize'])
+        expect(edgeStore.has(v3EdgeKey(`${B}/sepolia/${rt}/fox.eth/${k}`))).toBe(false);
+  });
+
+  it('webhook purge also deletes legacy unversioned entries for transition', async () => {
+    setE(`${B}/sepolia/registry/fox.eth/image`, 'x');
+    setE(`${B}/sepolia/registry/fox.eth/rasterize`, 'x');
+    await purge('fox.eth');
+    expect(edgeStore.has(`${B}/sepolia/registry/fox.eth/image`)).toBe(false);
+    expect(edgeStore.has(`${B}/sepolia/registry/fox.eth/rasterize`)).toBe(false);
+  });
+
+  // ── duplicate params ──────────────────────────────────────────────
+
+  it('/image: duplicate w param — first value used, ordered duplicates in stored key', async () => {
+    await get('/sepolia/registry/fox.eth/image?w=100&w=200&h=518');
+    // Key must preserve the original ordered duplicate params as received
+    const k = v3EdgeKey(`${B}/sepolia/registry/fox.eth/image?w=100&w=200&h=518`);
+    expect(edgeStore.has(k), 'stored key must preserve ordered duplicate params').toBe(true);
+    // Renderer must receive the first w value (Hono semantics)
+    const lastCall = vi.mocked(ImageCacheService.prototype.getImage).mock.calls.at(-1)!;
+    expect(lastCall[1]?.size?.width, 'renderer must use first w=100').toBe(100);
+  });
+
+  // ── __ecv sanitisation ────────────────────────────────────────────
+
+  it('client __ecv=old&__ecv=evil — internal key has exactly one __ecv=v3, public clean', async () => {
+    const res = await get('/sepolia/registry/fox.eth/image?__ecv=old&__ecv=evil');
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // Public surface: no __ecv in body or headers
+    expect(text).not.toContain('__ecv');
+    res.headers.forEach((_, k) => {
+      expect(k).not.toContain('__ecv');
+      expect(res.headers.get(k)).not.toContain('__ecv');
+    });
+    // Internal edge key: a single entry whose URL contains exactly one __ecv=v3
+    const keys = [...edgeStore.keys()];
+    expect(keys.length).toBe(1);
+    const edgeKey = keys[0];
+    const params = new URL(edgeKey).searchParams;
+    expect(params.get('__ecv')).toBe('v3');
+    const allEcvs = params.getAll('__ecv');
+    expect(allEcvs.length).toBe(1);
+    expect(allEcvs[0]).toBe('v3');
+  });
+
+  it('no-__ecv request: internal key has exactly one __ecv=v3', async () => {
+    await get(IMG);
+    const keys = [...edgeStore.keys()];
+    expect(keys.length).toBe(1);
+    const allEcvs = new URL(keys[0]).searchParams.getAll('__ecv');
+    expect(allEcvs).toEqual(['v3']);
   });
 });

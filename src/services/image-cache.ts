@@ -24,6 +24,10 @@ export interface ImageCacheResult {
   // lookup failed (not because the name has none). Such a card is not written
   // to KV/R2, and routes must not cache it for long either.
   avatarFailed: boolean;
+  // Absolute authoritative deadline (epoch ms) — R2 upload time + r2MaxAge.
+  // Routes recompute remaining = floor((deadline - Date.now()) / 1000) at
+  // response time so body/raster latency never extends the cap.
+  authoritativeDeadlineMs?: number;
 }
 
 // Compute SHA-256 hex digest of an ArrayBuffer
@@ -37,10 +41,12 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // `name` stays first so the per-name invalidation prefix (`svg:${name}:`) still
 // matches across both networks. `network` prevents mainnet/sepolia collisions —
 // the same name renders differently per network (avatar, migration status).
-// Bump when cards rendered by older code must never be served again. v2: cards
-// rendered before the avatar type allowlist could carry markup injected through
-// the avatar's MIME type (WEB-1549).
-const CARD_CACHE_VERSION = 'v2';
+// Bump when cards rendered by older code must never be served again. v3:
+// pre-fix v2 KV entries carried backfill-time createdAt / full TTL and could
+// bypass R2 deadline enforcement (W8-CACHE-004).
+const CARD_CACHE_VERSION = 'v3';
+
+export { CARD_CACHE_VERSION };
 
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
@@ -95,19 +101,36 @@ export class ImageCacheService {
         const entry: SvgCacheEntry = JSON.parse(kvRaw);
         const ageSeconds = (Date.now() - entry.createdAt) / 1000;
 
-        if (ageSeconds < entry.softTtl) {
-          console.log(`[image-cache] L1 HIT ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
-          return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'hit', ttlConfig, avatarFailed: false };
+        // Validate and extract absolute deadline from KV envelope.
+        // Malformed or expired entries are skipped — fall through to L2.
+        let entryDeadlineMs: number | undefined;
+        if (typeof entry.authoritativeDeadlineMs === 'number' && isFinite(entry.authoritativeDeadlineMs)) {
+          if (entry.authoritativeDeadlineMs <= Date.now()) {
+            console.log(`[image-cache] L1 SKIP ${name}: marked entry expired at deadline ${entry.authoritativeDeadlineMs} (now ${Date.now()})`);
+            // Fall through to L2 — don't serve expired R2-backfilled data.
+          } else {
+            entryDeadlineMs = entry.authoritativeDeadlineMs;
+          }
         }
+        // entryDeadlineMs stays undefined for: malformed (non-numeric/
+        // non-finite), expired, or absent (fresh-origin) entries.
 
-        // Stale — return immediately, revalidate in background
-        console.log(`[image-cache] L1 STALE ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
-        executionCtx.waitUntil(
-          this.revalidate(name, options, cacheKey, params, ttlConfig).catch((err) =>
-            console.error(`[image-cache] background revalidate failed for ${name}:`, err),
-          ),
-        );
-        return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
+        if (entryDeadlineMs !== undefined || !('authoritativeDeadlineMs' in entry)) {
+          if (ageSeconds < entry.softTtl) {
+            console.log(`[image-cache] L1 HIT ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s)`);
+            return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'hit', ttlConfig, avatarFailed: false, authoritativeDeadlineMs: entryDeadlineMs };
+          }
+
+          // Stale — return immediately, revalidate in background
+          console.log(`[image-cache] L1 STALE ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
+          executionCtx.waitUntil(
+            this.revalidate(name, options, cacheKey, params, ttlConfig).catch((err) =>
+              console.error(`[image-cache] background revalidate failed for ${name}:`, err),
+            ),
+          );
+          return { svg: entry.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false, authoritativeDeadlineMs: entryDeadlineMs };
+        }
+        // entry had a malformed/expired authoritativeDeadlineMs — skip to L2
       }
     } catch (err) {
       console.error(`[image-cache] KV read error for ${cacheKey}:`, err);
@@ -115,16 +138,19 @@ export class ImageCacheService {
 
     // --- L2: R2 lookup ---
     try {
-      const r2Svg = await this.storage.getSvgByKey(cacheKey);
-      if (r2Svg) {
+      const r2Result = await this.storage.getSvgByKey(cacheKey, ttlConfig.r2MaxAge);
+      if (r2Result) {
         console.log(`[image-cache] L2 HIT ${name} (${Date.now() - start}ms) → backfilling L1`);
-        // Backfill L1 in background
+        // Backfill L1 in background, capping KV lifetime to remaining R2 TTL
         executionCtx.waitUntil(
-          this.writeKv(cacheKey, r2Svg, '', params.migrationStatus, ttlConfig).catch((err) =>
+          this.writeKv(cacheKey, r2Result.svg, '', params.migrationStatus, ttlConfig, r2Result.uploadedAtMs).catch((err) =>
             console.error(`[image-cache] KV backfill failed for ${cacheKey}:`, err),
           ),
         );
-        return { svg: r2Svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false };
+        // Carry absolute deadline so routes recompute remaining at response
+        // time — body/raster latency must not extend the cap.
+        const deadlineMs = r2Result.uploadedAtMs + ttlConfig.r2MaxAge * 1000;
+        return { svg: r2Result.svg, contentType: 'image/svg+xml', cacheStatus: 'stale', ttlConfig, avatarFailed: false, authoritativeDeadlineMs: deadlineMs };
       }
     } catch (err) {
       console.error(`[image-cache] R2 read error for ${cacheKey}:`, err);
@@ -274,14 +300,48 @@ export class ImageCacheService {
     await this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig);
   }
 
-  // Write SVG to KV
+  // Write SVG to KV.
+  // Write SVG to KV.  When uploadedAtMs is provided (R2 backfill), the
+  // entry uses an absolute `expiration` epoch deadline at
+  // floor(uploadedAtMs/1000) + r2MaxAge — immune to body-latency clock
+  // drift.  createdAt is set to the authoritative uploadedAtMs.  softTtl
+  // is floored to integer and capped to remaining lifetime.  Backfill is
+  // skipped when remaining < 60 s.  Fresh L3 origin writes omit
+  // uploadedAtMs and use relative expirationTtl as before.
   private async writeKv(
     cacheKey: string,
     svg: string,
     avatarHash: string,
     migrationStatus: string,
     ttlConfig: TtlConfig,
+    uploadedAtMs?: number,
   ): Promise<void> {
+    if (uploadedAtMs !== undefined) {
+      const ageSeconds = (Date.now() - uploadedAtMs) / 1000;
+      const remaining = Math.max(0, ttlConfig.r2MaxAge - ageSeconds);
+      const expiration = Math.floor(uploadedAtMs / 1000) + ttlConfig.r2MaxAge;
+      // Integer-expiration check: floor(uploaded/1000) + r2MaxAge must be
+      // >= ceil(now/1000) + 60.  ceil(now/1000) is conservative — a
+      // fractional now (ms offset) pushes the required expiration threshold
+      // to the next integer second, correctly skipping when the absolute
+      // deadline is only 59.x s ahead.
+      if (expiration < Math.ceil(Date.now() / 1000) + 60) return;
+
+      const entry: SvgCacheEntry = {
+        svg,
+        createdAt: uploadedAtMs,
+        softTtl: Math.max(1, Math.floor(Math.min(ttlConfig.softTtl, remaining))),
+        avatarHash,
+        migrationStatus,
+        authoritativeDeadlineMs: uploadedAtMs + ttlConfig.r2MaxAge * 1000,
+      };
+      await this.svgCacheKv.put(cacheKey, JSON.stringify(entry), {
+        expiration: Math.floor(uploadedAtMs / 1000) + ttlConfig.r2MaxAge,
+      });
+      return;
+    }
+
+    // Fresh L3 origin: relative expirationTtl unchanged
     const entry: SvgCacheEntry = {
       svg,
       createdAt: Date.now(),

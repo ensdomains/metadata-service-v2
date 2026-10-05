@@ -39,10 +39,26 @@ export class StorageManager {
   }
 
   // Keyed SVG operations (for tiered image cache)
-  async getSvgByKey(cacheKey: string): Promise<string | null> {
+  // maxAgeSeconds: when set, returns null if the R2 object's uploaded timestamp
+  // is older than this threshold, so the caller can fall through to origin
+  // instead of serving an expired card through a binding read.
+  // Returns the absolute uploadedAtMs so backfill callers can compute an
+  // absolute KV expiration deadline — immune to body-latency clock drift.
+  // When maxAgeSeconds is supplied, missing or invalid uploaded fails closed.
+  async getSvgByKey(cacheKey: string, maxAgeSeconds?: number): Promise<{ svg: string; uploadedAtMs: number } | null> {
     const key = `svg/${cacheKey}.svg`;
     const object = await this.r2Bucket.get(key);
-    return object ? await object.text() : null;
+    if (!object) return null;
+    const svg = await object.text();
+    if (maxAgeSeconds !== undefined) {
+      if (!object.uploaded) return null;
+      const uploadedMs = object.uploaded.getTime();
+      if (!isFinite(uploadedMs)) return null;
+      const ageSeconds = (Date.now() - uploadedMs) / 1000;
+      if (ageSeconds >= maxAgeSeconds) return null;
+      return { svg, uploadedAtMs: uploadedMs };
+    }
+    return { svg, uploadedAtMs: object.uploaded ? object.uploaded.getTime() : 0 };
   }
 
   async setSvgByKey(cacheKey: string, svg: string, maxAge: number = 86400): Promise<void> {
