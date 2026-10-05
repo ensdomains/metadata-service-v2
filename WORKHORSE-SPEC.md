@@ -52,8 +52,9 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 
 ## Tasks
 
-- [x] T001 [P] [AC1] Add CCIP gateway deadline regression tests in `test/request-deadline.test.ts` (10 tests, RED commit `e0c0769`: 7 intended failures on HEAD `80f8ba3`)
-- [x] T002 [P] [AC2] Add `guardedBeforeFetch` composite callback with `timeLeftForAttempt` before `chargeGatewayFetch` via `fetchMediaUrl`'s `beforeEachFetch`; add `RequestDeadlineError` rethrow in catch block (GREEN commit `b1bdbf3`)
-- [x] T003 [AC3] Run `pnpm exec vitest run` — 58 files, 1074 passed, 1 skipped; `pnpm run typecheck` — pass; `pnpm run lint` — 0 errors; `pnpm run build` — pass
-- [x] T004 [AC4] [AC5] Verified: 3 files changed (WORKHORSE-SPEC.md, src/services/ccip-request.ts, test/request-deadline.test.ts), merge-base with testing-campaign = BASE
-- [x] T005 Test hardening `e99ccfb`: added `toBeInstanceOf(RequestDeadlineError)` assertion; proved kills mutant that wraps as plain `UpstreamError` with name `RequestDeadlineError`
+- [x] T001 [P] [AC1] Add CCIP gateway deadline regression tests in `test/request-deadline.test.ts` (10 initial-hop/redirect tests, RED commit `e0c0769`: 7 intended failures on HEAD `80f8ba3`)
+- [x] T002 [P] [AC2] Per-hop admission gating: `guardedBeforeFetch` composite callback + `RequestDeadlineError` rethrow (GREEN commit `b1bdbf3`)
+- [x] T003 [P] [AC2] Fetch-signal bounding: combined `AbortSignal.any([ccipSignal, deadlineSignal])` bounded by remaining deadline; `remainingRequestTime()===0` → `RequestDeadlineError` in catch (RED commit `c5f4978`: 6 intended failures on HEAD `49ead70`; GREEN commit `64358b1`)
+- [x] T004 Test hardening `e99ccfb`: `toBeInstanceOf(RequestDeadlineError)` assertion; kills `UpstreamError`-with-name mutant
+- [x] T005 [AC3] `pnpm exec vitest run` — 58 files, 1083 passed, 1 skipped; typecheck/lint/build all pass
+- [x] T006 [AC4] [AC5] 3 files (+518 -5) at HEAD `64358b1`: `WORKHORSE-SPEC.md` (+59), `src/services/ccip-request.ts` (+24 -3), `test/request-deadline.test.ts` (+435 -2); merge-base with testing-campaign = BASE
