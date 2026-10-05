@@ -983,14 +983,14 @@ describe('CCIP gateway fetch under the request deadline', () => {
     // The signal is created once; total elapsed ~4ms + abort at ~4996ms.
     // Not reset per hop.
     let calls = 0;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       calls++;
       if (calls <= 2) {
         return new Promise<Response>((resolve) => {
           setTimeout(() => resolve(redirect(`/hop${calls + 1}`)), 2);
         });
       }
-      return hang({ signal: undefined } as RequestInit); // hangs on 3rd
+      return hang(init); // uses real signal from fetchMediaUrl
     }));
 
     const out = await settle(inRequest(5000, () =>
@@ -1005,14 +1005,14 @@ describe('CCIP gateway fetch under the request deadline', () => {
 
   it('absolute redirect chain shares the deadline signal', async () => {
     let calls = 0;
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       calls++;
       if (calls === 1) {
         return new Promise<Response>((resolve) => {
           setTimeout(() => resolve(redirect('https://other.example/hop2')), 2);
         });
       }
-      return hang({ signal: undefined } as RequestInit);
+      return hang(init);
     }));
 
     const out = await settle(inRequest(2000, () =>
@@ -1030,9 +1030,9 @@ describe('CCIP gateway fetch under the request deadline', () => {
     // Multiple concurrent guardedCcipRequest calls within one budget.
     // All hanging gateways. All abort at the deadline.
     const calls: number[] = [];
-    vi.stubGlobal('fetch', vi.fn(() => {
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(1);
-      return new Promise<Response>(() => {}); // never settles, signal aborts it
+      return hang(init);
     }));
 
     const out = await settle(inRequest(1500, () =>
