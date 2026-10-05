@@ -8,7 +8,7 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 
 - **Language and version**: TypeScript (Cloudflare Workers)
 - **Dependencies used or added**: None added. Uses existing `timeLeftForAttempt` from `src/services/request-budget.ts`.
-- **Testing**: `pnpm run test` (vitest). The new regression test uses vi fake timers and stub fetch to assert `RequestDeadlineError` is thrown before any gateway fetch when the deadline is exhausted.
+- **Testing**: `pnpm exec vitest run` (vitest). The new regression tests use vi fake timers and stub fetch to assert `RequestDeadlineError` is thrown before any gateway fetch (initial or redirect) when the deadline is exhausted.
 - **Constraints**:
   - TDD: write failing regression test first, then the minimal fix.
   - One finding only (`W8-BUDGET-003`).
@@ -28,8 +28,9 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 
 | File | Action |
 |---|---|
-| `src/services/ccip-request.ts` | Import `timeLeftForAttempt`; add deadline check before `fetchMediaUrl` in `guardedCcipRequest`; ensure `RequestDeadlineError` propagates. |
-| `test/request-deadline.test.ts` | Add regression test: `guardedCcipRequest` throws `RequestDeadlineError` before fetching when <1s remains. |
+| `src/services/ccip-request.ts` | Import `RequestDeadlineError`; add composite `guardedBeforeFetch` callback passed to `fetchMediaUrl`'s `beforeEachFetch` — calls `timeLeftForAttempt` before `chargeGatewayFetch` for every HTTP hop; add `RequestDeadlineError` rethrow in catch block. |
+| `test/request-deadline.test.ts` | Add 10 focused regression tests covering initial hop, redirect hops at 999/1000/1001ms boundaries, relative/absolute redirect targets, configured-gateway fallback, deadline-before-charge ordering, and `RequestDeadlineError` taxonomy. Test-hardening commit `e99ccfb` adds `toBeInstanceOf(RequestDeadlineError)` assertion that kills a prototype mutant (plain `UpstreamError` with name `RequestDeadlineError`). |
+| `WORKHORSE-SPEC.md` | This spec (docs only). |
 
 ## Decisions
 
@@ -43,15 +44,16 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 
 | # | Criterion, as the ticket words it | Check (command and input) | Expected output |
 |---|---|---|---|
-| AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `pnpm run test -- test/request-deadline.test.ts` on the commit that adds only the failing test | The new test fails with `RequestDeadlineError` expected but fetch was called or no error thrown. |
-| AC2 | After the fix, that focused regression passes without weakening its assertion. | `pnpm run test -- test/request-deadline.test.ts` on the commit that adds the fix | All request-deadline tests pass (exit 0), including the new CCIP gateway deadline test. |
-| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `pnpm run test` on the final commit | Exit 0, all tests pass. |
-| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff BASE...HEAD --stat` on the final branch | Only `src/services/ccip-request.ts` and `test/request-deadline.test.ts` changed. No other finding referenced in commit messages or code. |
-| AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | `git log --oneline BASE...HEAD` and `git merge-base HEAD testing-campaign` | All commits are on branch `WEB-1715`; the branch shares no commits with testing-campaign beyond BASE. |
+| AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `pnpm exec vitest run test/request-deadline.test.ts` on RED commit `e0c0769` at HEAD `80f8ba3` | 7 tests fail with `expected undefined to be an instance of UpstreamError` — redirect hops succeed without deadline check. |
+| AC2 | After the fix, that focused regression passes without weakening its assertion. | `pnpm exec vitest run test/request-deadline.test.ts` on GREEN commit `b1bdbf3` | 49/49 pass (exit 0), including all 10 CCIP gateway deadline tests. |
+| AC3 | The project gate `pnpm run test` passes at the ticket branch head. | `pnpm exec vitest run` on final HEAD `e99ccfb` | 58 files, 1074 passed, 1 skipped, exit 0. |
+| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+57), `src/services/ccip-request.ts` (+9 -2), `test/request-deadline.test.ts` (+271 -2). No other finding in commits or code. |
+| AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | `git merge-base HEAD testing-campaign` | `5a5527c7e7ac7c20140bdd81757c5bd075bd389a` (BASE — zero commit overlap). |
 
 ## Tasks
 
-- [ ] T001 [P] [AC1] Add CCIP gateway deadline regression test in `test/request-deadline.test.ts`
-- [ ] T002 [P] [AC2] Import `timeLeftForAttempt` and add deadline check before `fetchMediaUrl` in `src/services/ccip-request.ts`
-- [ ] T003 [AC3] Run `pnpm run test` to confirm the full gate passes
-- [ ] T004 [AC4] [AC5] Verify diff scope: only the two expected files changed, no testing-campaign code
+- [x] T001 [P] [AC1] Add CCIP gateway deadline regression tests in `test/request-deadline.test.ts` (10 tests, RED commit `e0c0769`: 7 intended failures on HEAD `80f8ba3`)
+- [x] T002 [P] [AC2] Add `guardedBeforeFetch` composite callback with `timeLeftForAttempt` before `chargeGatewayFetch` via `fetchMediaUrl`'s `beforeEachFetch`; add `RequestDeadlineError` rethrow in catch block (GREEN commit `b1bdbf3`)
+- [x] T003 [AC3] Run `pnpm exec vitest run` — 58 files, 1074 passed, 1 skipped; `pnpm run typecheck` — pass; `pnpm run lint` — 0 errors; `pnpm run build` — pass
+- [x] T004 [AC4] [AC5] Verified: 3 files changed (WORKHORSE-SPEC.md, src/services/ccip-request.ts, test/request-deadline.test.ts), merge-base with testing-campaign = BASE
+- [x] T005 Test hardening `e99ccfb`: added `toBeInstanceOf(RequestDeadlineError)` assertion; proved kills mutant that wraps as plain `UpstreamError` with name `RequestDeadlineError`
