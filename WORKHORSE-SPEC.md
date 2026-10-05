@@ -62,4 +62,4 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 - [x] T008 Test hardening `f00714f`: hardened 3 signal-bounding tests with mutant kills (reset-per-hop, 9s-timeout, active-fetch-retention); all 58/58 pass
 - [x] T009 Test hardening `0cccb01`: `Promise.allSettled` with per-result `RequestDeadlineError` checks; kills no-signal mutant (32 hang → results.length 0); bounded-settlement proof via fake timers
 - [x] T010 Test hardening `d20fc9f`: elapsed ≤2050ms assertion; kills fixed-8s mutant (all 32 settle but elapsed ~8000ms > 2050)
-- [x] T011 Test hardening `cf586ff`: configured-gateway fallback deadline test (gw0 503 → gw1 hang); kills urls[0]-only-deadline-signal mutant (gw1 elapsed 8000 > 2050); 59 focused / 1085 full
+- [x] T011 Test hardening `cf586ff`: configured-gateway fallback deadline test (gw0 503 → gw1 hang); kills urls[0]-only-deadline-signal mutant (gw1 elapsed 8000 > 2050); 59 focused; full suite 1084 passed, 1 skipped (1085 total)
