@@ -1045,6 +1045,9 @@ describe('CCIP gateway fetch under the request deadline', () => {
     // Bounded settlement proof: if calls 2–32 never settled, settle() would
     // exit after maxMs and results.length would be 0. Kills that mutant.
     expect(results.length).toBe(MAX_CCIP_REQUESTS_PER_REQUEST);
+    // All 32 finish by the 2s outer request deadline (not ~8s).
+    // Kills a mutant where gw0 is bounded to 2s but gw1-gw31 use fixed 8s.
+    expect(out.elapsed).toBeLessThanOrEqual(2050);
     // Every single result rejected.
     for (const r of results) {
       expect(r.status).toBe('rejected');
