@@ -27,7 +27,7 @@ import {
 } from 'viem';
 import { RequestDeadlineError } from './errors';
 import { assertFetchableMediaUrl, fetchMediaUrl, readBodyCapped } from './media-fetch';
-import { remainingRequestTime, takeCcipBytes, takeCcipRequest, takeOffchainLookup, timeLeftForAttempt } from './request-budget';
+import { takeCcipBytes, takeCcipRequest, takeOffchainLookup, timeLeftForAttempt } from './request-budget';
 
 export const CCIP_TIMEOUT_MS = 8_000;
 // Real gateway responses (signed resolver results, proofs) are kilobytes.
@@ -89,15 +89,6 @@ export async function guardedCcipRequest({ data, sender, urls }: CcipRequestPara
       refused ??= new CcipGatewayError({ body, details: (err as Error).message, status: REFUSED_GATEWAY_STATUS, url });
       continue;
     }
-    const left = timeLeftForAttempt('CCIP gateway fetch');
-
-    // Combined signal: min(CCIP timeout, remaining request deadline).
-    // The signal bounds the entire fetchMediaUrl redirect chain.
-    const ccipSignal = AbortSignal.timeout(CCIP_TIMEOUT_MS);
-    const signal = Number.isFinite(left)
-      ? AbortSignal.any([ccipSignal, AbortSignal.timeout(left)])
-      : ccipSignal;
-
     const guardedBeforeFetch = () => {
       timeLeftForAttempt('CCIP gateway fetch');
       chargeGatewayFetch();
@@ -107,7 +98,7 @@ export async function guardedCcipRequest({ data, sender, urls }: CcipRequestPara
         method,
         body: body ? JSON.stringify(body) : undefined,
         headers: body ? { 'Content-Type': 'application/json' } : {},
-        signal,
+        signal: AbortSignal.timeout(CCIP_TIMEOUT_MS),
       }, undefined, guardedBeforeFetch);
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
@@ -132,10 +123,6 @@ export async function guardedCcipRequest({ data, sender, urls }: CcipRequestPara
       if (err instanceof CcipAllowanceSpentError) throw err;
       // The deadline must end the lookup, not be wrapped as a gateway failure.
       if (err instanceof RequestDeadlineError) throw err;
-      // Deadline expired during the fetch → surface as RequestDeadlineError.
-      if (Number.isFinite(left) && remainingRequestTime() === 0) {
-        throw new RequestDeadlineError('Request deadline reached during CCIP gateway fetch', { cause: err });
-      }
       // Unreachable, or a redirect hop the guard refuses (or one too many).
       failure = new CcipGatewayError({ body, details: (err as Error).message, url });
     }
