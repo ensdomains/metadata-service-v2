@@ -21,9 +21,9 @@ import {
 import { ResolverService } from '../src/services/resolver';
 import { IndexerService } from '../src/services/indexer';
 import { FallbackService, DEFAULT_FALLBACK_CONFIG } from '../src/services/fallback';
-import { UpstreamError } from '../src/services/errors';
-import { MAX_UNQUEUED_RPC_ATTEMPTS, withRequestBudget } from '../src/services/request-budget';
-import { guardedCcipRequest } from '../src/services/ccip-request';
+import { RequestDeadlineError, UpstreamError } from '../src/services/errors';
+import { MAX_CCIP_REQUESTS_PER_REQUEST, MAX_UNQUEUED_RPC_ATTEMPTS, takeCcipRequest, withRequestBudget } from '../src/services/request-budget';
+import { CcipGatewayError, guardedCcipRequest } from '../src/services/ccip-request';
 
 // WEB-1552: the retry budget multiplied past the request timeout. The primary
 // RPC transport alone (8s timeout, retryCount 2) could spend ~25s of the 30s
@@ -630,23 +630,266 @@ describe('which RPC reads mark an endpoint', () => {
 
 describe('CCIP gateway fetch under the request deadline', () => {
   const SENDER = '0x1111111111111111111111111111111111111111' as const;
+  const GATEWAY = 'https://gateway.example/{data}';
+  const OK_RESPONSE = '0x01';
+  function okResponse(): Response {
+    return new Response(OK_RESPONSE, { headers: { 'content-type': 'text/plain' } });
+  }
+  function redirect(location: string, status = 301): Response {
+    return new Response(null, { status, headers: { Location: location } });
+  }
 
-  it('does not start a gateway fetch with less than 1s left on the request deadline', async () => {
-    const fetchMock = vi.fn(async () => new Response('0x01', { headers: { 'content-type': 'text/plain' } }));
+  // ── initial-hop gate ────────────────────────────────────────────────────
+
+  it('does not start an initial gateway fetch with less than 1s left', async () => {
+    const fetchMock = vi.fn(async () => okResponse());
     vi.stubGlobal('fetch', fetchMock);
 
     // 500ms left: well under MIN_UPSTREAM_ATTEMPT_MS (1000ms).
     const out = await settle(inRequest(500, () =>
-      guardedCcipRequest({
-        data: '0x01',
-        sender: SENDER,
-        urls: ['https://gateway.example/{data}'],
-      }),
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
     ), 60_000);
 
+    // RED on HEAD 80f8ba3: PASSES (outer timeLeftForAttempt at line 91 throws).
     expectDeadlineError(out.error);
     expect(out.elapsed).toBeLessThanOrEqual(50);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── redirect-hop gates ──────────────────────────────────────────────────
+
+  it('gates redirect hops: a 2ms redirect from 1001ms leaves 999ms and the redirect hop is rejected before any charge or fetch', async () => {
+    // 1001ms → initial hop passes. 2ms delay on first response.
+    // Redirect hop sees 999ms (< 1000) → rejected before charge/fetch.
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (called.length === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('/hop2')), 2);
+        });
+      }
+      return okResponse();
+    }));
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 80f8ba3: the redirect hop is not per-hop gated.
+    // fetchMediaUrl follows the redirect and returns 0x01.
+    expectDeadlineError(out.error);
+    expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  it('permits a redirect hop that starts with 1001ms remaining (no time lost on the first response)', async () => {
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(redirect('/hop2'))
+      .mockReturnValueOnce(okResponse());
+    vi.stubGlobal('fetch', fetchMock);
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // Non-regression: both hops have enough time.
+    expect(out.error).toBeUndefined();
+    expect(out.value).toBe(OK_RESPONSE);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a redirect hop at exactly 1000ms remaining (1ms delay → 999ms)', async () => {
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (called.length === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('/hop2')), 1);
+        });
+      }
+      return okResponse();
+    }));
+
+    const out = await settle(inRequest(1000, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 80f8ba3: redirect hop not gated.
+    expectDeadlineError(out.error);
+    expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  // ── relative & absolute redirect targets ────────────────────────────────
+
+  it('gates redirect hops to a relative Location (e.g. /hop2)', async () => {
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (called.length === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('/hop2')), 2);
+        });
+      }
+      return okResponse();
+    }));
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 80f8ba3: relative redirect hop not gated.
+    expectDeadlineError(out.error);
+    expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  it('gates redirect hops to an absolute Location on a different host', async () => {
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (called.length === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('https://other.example/hop2')), 2);
+        });
+      }
+      return okResponse();
+    }));
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 80f8ba3: absolute cross-host redirect hop not gated.
+    expectDeadlineError(out.error);
+    expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  // ── configured-gateway fallback ─────────────────────────────────────────
+
+  it('a redirect-hop deadline kill terminates the lookup without trying further configured gateways', async () => {
+    // First URL: initial fetch takes 2ms, redirects.
+    // Redirect hop is deadline-killed → RequestDeadlineError rethrown.
+    // The lookup ends (no fallback to gw2), matching executeWithFallback.
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (url === 'https://gateway.example/0x01') {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('/hop2')), 2);
+        });
+      }
+      return okResponse();
+    }));
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({
+        data: '0x01',
+        sender: SENDER,
+        urls: [GATEWAY, 'https://gw2.example/{data}'],
+      }),
+    ), 60_000);
+
+    // RED on HEAD 80f8ba3: redirect succeeds (no per-hop gate), returns 0x01.
+    expectDeadlineError(out.error);
+    expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  // ── deadline-before-charge ordering ─────────────────────────────────────
+
+  it('initial hop at 999ms: deadline check before charge — takeCcipRequest is never called', async () => {
+    const fetchMock = vi.fn(async () => okResponse());
+    vi.stubGlobal('fetch', fetchMock);
+
+    let chargesAfter = -1;
+    let error: unknown;
+    await settle(inRequest(999, async () => {
+      for (let i = 0; i < 30; i++) takeCcipRequest();
+      try {
+        await guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] });
+      } catch (err) {
+        error = err;
+        chargesAfter = 30;
+        while (takeCcipRequest()) chargesAfter++;
+      }
+    }), 60_000);
+
+    // Non-regression: outer check at 999ms also throws on HEAD.
+    expectDeadlineError(error);
+    // 30 pre-spent + 2 remaining (MAX 32 - 30) = 32. No charge consumed.
+    expect(chargesAfter).toBe(32);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('redirect hop: checks deadline before charge — at 999ms the allowance is untouched', async () => {
+    // Pre-spend 30 charges. 1001ms → initial hop passes (charge 30→31).
+    // 2ms delay on redirect → redirect hop sees 999ms → deadline check
+    // fires BEFORE chargeGatewayFetch, so charge stays at 31.
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (called.length === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('/hop2')), 2);
+        });
+      }
+      return okResponse();
+    }));
+
+    let chargesAfter = -1;
+    let error: unknown;
+    await settle(inRequest(1001, async () => {
+      for (let i = 0; i < 30; i++) takeCcipRequest();
+      try {
+        await guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] });
+      } catch (err) {
+        error = err;
+        chargesAfter = 30;
+        while (takeCcipRequest()) chargesAfter++;
+      }
+    }), 60_000);
+
+    // RED on HEAD 80f8ba3: redirect hop not gated. chargeGatewayFetch
+    // runs (31→32), fetch follows, returns 0x01. error undefined.
+    //
+    // After fix: initial hop passes deadline, charges (30→31). Redirect
+    // hop deadline throws before charge. chargesAfter = 30 + 1 = 31.
+    expectDeadlineError(error);
+    expect(chargesAfter).toBe(31);
+    expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  // ── RequestDeadlineError taxonomy ───────────────────────────────────────
+
+  it('preserves RequestDeadlineError through the surrounding catch (not wrapped as CcipGatewayError)', async () => {
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (called.length === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('/hop2')), 2);
+        });
+      }
+      return okResponse();
+    }));
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 80f8ba3: redirect succeeds, returns 0x01.
+    // After fix: error is RequestDeadlineError, explicitly NOT CcipGatewayError.
+    expectDeadlineError(out.error);
+    if (out.error) {
+      expect(out.error).not.toBeInstanceOf(CcipGatewayError);
+      expect((out.error as Error).name).toBe('RequestDeadlineError');
+    }
+    expect(called).toEqual(['https://gateway.example/0x01']);
   });
 });
 
