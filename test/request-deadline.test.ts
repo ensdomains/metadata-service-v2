@@ -956,7 +956,7 @@ describe('CCIP gateway fetch under the request deadline', () => {
     expect(out.error).toBeInstanceOf(RequestDeadlineError);
   });
 
-  it('outside a request budget, 8s CCIP timeout produces CcipGatewayError', async () => {
+  it('outside a request budget, 8s CCIP timeout produces CcipGatewayError at exactly 8s', async () => {
     stubHangingFetch();
 
     const out = await settle(
@@ -965,40 +965,25 @@ describe('CCIP gateway fetch under the request deadline', () => {
     );
 
     // Non-regression: no budget → 8s only → CcipGatewayError.
+    // Kills a 9000ms-timeout mutant: elapsed must be ~8000ms.
     expect(out.error).toBeInstanceOf(CcipGatewayError);
     expect(out.error).not.toBeInstanceOf(RequestDeadlineError);
+    expect(out.elapsed).toBeGreaterThanOrEqual(7950);
+    expect(out.elapsed).toBeLessThanOrEqual(8050);
   });
 
   // ── redirect chain shares signal ──────────────────────────────────────
 
   it('redirect chain shares the outer deadline signal — elapsed hop time does not reset timeout', async () => {
+    // 2000ms remaining. Two 400ms redirect hops, then hang.
+    // Shared signal aborts at ~2000ms from start — NOT reset per hop.
+    // A reset-per-hop mutant would give hop 3 another 2000ms.
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls++;
       if (calls <= 2) {
         return new Promise<Response>((resolve) => {
-          setTimeout(() => resolve(redirect(`/hop${calls + 1}`)), 2);
-        });
-      }
-      return hang(init);
-    }));
-
-    const out = await settle(inRequest(5000, () =>
-      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
-    ), 60_000);
-
-    // RED on HEAD 49ead70: signal is fixed 8s, elapsed ~8004ms.
-    expect(out.elapsed).toBeLessThanOrEqual(5050);
-    expect(calls).toBeGreaterThanOrEqual(2);
-  });
-
-  it('absolute redirect chain shares the deadline signal', async () => {
-    let calls = 0;
-    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      calls++;
-      if (calls === 1) {
-        return new Promise<Response>((resolve) => {
-          setTimeout(() => resolve(redirect('https://other.example/hop2')), 2);
+          setTimeout(() => resolve(redirect(`/hop${calls + 1}`)), 400);
         });
       }
       return hang(init);
@@ -1008,31 +993,64 @@ describe('CCIP gateway fetch under the request deadline', () => {
       guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
     ), 60_000);
 
-    // RED on HEAD 49ead70: fixed 8s signal.
+    // With shared signal: 400+400+~1200 = ~2000ms elapsed.
+    // With reset-per-hop mutant: 400+400+2000 = 2800ms (fails).
     expect(out.elapsed).toBeLessThanOrEqual(2050);
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('absolute redirect chain shares the deadline signal', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      if (calls === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('https://other.example/hop2')), 400);
+        });
+      }
+      return hang(init);
+    }));
+
+    const out = await settle(inRequest(2500, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // Shared signal: 400 + ~2100 = ~2500ms. Reset mutant: 400 + 8000 = ~8400ms.
+    expect(out.elapsed).toBeLessThanOrEqual(2550);
     expect(calls).toBeGreaterThanOrEqual(1);
   });
 
   // ── concurrent calls bounded by deadline ──────────────────────────────
 
-  it('concurrent CCIP calls all settle at the deadline with no active fetches retained', async () => {
-    const fetched: number[] = [];
+  it('all 32 allowed concurrent CCIP requests settle at the deadline with zero active fetches retained', async () => {
+    // MAX_CCIP_REQUESTS_PER_REQUEST = 32. Run 32 concurrent single-URL
+    // guardedCcipRequest calls within one budget. Track active fetches.
+    let active = 0;
+    const urls = Array.from({ length: MAX_CCIP_REQUESTS_PER_REQUEST }, (_, i) =>
+      `https://gw${i}.example/{data}`,
+    );
     vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
-      fetched.push(1);
-      return hang(init);
+      active++;
+      return hang(init).finally(() => { active--; });
     }));
 
-    const out = await settle(inRequest(1500, () =>
-      Promise.all([
-        guardedCcipRequest({ data: '0x01', sender: SENDER, urls: ['https://a.example/{data}'] }),
-        guardedCcipRequest({ data: '0x02', sender: SENDER, urls: ['https://b.example/{data}'] }),
-        guardedCcipRequest({ data: '0x03', sender: SENDER, urls: ['https://c.example/{data}'] }),
-      ]),
-    ), 60_000);
+    let error: unknown;
+    await settle(inRequest(2000, async () => {
+      try {
+        await Promise.all(urls.map((u) =>
+          guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [u] }),
+        ));
+      } catch (err) {
+        error = err;
+      }
+    }), 60_000);
 
-    // RED on HEAD 49ead70: signals fixed 8s, elapsed ~8000ms.
-    expect(out.elapsed).toBeLessThanOrEqual(1550);
-    expect(fetched.length).toBe(3);
+    // Deadline-driven abort → RequestDeadlineError prototype.
+    expectDeadlineError(error);
+    expect(error).toBeInstanceOf(RequestDeadlineError);
+    // All active fetches settled (counter returned to 0).
+    // Kills a mutant that retains active fetches past the deadline.
+    expect(active).toBe(0);
   });
 
   // ── admission-before-charge ───────────────────────────────────────────
