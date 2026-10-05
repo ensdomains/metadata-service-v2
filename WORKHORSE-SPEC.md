@@ -33,10 +33,11 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 
 ## Decisions
 
-1. **Where to add the deadline check**: Before `fetchMediaUrl` in the URL loop of `guardedCcipRequest`, outside the `try` that wraps the fetch (so `RequestDeadlineError` is not caught and converted to a generic gateway failure). This mirrors the pattern in `executeWithFallback` where `timeLeftForAttempt` gates each RPC client attempt.
-2. **Error propagation**: `RequestDeadlineError` must propagate out of `guardedCcipRequest` uncaught, so the upstream `executeWithFallback` can re-throw it as `UpstreamError`. The check is placed outside the `try` block.
-3. **Test placement**: In `test/request-deadline.test.ts`, alongside the existing RPC deadline tests, reusing the `inRequest`, `settle`, `expectDeadlineError` helpers.
-4. **Scope**: The fix gates only the gateway fetch itself. Redirect hops within `fetchMediaUrl` are not individually deadline-gated (they happen within the same HTTP request and are bounded by `MAX_MEDIA_REDIRECTS`).
+1. **Where to add the deadline check**: Inside `fetchMediaUrl`'s `beforeEachFetch` callback as a composite `guardedBeforeFetch` that calls `timeLeftForAttempt` before `chargeGatewayFetch`. This gates every actual HTTP fetch — the initial hop AND each redirect hop — before any charge or fetch. The outer `timeLeftForAttempt` before `fetchMediaUrl` is replaced by this per-hop check (the first hop is also gated by `beforeEachFetch`).
+2. **Error propagation**: `RequestDeadlineError` must propagate out of `guardedCcipRequest` uncaught, so the upstream `executeWithFallback` can re-throw it as `UpstreamError`. An explicit `if (err instanceof RequestDeadlineError) throw err` is added in the catch block. A deadline kill terminates the lookup without trying further configured gateways, matching `executeWithFallback`'s behavior.
+3. **Deadline-before-charge ordering**: `timeLeftForAttempt` is called before `chargeGatewayFetch` inside `guardedBeforeFetch`, so the deadline check runs before any charge is consumed. At <1000ms remaining, the charge is never taken.
+4. **Test placement**: In `test/request-deadline.test.ts`, alongside the existing RPC deadline tests, reusing the `inRequest`, `settle`, `expectDeadlineError` helpers. Tests cover: initial hop at 500ms, redirect hop at 999/1000/1001ms boundaries, relative and absolute redirect targets, configured gateway fallback after redirect deadline kill, deadline-before-charge ordering, and `RequestDeadlineError` taxonomy preservation.
+5. **Scope**: Every actual HTTP fetch — initial and each redirect hop — is gated by the request deadline via `beforeEachFetch`.
 
 ## Showing each criterion
 
