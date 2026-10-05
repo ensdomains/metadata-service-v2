@@ -47,7 +47,7 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 | AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `pnpm exec vitest run test/request-deadline.test.ts` on RED commit `e0c0769` at HEAD `80f8ba3` | 7 tests fail with `expected undefined to be an instance of UpstreamError` — redirect hops succeed without deadline check. |
 | AC2 | After the fix, that focused regression passes without weakening its assertion. | `pnpm exec vitest run test/request-deadline.test.ts` on GREEN commit `b1bdbf3` | 49/49 pass (exit 0), including all 10 CCIP gateway deadline tests. |
 | AC3 | The project gate passes at the ticket branch implementation/test-hardening head. | `pnpm exec vitest run` at `e99ccfb` (docs-only corrections follow) | 58 files, 1074 passed, 1 skipped, exit 0. |
-| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+59), `src/services/ccip-request.ts` (+9 -2), `test/request-deadline.test.ts` (+271 -2), total +339/-4. No other finding in commits or code. |
+| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+60), `src/services/ccip-request.ts` (+23 -3), `test/request-deadline.test.ts` (+436 -2), total +519/-5. No other finding in commits or code. |
 | AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | `git merge-base HEAD testing-campaign` | `5a5527c7e7ac7c20140bdd81757c5bd075bd389a` (BASE — zero commit overlap). |
 
 ## Tasks
@@ -57,4 +57,4 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 - [x] T003 [P] [AC2] Fetch-signal bounding: combined `AbortSignal.any([ccipSignal, deadlineSignal])` bounded by remaining deadline; `remainingRequestTime()===0` → `RequestDeadlineError` in catch (RED commit `c5f4978`: 6 intended failures on HEAD `49ead70`; GREEN commit `64358b1`)
 - [x] T004 Test hardening `e99ccfb`: `toBeInstanceOf(RequestDeadlineError)` assertion; kills `UpstreamError`-with-name mutant
 - [x] T005 [AC3] `pnpm exec vitest run` — 58 files, 1083 passed, 1 skipped; typecheck/lint/build all pass
-- [x] T006 [AC4] [AC5] 3 files (+518 -5) at HEAD `64358b1`: `WORKHORSE-SPEC.md` (+59), `src/services/ccip-request.ts` (+24 -3), `test/request-deadline.test.ts` (+435 -2); merge-base with testing-campaign = BASE
+- [x] T006 [AC4] [AC5] 3 files (+519 -5) at final docs head: `WORKHORSE-SPEC.md` (+60), `src/services/ccip-request.ts` (+23 -3), `test/request-deadline.test.ts` (+436 -2); implementation/test head `64358b1`; merge-base with testing-campaign = BASE
