@@ -1,5 +1,6 @@
 // SVG-based NFT image generation service for ENS domains
 import { createDynamicSVGImage, initializeFont } from "adaptive-layout-composer";
+import { ens_beautify } from "@adraffy/ens-normalize";
 import { MIGRATION_STATUS, type MigrationStatus } from "../types";
 import { getCharacterSet } from "../utils/ens";
 import type { AvatarService } from "./avatar";
@@ -41,6 +42,19 @@ const MAX_RASTERIZED_AVATAR_BASE64 = 6 * 1024 * 1024;
 // name containing `<`, `&`, etc. would inject raw markup. Registered ENS names
 // are ENSIP-15-normalized (no such chars) and the image routes gate on existence,
 // but we escape here too as defense-in-depth — never trust the name string.
+// The name as ENS shows it (ENSIP-15 ens_beautify). A normalized name has no
+// FE0F, the selector that asks for an emoji's emoji form (❤ is ❤️ only with
+// it), so a renderer may draw the text form or, for a ZWJ sequence such as
+// 🧙🏻‍♂, nothing. Beautify puts FE0F back on every emoji (and shows ξ as Ξ, as
+// ENS does). A name it cannot take is shown as given.
+export function displayName(name: string): string {
+  try {
+    return ens_beautify(name);
+  } catch {
+    return name;
+  }
+}
+
 function escapeXmlText(s: string): string {
   return s.replace(/[<>&"']/g, (c) =>
     c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : c === '"' ? '&quot;' : '&#39;',
@@ -134,7 +148,7 @@ export class ImageGenerationService {
       }
 
       const result = await createDynamicSVGImage({
-        text: escapeXmlText(name),
+        text: escapeXmlText(displayName(name)),
         width: size.width,
         height: size.height,
         autoFontSize: true,

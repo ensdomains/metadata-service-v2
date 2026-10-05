@@ -169,6 +169,30 @@ describe('ImageGenerationService', () => {
     });
   });
 
+  describe('card name text (ENSIP-15 ens_beautify)', () => {
+    // A normalized name has no FE0F; the card shows the name as ENS displays it,
+    // with FE0F on every emoji, so 🧙🏻‍♂ is drawn as an emoji and not left blank.
+    const textFor = async (name: string) => {
+      const { createDynamicSVGImage } = await import('adaptive-layout-composer');
+      const mockCreateSVG = vi.mocked(createDynamicSVGImage);
+      mockCreateSVG.mockClear();
+      await imageService.generateDomainImage({ name });
+      return (mockCreateSVG.mock.calls[0][0] as { text: string }).text;
+    };
+
+    it.each([
+      ['a ZWJ emoji sequence', '\u{1F98A}\u{1F9D9}\u{1F3FB}\u200D\u2642.eth', '\u{1F98A}\uFE0F\u{1F9D9}\u{1F3FB}\u200D\u2642\uFE0F.eth'],
+      ['an emoji with a text default', '\u2764.eth', '\u2764\uFE0F.eth'],
+      ['a Greek xi outside a Greek label', '\u03BE.eth', '\u039E.eth'],
+    ])('beautifies %s', async (_label, name, shown) => {
+      expect(await textFor(name)).toBe(shown);
+    });
+
+    it('draws a name ens_beautify rejects as given', async () => {
+      expect(await textFor('ab_c.eth')).toBe('ab_c.eth');
+    });
+  });
+
   describe('error handling', () => {
     it('should handle SVG generation errors', async () => {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');
