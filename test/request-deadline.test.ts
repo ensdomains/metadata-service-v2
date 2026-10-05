@@ -777,10 +777,11 @@ describe('CCIP gateway fetch under the request deadline', () => {
 
   // ── configured-gateway fallback ────────────────────────────────────────
 
-  it('falls back to the next configured gateway after a redirect hop is deadline-killed', async () => {
+  it('a redirect-hop deadline kill terminates the lookup without trying further configured gateways', async () => {
     // First configured URL: initial fetch takes 2ms and redirects.
     // The redirect hop is deadline-killed (999ms left).
-    // The next configured URL has a fresh 25s and succeeds.
+    // RequestDeadlineError is rethrown — the lookup ends, matching
+    // executeWithFallback where a deadline kill ends the RPC chain.
     const called: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -801,13 +802,11 @@ describe('CCIP gateway fetch under the request deadline', () => {
       }),
     ), 60_000);
 
-    // RED on HEAD: the first URL's redirect succeeds (no redirect gating),
-    // the function returns 0x01 from the redirect hop, and gw2 is never
-    // tried.
-    expect(out.error).toBeUndefined();
-    expect(out.value).toBe(OK_RESPONSE);
-    // First URL's initial fetch + second URL fetches (no redirect hop).
-    expect(called).toEqual(['https://gateway.example/0x01', 'https://gw2.example/0x01']);
+    // After the fix: the redirect hop is deadline-killed, RequestDeadlineError
+    // is rethrown, and the lookup ends without trying gw2.
+    // RED on HEAD 80f8ba3: the redirect succeeds (no gating) and returns 0x01.
+    expectDeadlineError(out.error);
+    expect(called).toEqual(['https://gateway.example/0x01']);
   });
 
   // ── deadline-before-charge ordering ────────────────────────────────────
@@ -872,14 +871,13 @@ describe('CCIP gateway fetch under the request deadline', () => {
     }), 60_000);
 
     // RED on HEAD 80f8ba3: the redirect hop is not deadline-gated.
-    // chargeGatewayFetch runs the charge first (31), fetch follows,
-    // guardedCcipRequest returns 0x01. error stays undefined, chargesAfter
-    // stays -1. After the fix the redirect hop is gated:
-    // RequestDeadlineError fires before charging — chargesAfter is 30.
+    // chargeGatewayFetch runs the charge first and fetch follows.
+    // After the fix the redirect hop is gated: deadline check fails,
+    // RequestDeadlineError fires before the redirect-hop charge.
+    // The initial hop was allowed and consumed one charge (30→31).
+    // chargesAfter = 30 pre-spent + 1 remaining (MAX 32 - 31 consumed) = 31.
     expectDeadlineError(error);
-    // 30 pre-spent + 2 remaining unconsumed (MAX is 32) = 32.
-    // No charge was taken by the rejected redirect hop.
-    expect(chargesAfter).toBe(32);
+    expect(chargesAfter).toBe(31);
     expect(called).toEqual(['https://gateway.example/0x01']);
   });
 
