@@ -57,6 +57,7 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 - [x] T003 [P] [AC2] Fetch-signal bounding: combined `AbortSignal.any([ccipSignal, deadlineSignal])` bounded by remaining deadline; `remainingRequestTime()===0` → `RequestDeadlineError` in catch (RED commit `c5f4978`: 6 intended failures on HEAD `49ead70`; GREEN commit `64358b1`)
 - [x] T004 Test hardening `e99ccfb`: `toBeInstanceOf(RequestDeadlineError)` assertion; kills `UpstreamError`-with-name mutant
 - [x] T005 [AC3] `pnpm exec vitest run` — 58 files, 1083 passed, 1 skipped; typecheck/lint/build all pass
-- [x] T006 [AC4] [AC5] 3 files (+539 -5) at final docs head: `WORKHORSE-SPEC.md` (+62), `src/services/ccip-request.ts` (+23 -3), `test/request-deadline.test.ts` (+454 -2); implementation/test-hardening head `f00714f`; merge-base with testing-campaign = BASE
+- [x] T006 [AC4] [AC5] 3 files (+544 -5) at HEAD `0cccb01`: `WORKHORSE-SPEC.md` (+62), `src/services/ccip-request.ts` (+24 -3), `test/request-deadline.test.ts` (+458 -2); merge-base with testing-campaign = BASE
 - [x] T007 Test hardening `e99ccfb`: `toBeInstanceOf(RequestDeadlineError)` prototype assertion; kills `UpstreamError`-with-name mutant
 - [x] T008 Test hardening `f00714f`: hardened 3 signal-bounding tests with mutant kills (reset-per-hop, 9s-timeout, active-fetch-retention); all 58/58 pass
+- [x] T009 Test hardening `0cccb01`: `Promise.allSettled` with per-result `RequestDeadlineError` checks; kills no-signal mutant (32 hang → results.length 0); bounded-settlement proof via fake timers
