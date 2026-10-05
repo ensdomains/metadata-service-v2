@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { crc32, deflateSync } from 'node:zlib';
+import { deflateSync } from 'node:zlib';
 
 // rasterize-wasm (since 1.0.2) frees resvg's render objects after each render.
 // Left to the FinalizationRegistry, the parsed tree and the rendered pixmap
@@ -22,6 +22,17 @@ WebAssembly.instantiate = (async (...args: Parameters<typeof WebAssembly.instant
 afterAll(() => {
   WebAssembly.instantiate = instantiate;
 });
+
+// CRC-32 of PNG chunks. Node 18 (supported, see package.json engines) has no
+// zlib.crc32 (Node >= 20.15 / 22.2).
+function crc32(bytes: Uint8Array): number {
+  let crc = ~0;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let k = 0; k < 8; k++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return ~crc >>> 0;
+}
 
 // A width x height RGBA PNG (all zero: decoding still allocates the full bitmap).
 function png(width: number, height: number): Buffer {
@@ -48,6 +59,10 @@ function png(width: number, height: number): Buffer {
 }
 
 describe('rasterize-wasm render objects', () => {
+  it('builds valid PNG chunks (a bad CRC would leave nothing to decode)', () => {
+    expect(crc32(Buffer.from('IEND'))).toBe(0xae426082);
+  });
+
   it('are freed after each render, so resvg memory does not grow across renders', async () => {
     // @ts-expect-error — rasterize-wasm is a JS-only package without type declarations
     const { SVGRenderer } = await import('rasterize-wasm');
