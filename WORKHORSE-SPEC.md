@@ -47,7 +47,7 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 | AC1 | A new focused regression test on a branch cut from main fails on the main baseline as described, and that failing run is recorded before any product fix commit. | `pnpm exec vitest run test/request-deadline.test.ts` on RED commit `e0c0769` at HEAD `80f8ba3` | 7 tests fail with `expected undefined to be an instance of UpstreamError` — redirect hops succeed without deadline check. |
 | AC2 | After the fix, that focused regression passes without weakening its assertion. | `pnpm exec vitest run test/request-deadline.test.ts` on GREEN commit `b1bdbf3` | 49/49 pass (exit 0), including all 10 CCIP gateway deadline tests. |
 | AC3 | The project gate passes at the ticket branch implementation/test-hardening head. | `pnpm exec vitest run` at `e99ccfb` (docs-only corrections follow) | 58 files, 1074 passed, 1 skipped, exit 0. |
-| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+64), `src/services/ccip-request.ts` (+23 -3), `test/request-deadline.test.ts` (+462 -2), total +549/-5. No other finding in commits or code. |
+| AC4 | The change set addresses only `W8-BUDGET-003` and does not bundle another findings.md id. | `git diff --stat BASE...HEAD` | 3 files: `WORKHORSE-SPEC.md` (+65), `src/services/ccip-request.ts` (+23 -3), `test/request-deadline.test.ts` (+498 -2), total +586/-5. No other finding in commits or code. |
 | AC5 | The pull request targets main from a ticket-named branch, with no cherry-picks from testing-campaign. | `git merge-base HEAD testing-campaign` | `5a5527c7e7ac7c20140bdd81757c5bd075bd389a` (BASE — zero commit overlap). |
 
 ## Tasks
@@ -57,9 +57,9 @@ Fix finding W8-BUDGET-003: the request deadline does not gate CCIP gateway fetch
 - [x] T003 [P] [AC2] Fetch-signal bounding: combined `AbortSignal.any([ccipSignal, deadlineSignal])` bounded by remaining deadline; `remainingRequestTime()===0` → `RequestDeadlineError` in catch (RED commit `c5f4978`: 6 intended failures on HEAD `49ead70`; GREEN commit `64358b1`)
 - [x] T004 Test hardening `e99ccfb`: `toBeInstanceOf(RequestDeadlineError)` assertion; kills `UpstreamError`-with-name mutant
 - [x] T005 [AC3] `pnpm exec vitest run` — 58 files, 1083 passed, 1 skipped; typecheck/lint/build all pass
-- [x] T006 [AC4] [AC5] 3 files (+585 -5) at HEAD `cf586ff`: `WORKHORSE-SPEC.md` (+64), `src/services/ccip-request.ts` (+24 -3), `test/request-deadline.test.ts` (+497 -2); merge-base with testing-campaign = BASE
+- [x] T006 [AC4] [AC5] 3 files (+586 -5) at final docs head: `WORKHORSE-SPEC.md` (+65), `src/services/ccip-request.ts` (+23 -3), `test/request-deadline.test.ts` (+498 -2); test-hardening head `cf586ff`; merge-base with testing-campaign = BASE
 - [x] T007 Test hardening `e99ccfb`: `toBeInstanceOf(RequestDeadlineError)` prototype assertion; kills `UpstreamError`-with-name mutant
 - [x] T008 Test hardening `f00714f`: hardened 3 signal-bounding tests with mutant kills (reset-per-hop, 9s-timeout, active-fetch-retention); all 58/58 pass
 - [x] T009 Test hardening `0cccb01`: `Promise.allSettled` with per-result `RequestDeadlineError` checks; kills no-signal mutant (32 hang → results.length 0); bounded-settlement proof via fake timers
 - [x] T010 Test hardening `d20fc9f`: elapsed ≤2050ms assertion; kills fixed-8s mutant (all 32 settle but elapsed ~8000ms > 2050)
-- [x] T011 Test hardening `cf586ff`: configured-gateway fallback deadline test (gw0 503 → gw1 hang); kills urls[0]-only-deadline-signal mutant (gw1 elapsed 8000 > 2050); scope +585 -5, 59 focused / 1085 full
+- [x] T011 Test hardening `cf586ff`: configured-gateway fallback deadline test (gw0 503 → gw1 hang); kills urls[0]-only-deadline-signal mutant (gw1 elapsed 8000 > 2050); 59 focused / 1085 full
