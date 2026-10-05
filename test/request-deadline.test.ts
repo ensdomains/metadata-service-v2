@@ -84,6 +84,11 @@ const after = (ms: number, respond: Handler): Handler => (init) => new Promise<R
 
 const status = (code: number): Handler => async () => new Response('unavailable', { status: code });
 
+// Stub global fetch with a hanging handler that properly receives init.
+function stubHangingFetch() {
+  vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => hang(init)));
+}
+
 // Connection refused: fetch rejects, as it does for an endpoint that is down.
 const unreachable: Handler = async () => { throw new TypeError('fetch failed'); };
 
@@ -893,6 +898,166 @@ describe('CCIP gateway fetch under the request deadline', () => {
       expect((out.error as Error).name).toBe('RequestDeadlineError');
     }
     expect(called).toEqual(['https://gateway.example/0x01']);
+  });
+
+  // ── fetch signal bounded by remaining deadline ────────────────────────
+
+  it('bounds the fetch signal to the remaining deadline (not fixed 8s)', async () => {
+    // 1000ms remaining. Admission passes. Gateway hangs.
+    // The fetch signal must abort at ~1000ms, not 8000ms.
+    stubHangingFetch();
+
+    const out = await settle(inRequest(1000, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 49ead70: signal is AbortSignal.timeout(8000) only.
+    // Hang survives ~8000ms, elapsed ~8000ms.
+    expect(out.elapsed).toBeLessThanOrEqual(1050);
+  });
+
+  it('a hanging gateway admitted at 1001ms aborts at the deadline, not 8s', async () => {
+    stubHangingFetch();
+
+    const out = await settle(inRequest(1001, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 49ead70: fixed 8s signal.
+    expect(out.elapsed).toBeLessThanOrEqual(1051);
+  });
+
+  it('at 999ms remaining, admission rejects before any fetch', async () => {
+    const fetchMock = vi.fn(async () => okResponse());
+    vi.stubGlobal('fetch', fetchMock);
+
+    const out = await settle(inRequest(999, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // Non-regression: already GREEN (per-hop admission).
+    expectDeadlineError(out.error);
+    expect(out.elapsed).toBeLessThanOrEqual(50);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── deadline abort → RequestDeadlineError taxonomy ────────────────────
+
+  it('deadline-driven abort surfaces RequestDeadlineError prototype (not CcipGatewayError)', async () => {
+    stubHangingFetch();
+
+    const out = await settle(inRequest(1000, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 49ead70: abort from fixed-8s → CcipGatewayError.
+    // After fix: remainingRequestTime()===0 → RequestDeadlineError.
+    expectDeadlineError(out.error);
+    expect(out.error).toBeInstanceOf(RequestDeadlineError);
+  });
+
+  it('outside a request budget, 8s CCIP timeout produces CcipGatewayError', async () => {
+    stubHangingFetch();
+
+    const out = await settle(
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+      60_000,
+    );
+
+    // Non-regression: no budget → 8s only → CcipGatewayError.
+    expect(out.error).toBeInstanceOf(CcipGatewayError);
+    expect(out.error).not.toBeInstanceOf(RequestDeadlineError);
+  });
+
+  // ── redirect chain shares signal ──────────────────────────────────────
+
+  it('redirect chain shares the outer deadline signal — elapsed hop time does not reset timeout', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      if (calls <= 2) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect(`/hop${calls + 1}`)), 2);
+        });
+      }
+      return hang(init);
+    }));
+
+    const out = await settle(inRequest(5000, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 49ead70: signal is fixed 8s, elapsed ~8004ms.
+    expect(out.elapsed).toBeLessThanOrEqual(5050);
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('absolute redirect chain shares the deadline signal', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      if (calls === 1) {
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(redirect('https://other.example/hop2')), 2);
+        });
+      }
+      return hang(init);
+    }));
+
+    const out = await settle(inRequest(2000, () =>
+      guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] }),
+    ), 60_000);
+
+    // RED on HEAD 49ead70: fixed 8s signal.
+    expect(out.elapsed).toBeLessThanOrEqual(2050);
+    expect(calls).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── concurrent calls bounded by deadline ──────────────────────────────
+
+  it('concurrent CCIP calls all settle at the deadline with no active fetches retained', async () => {
+    const fetched: number[] = [];
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      fetched.push(1);
+      return hang(init);
+    }));
+
+    const out = await settle(inRequest(1500, () =>
+      Promise.all([
+        guardedCcipRequest({ data: '0x01', sender: SENDER, urls: ['https://a.example/{data}'] }),
+        guardedCcipRequest({ data: '0x02', sender: SENDER, urls: ['https://b.example/{data}'] }),
+        guardedCcipRequest({ data: '0x03', sender: SENDER, urls: ['https://c.example/{data}'] }),
+      ]),
+    ), 60_000);
+
+    // RED on HEAD 49ead70: signals fixed 8s, elapsed ~8000ms.
+    expect(out.elapsed).toBeLessThanOrEqual(1550);
+    expect(fetched.length).toBe(3);
+  });
+
+  // ── admission-before-charge ───────────────────────────────────────────
+
+  it('admission rejects before charge: at 999ms no charge consumed', async () => {
+    const fetchMock = vi.fn(async () => okResponse());
+    vi.stubGlobal('fetch', fetchMock);
+
+    let chargesAfter = -1;
+    let error: unknown;
+    await settle(inRequest(999, async () => {
+      for (let i = 0; i < 30; i++) takeCcipRequest();
+      try {
+        await guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [GATEWAY] });
+      } catch (err) {
+        error = err;
+        chargesAfter = 30;
+        while (takeCcipRequest()) chargesAfter++;
+      }
+    }), 60_000);
+
+    // Non-regression: admission rejects before charge.
+    expectDeadlineError(error);
+    expect(chargesAfter).toBe(32);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
