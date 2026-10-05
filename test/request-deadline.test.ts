@@ -1023,8 +1023,9 @@ describe('CCIP gateway fetch under the request deadline', () => {
   // ── concurrent calls bounded by deadline ──────────────────────────────
 
   it('all 32 allowed concurrent CCIP requests settle at the deadline with zero active fetches retained', async () => {
-    // MAX_CCIP_REQUESTS_PER_REQUEST = 32. Run 32 concurrent single-URL
-    // guardedCcipRequest calls within one budget. Track active fetches.
+    // MAX_CCIP_REQUESTS_PER_REQUEST = 32. Promise.allSettled proves every
+    // single call settles — not just the first to reject (fail-fast Promise.all
+    // would hide 31 hung calls behind the 1st rejection).
     let active = 0;
     const urls = Array.from({ length: MAX_CCIP_REQUESTS_PER_REQUEST }, (_, i) =>
       `https://gw${i}.example/{data}`,
@@ -1034,22 +1035,26 @@ describe('CCIP gateway fetch under the request deadline', () => {
       return hang(init).finally(() => { active--; });
     }));
 
-    let error: unknown;
-    await settle(inRequest(2000, async () => {
-      try {
-        await Promise.all(urls.map((u) =>
-          guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [u] }),
-        ));
-      } catch (err) {
-        error = err;
-      }
+    let results: PromiseSettledResult<unknown>[] = [];
+    const out = await settle(inRequest(2000, async () => {
+      results = await Promise.allSettled(urls.map((u) =>
+        guardedCcipRequest({ data: '0x01', sender: SENDER, urls: [u] }),
+      ));
     }), 60_000);
 
-    // Deadline-driven abort → RequestDeadlineError prototype.
-    expectDeadlineError(error);
-    expect(error).toBeInstanceOf(RequestDeadlineError);
+    // Bounded settlement proof: if calls 2–32 never settled, settle() would
+    // exit after maxMs and results.length would be 0. Kills that mutant.
+    expect(results.length).toBe(MAX_CCIP_REQUESTS_PER_REQUEST);
+    // Every single result rejected.
+    for (const r of results) {
+      expect(r.status).toBe('rejected');
+      const e = (r as PromiseRejectedResult).reason;
+      // Every rejection is a concrete RequestDeadlineError prototype.
+      // Kills: wrong taxonomy on any call, or partial-settlement mutants.
+      expect(e).toBeInstanceOf(RequestDeadlineError);
+      expect((e as Error).name).toBe('RequestDeadlineError');
+    }
     // All active fetches settled (counter returned to 0).
-    // Kills a mutant that retains active fetches past the deadline.
     expect(active).toBe(0);
   });
 
