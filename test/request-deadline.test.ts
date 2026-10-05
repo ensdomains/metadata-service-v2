@@ -1061,6 +1061,42 @@ describe('CCIP gateway fetch under the request deadline', () => {
     expect(active).toBe(0);
   });
 
+  // ── deadline signal applied to every configured gateway URL ──────────
+
+  it('applies the deadline signal to every configured gateway URL, not just the first', async () => {
+    // URL[0] fails with an ordinary retryable error (HTTP 503).
+    // URL[1] starts and hangs. Under a 2s budget, the deadline signal
+    // must bound URL[1]'s fetch — not just URL[0]'s.
+    let active = 0;
+    const called: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      called.push(url);
+      if (url.includes('gw0')) {
+        return Promise.resolve(new Response(null, { status: 503 }));
+      }
+      active++;
+      return hang(init).finally(() => { active--; });
+    }));
+
+    const out = await settle(inRequest(2000, () =>
+      guardedCcipRequest({
+        data: '0x01',
+        sender: SENDER,
+        urls: ['https://gw0.example/{data}', 'https://gw1.example/{data}'],
+      }),
+    ), 60_000);
+
+    // Both configured URLs were attempted in order.
+    expect(called).toEqual(['https://gw0.example/0x01', 'https://gw1.example/0x01']);
+    // Deadline signal bounded URL[1]'s hang to the 2s budget.
+    expectDeadlineError(out.error);
+    expect(out.error).toBeInstanceOf(RequestDeadlineError);
+    expect(out.elapsed).toBeLessThanOrEqual(2050);
+    // No active fetches retained.
+    expect(active).toBe(0);
+  });
+
   // ── admission-before-charge ───────────────────────────────────────────
 
   it('admission rejects before charge: at 999ms no charge consumed', async () => {
