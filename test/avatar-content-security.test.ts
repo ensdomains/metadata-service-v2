@@ -186,10 +186,28 @@ describe('AvatarService media: remote and data: URIs go through the allowlist', 
     expect(img!.buffer.toString('utf8')).not.toMatch(/onload|<script|javascript:|evil\.example/);
   });
 
-  it('inline SVG gets the same length limit as fetched SVG', () => {
+  // A real resolver with only its chain lookup stubbed: an inline SVG record goes
+  // through ens-avatar's own length check (maxSvgLength), then toSafeImage.
+  function serviceWithInlineRecord(record: string): AvatarService {
     const svc = new AvatarService('https://rpc.invalid', NETWORKS.mainnet.chain);
-    const resolver = (svc as unknown as { resolver: { options?: { maxSvgLength?: number } } }).resolver;
-    expect(resolver.options?.maxSvgLength).toBe(MAX_SVG_LENGTH);
+    const client = (svc as unknown as { resolver: { client: { getEnsRecord: unknown } } }).resolver.client;
+    client.getEnsRecord = vi.fn().mockResolvedValue({ record, address: undefined });
+    return svc;
+  }
+  const inlineSvg = (text: string) => `<svg xmlns="http://www.w3.org/2000/svg"><desc>${text}</desc></svg>`;
+
+  it('serves an inline SVG longer than the library default (256 KiB), up to MAX_SVG_LENGTH', async () => {
+    const img = await serviceWithInlineRecord(inlineSvg('x'.repeat(512 * 1024))).getAvatarImage('inline.eth');
+    expect(img?.mimeType).toBe('image/svg+xml');
+  });
+
+  it('rejects an inline SVG over MAX_SVG_LENGTH, counted in characters or in UTF-8 bytes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await serviceWithInlineRecord(inlineSvg('x'.repeat(MAX_SVG_LENGTH))).getAvatarImage('inline.eth')).toBeNull();
+    // 400k CJK characters: within the library's limit (UTF-16 code units), but
+    // 1.2 MB of UTF-8, which toSafeImage rejects.
+    expect(await serviceWithInlineRecord(inlineSvg('中'.repeat(400_000))).getAvatarImage('inline.eth')).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`bytes (max ${MAX_SVG_LENGTH})`));
   });
 
   it('a base64 data-URI SVG is typed from its bytes', async () => {
