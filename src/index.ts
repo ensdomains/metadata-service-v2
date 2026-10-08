@@ -446,7 +446,7 @@ app.get(
       // For an inline avatar image the endpoint serves (image_data, a data:image
       // URI or SVG markup), `image` points at the avatar image endpoint on this
       // deployment's own host (v1 did this for image_data), which serves the
-      // bytes as ens-avatar resolves them: inline SVG sanitized by the library.
+      // bytes as ens-avatar resolves them, with any SVG sanitized.
       const avatarImageUrl = `${baseUrl}/${network}/avatar/${encodeURIComponent(name)}`;
 
       const meta = await avatarService.getAvatarMeta(name, avatarImageUrl);

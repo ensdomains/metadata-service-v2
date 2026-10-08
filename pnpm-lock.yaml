@@ -173,8 +173,8 @@ importers:
         specifier: ^1.11.0
         version: 1.11.1
       '@ensdomains/ens-avatar':
-        specifier: 2.0.0-alpha.3
-        version: 2.0.0-alpha.3(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))
+        specifier: 2.0.0-alpha.4
+        version: 2.0.0-alpha.4(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))
       '@ensdomains/ensjs':
         specifier: ^3.7.0
         version: 3.7.0(encoding@0.1.13)(typescript@5.9.2)(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))(zod@3.22.3)
@@ -338,8 +338,8 @@ packages:
     resolution: {integrity: sha512-nfm4ggpK5YBVwVwLZKF9WPjRGRTL9aUxX2O4pqv/AnQCz3WeGHsW7VhVFLj2s4EoWSzCXwR1E6nuqgUwnH692w==}
     engines: {node: '>=16.8'}
 
-  '@ensdomains/ens-avatar@2.0.0-alpha.3':
-    resolution: {integrity: sha512-11AQ6qEzNugRaCsUXRLQ7ffXOwmhAr/chrSAyw76pi2Iln+Tdi6ugw00wz1bgQT0qNOdDBHF0SgwlcAbr80+CQ==}
+  '@ensdomains/ens-avatar@2.0.0-alpha.4':
+    resolution: {integrity: sha512-Gh44oB68kc1v5p0gOnJqWeUiplaq6Rw6mO8exIIwJneHz5RETSL7vB47OT1J157z1A3NFlZ/+1MEmCeJ3Id2fA==}
     engines: {node: '>=22'}
     peerDependencies:
       ethers: ^6.13.0
@@ -2589,7 +2589,7 @@ snapshots:
       dns-packet: 5.6.1
       typescript-logging: 1.0.1
 
-  '@ensdomains/ens-avatar@2.0.0-alpha.3(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))':
+  '@ensdomains/ens-avatar@2.0.0-alpha.4(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))':
     dependencies:
       assert: 2.1.0
       htmlparser2: 10.1.0

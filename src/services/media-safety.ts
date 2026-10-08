@@ -1,3 +1,5 @@
+import { utils as avatarUtils } from '@ensdomains/ens-avatar';
+
 // Untrusted media handling for avatar and header bytes.
 //
 // An ENS name's owner chooses the URL behind its `avatar` and `header` records,
@@ -10,22 +12,28 @@
 //  - the type is derived ONLY from the bytes themselves, from a closed allowlist
 //    of image formats (the same formats @ensdomains/ens-avatar accepts);
 //  - SVG, the one scriptable format, is accepted only when its root element is
-//    <svg>, and is always delivered as image/svg+xml with MEDIA_SECURITY_HEADERS
-//    (no MIME sniffing, and a sandboxing CSP that forbids script, plugins and
-//    network loads when the document is opened directly). Embedded in the card
-//    it is an <image>, which browsers and resvg render without script or loads;
+//    <svg>, and is rewritten by @ensdomains/ens-avatar's sanitizeSVGDocument:
+//    only allowlisted SVG elements and attributes are kept, and every URL must
+//    point inside the document, so no script, event handler, link or external
+//    load survives. It is always delivered as image/svg+xml with
+//    MEDIA_SECURITY_HEADERS (no MIME sniffing, and a sandboxing CSP that forbids
+//    script, plugins and network loads when the document is opened directly);
+//    the sanitizing covers what those headers cannot, such as a copy of the
+//    bytes served from another origin. Embedded in the card it is an <image>,
+//    which browsers and resvg render without script or loads;
 //  - anything else is rejected.
 //
-// SVG is deliberately NOT rewritten through @ensdomains/ens-avatar's
-// sanitizeSVG here. On attacker-supplied input that sanitizer (htmlparser2,
-// sanitize-html, postcss and regex CSS checks) has superlinear paths that cost
-// seconds to minutes of CPU per request and can exhaust the isolate's memory,
-// and they could not be bounded reliably from the outside. The headers above
-// give this origin the protection that matters without parsing the document.
+// The sanitizer's cost grows with the SVG's length (about 0.8 s of CPU for 1 MiB
+// of hostile input), so a longer SVG is rejected: serving it unsanitized instead
+// would let anyone skip the sanitizer by padding the file.
 
 // Characters of the prolog (declarations, comments, DOCTYPE) inspected before
 // the root element must appear.
 const MAX_SVG_ROOT_SCAN = 64 * 1024;
+
+// The longest SVG accepted, in bytes. Also ens-avatar's limit for inline SVG
+// (maxSvgLength in UTF-16 code units, which never outnumber the UTF-8 bytes).
+export const MAX_SVG_LENGTH = 1024 * 1024;
 
 export const SAFE_IMAGE_TYPES = [
   'image/jpeg',
@@ -161,12 +169,23 @@ export function isSvgDocument(buf: Uint8Array): boolean {
 /**
  * Turn untrusted media bytes into bytes that are safe to serve on this origin
  * (with MEDIA_SECURITY_HEADERS) or embed in the NFT card: allowlisted raster
- * formats and SVG documents pass through unchanged with a type taken from the
- * bytes; anything else is rejected (null).
+ * formats pass through unchanged with a type taken from the bytes, an SVG
+ * document of at most MAX_SVG_LENGTH bytes is sanitized; anything else is
+ * rejected (null).
  */
 export function toSafeImage(bytes: Uint8Array): SafeImage | null {
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const raster = detectRasterType(buffer);
   if (raster) return { buffer, mimeType: raster };
-  return isSvgDocument(buffer) ? { buffer, mimeType: 'image/svg+xml' } : null;
+  if (!isSvgDocument(buffer)) return null;
+  if (buffer.byteLength > MAX_SVG_LENGTH) {
+    console.warn(`Rejected an SVG of ${buffer.byteLength} bytes (max ${MAX_SVG_LENGTH})`);
+    return null;
+  }
+  const svg = avatarUtils.sanitizeSVGDocument(new TextDecoder().decode(buffer), { maxLength: MAX_SVG_LENGTH });
+  if (!svg) {
+    console.warn(`Rejected an SVG of ${buffer.byteLength} bytes: nothing usable left after sanitizing`);
+    return null;
+  }
+  return { buffer: Buffer.from(svg), mimeType: 'image/svg+xml' };
 }
