@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.0",
-    "@ensdomains/ens-avatar": "2.0.0-alpha.3",
+    "@ensdomains/ens-avatar": "2.0.0-alpha.4",
     "@ensdomains/ensjs": "^3.7.0",
     "@resvg/resvg-wasm": "^2.6.2",
     "adaptive-layout-composer": "^1.0.1",

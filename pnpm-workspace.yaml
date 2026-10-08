@@ -33,4 +33,4 @@ auditConfig:
     - GHSA-96hv-2xvq-fx4p
 
 minimumReleaseAgeExclude:
-  - '@ensdomains/ens-avatar@2.0.0-alpha.3'
+  - '@ensdomains/ens-avatar@2.0.0-alpha.4'

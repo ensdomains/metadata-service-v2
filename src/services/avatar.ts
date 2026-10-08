@@ -19,7 +19,7 @@ import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayS
 import { UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
-import { toSafeImage } from './media-safety';
+import { MAX_SVG_LENGTH, toSafeImage } from './media-safety';
 import { DEFAULT_IPFS_GATEWAY, toLiveGatewayUrl } from './ipfs-gateway';
 
 export interface AvatarImage {
@@ -487,11 +487,13 @@ export class AvatarService {
     // inside it. ens-avatar resolves ipfs:// and ipns:// (and rewrites ipfs.io
     // links) to the configured gateway, not its ipfs.io default, and the
     // fetcher moves links on the other retired public gateways (see
-    // ipfs-gateway.ts).
+    // ipfs-gateway.ts). Inline SVG gets the same length limit as fetched SVG
+    // (see media-safety.ts).
     const resolverOptions = {
       urlDenyList: resolverDenyList(),
       timeout: MEDIA_RESOLVE_TIMEOUT_MS,
       ipfs: ipfsGateway,
+      maxSvgLength: MAX_SVG_LENGTH,
     };
     const guardedFetcher = withLiveGateway(
       createGuardedFetcher(MEDIA_RESOLVE_TIMEOUT_MS, MAX_METADATA_JSON_BYTES),
@@ -756,7 +758,7 @@ export class AvatarService {
    * The bytes are chosen by the name's owner and are served on this origin and
    * embedded in the NFT card, so the declared type (data: URI prefix or remote
    * Content-Type) is never used: toSafeImage derives the type from the bytes
-   * themselves, accepts SVG only with an <svg> root (served unchanged under
+   * themselves, accepts SVG only with an <svg> root (sanitized, and served under
    * MEDIA_SECURITY_HEADERS), and rejects anything outside the image allowlist.
    */
   private async fetchMedia(uri: string, kind: string, name: string): Promise<AvatarImage | null> {

@@ -6,6 +6,7 @@ import {
   detectRasterType,
   isSafeImageType,
   MEDIA_SECURITY_HEADERS,
+  MAX_SVG_LENGTH,
 } from '../src/services/media-safety';
 
 // Security regression suite for avatar/header media (WEB-1549, v1 cluster A).
@@ -13,8 +14,9 @@ import {
 // An ENS name's owner controls the URL, server, bytes and Content-Type behind
 // its avatar and header records. Those bytes used to be served verbatim on this
 // origin with the REMOTE Content-Type (text/html → arbitrary HTML). Now the
-// type comes from the bytes, SVG must have an <svg> root, and every media
-// response carries nosniff plus a sandboxing CSP. Each case pins one bypass class.
+// type comes from the bytes, SVG must have an <svg> root and is sanitized, and
+// every media response carries nosniff plus a sandboxing CSP. Each case pins one
+// bypass class.
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
@@ -65,10 +67,40 @@ describe('toSafeImage: type comes from the bytes, never from a declared type', (
     expect(toSafeImage(bytes)).toBeNull();
   });
 
-  it('keeps an SVG document unchanged and types it from its root element', () => {
+  it('sanitizes an SVG document and types it from its root element', () => {
     const safe = toSafeImage(Buffer.from(EVIL_SVG));
     expect(safe?.mimeType).toBe('image/svg+xml');
-    expect(safe!.buffer.toString('utf8')).toBe(EVIL_SVG); // served only behind the sandboxing CSP
+    const svg = safe!.buffer.toString('utf8');
+    expect(svg).toMatch(/^<svg [^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+    expect(svg).toContain('<rect width="10" height="10" style="fill:red">');
+    for (const banned of ['onload', '<script', 'foreignObject', 'iframe', 'javascript:', '<a', 'evil.example']) {
+      expect(svg).not.toContain(banned);
+    }
+  });
+
+  it('keeps an already sanitized SVG as it is', () => {
+    const once = toSafeImage(Buffer.from(EVIL_SVG))!.buffer;
+    expect(toSafeImage(once)!.buffer.equals(once)).toBe(true);
+  });
+
+  it('rejects an SVG longer than MAX_SVG_LENGTH instead of serving it unsanitized', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const svg = (bytes: number) => {
+      const head = '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><desc>';
+      const tail = '</desc></svg>';
+      return Buffer.from(head + 'x'.repeat(bytes - head.length - tail.length) + tail);
+    };
+    const atLimit = toSafeImage(svg(MAX_SVG_LENGTH));
+    expect(atLimit?.mimeType).toBe('image/svg+xml');
+    expect(atLimit!.buffer.toString('utf8')).not.toContain('onload');
+    expect(toSafeImage(svg(MAX_SVG_LENGTH + 1))).toBeNull();
+    expect(warn).toHaveBeenCalledWith(`Rejected an SVG of ${MAX_SVG_LENGTH + 1} bytes (max ${MAX_SVG_LENGTH})`);
+  });
+
+  it('rejects an SVG the sanitizer leaves nothing of (nested past its depth limit)', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const deep = `<svg xmlns="http://www.w3.org/2000/svg">${'<g>'.repeat(300)}${'</g>'.repeat(300)}</svg>`;
+    expect(toSafeImage(Buffer.from(deep))).toBeNull();
   });
 
   it.each([
@@ -151,6 +183,13 @@ describe('AvatarService media: remote and data: URIs go through the allowlist', 
     remoteServes(EVIL_SVG, 'text/html');
     const img = await serviceResolvingTo('https://attacker.example/a.svg').getAvatarImage('evil.eth');
     expect(img?.mimeType).toBe('image/svg+xml');
+    expect(img!.buffer.toString('utf8')).not.toMatch(/onload|<script|javascript:|evil\.example/);
+  });
+
+  it('inline SVG gets the same length limit as fetched SVG', () => {
+    const svc = new AvatarService('https://rpc.invalid', NETWORKS.mainnet.chain);
+    const resolver = (svc as unknown as { resolver: { options?: { maxSvgLength?: number } } }).resolver;
+    expect(resolver.options?.maxSvgLength).toBe(MAX_SVG_LENGTH);
   });
 
   it('a base64 data-URI SVG is typed from its bytes', async () => {
