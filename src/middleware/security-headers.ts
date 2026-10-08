@@ -17,7 +17,9 @@ import type { Context, Next } from 'hono';
 //  - a Content-Type that lists several types is not media: browsers use the
 //    last one, so "image/png, text/html" is rendered as HTML;
 //  - no X-Frame-Options: frame-ancestors covers the JSON responses, and media
-//    must stay embeddable.
+//    must stay embeddable;
+//  - media varies on Sec-Fetch-Dest: a browser tab gets the media page instead
+//    (see media-view.ts), so a browser cache must not hand one to the other.
 //
 // hono/secure-headers is not used: it overwrites a CSP a handler already set,
 // and its defaults (Cross-Origin-Resource-Policy: same-origin, X-Frame-Options)
@@ -44,7 +46,7 @@ export const MEDIA_CONTENT_SECURITY_POLICY =
 // type, as browsers parse it; \s would also accept \v or NBSP before it.
 const SINGLE_IMAGE_TYPE = /^[\t ]*image\/[\w!#$&^.+-]+[\t ]*(;([^,]*|([^",]|"[^"\\]*")*))?$/i;
 
-function isMediaResponse(headers: Headers): boolean {
+export function isMediaResponse(headers: Headers): boolean {
   return SINGLE_IMAGE_TYPE.test(headers.get('Content-Type') ?? '');
 }
 
@@ -62,10 +64,9 @@ export const securityHeaders = async (c: Context, next: Next) => {
     headers.set('X-Content-Type-Options', 'nosniff');
   }
 
+  const media = isMediaResponse(headers);
   if (!headers.has('Content-Security-Policy')) {
-    headers.set(
-      'Content-Security-Policy',
-      isMediaResponse(headers) ? MEDIA_CONTENT_SECURITY_POLICY : API_CONTENT_SECURITY_POLICY,
-    );
+    headers.set('Content-Security-Policy', media ? MEDIA_CONTENT_SECURITY_POLICY : API_CONTENT_SECURITY_POLICY);
   }
+  if (media) headers.append('Vary', 'Sec-Fetch-Dest');
 };

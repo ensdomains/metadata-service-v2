@@ -47,6 +47,7 @@ vi.mock('../src/services/metadata', async (importOriginal) => {
 });
 
 import app from '../src/index';
+import { MEDIA_VIEW_CONTENT_SECURITY_POLICY } from '../src/middleware/media-view';
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const req = (path: string) => app.request(path, undefined, createMockEnv() as unknown as Record<string, unknown>, ctx);
@@ -109,5 +110,68 @@ describe('media responses carry nosniff and a sandboxing CSP', () => {
     const csp = res.headers.get('Content-Security-Policy') ?? '';
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain('sandbox');
+  });
+});
+
+describe('media opened in a browser tab is shown on a page that draws it with <img>', () => {
+  const visit = (path: string, dest?: string) =>
+    app.request(
+      path,
+      dest ? { headers: { 'Sec-Fetch-Dest': dest } } : undefined,
+      createMockEnv() as unknown as Record<string, unknown>,
+      ctx,
+    );
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it.each([
+    '/mainnet/avatar/nick.eth',
+    '/mainnet/header/nick.eth',
+    '/mainnet/registry/nick.eth/image',
+    '/mainnet/registry/nick.eth/rasterize',
+  ])('%s', async (path) => {
+    const res = await visit(path, 'document');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    expect(res.headers.get('Content-Security-Policy')).toBe(MEDIA_VIEW_CONTENT_SECURITY_POLICY);
+    expect(res.headers.get('Cache-Control')).toBe('no-store');
+    expect(res.headers.get('Vary')).toBe('Sec-Fetch-Dest');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    const html = await res.text();
+    expect(html).toContain(`<img src="${path}" alt="nick.eth"`);
+    expect(html).not.toContain('<svg'); // the media itself is never in the page
+  });
+
+  it('keeps the query string, escaped', async () => {
+    const html = await (await visit('/mainnet/registry/nick.eth/image?w=500&h=500', 'document')).text();
+    expect(html).toContain('<img src="/mainnet/registry/nick.eth/image?w=500&#38;h=500"');
+  });
+
+  it('titles the page with the decoded name', async () => {
+    const html = await (await visit('/mainnet/avatar/%F0%9F%A6%8A.eth', 'document')).text();
+    expect(html).toContain('<title>\u{1F98A}.eth · Avatar · ENS Metadata</title>');
+    expect(html).toContain('<img src="/mainnet/avatar/%F0%9F%A6%8A.eth"');
+  });
+
+  it.each(['image', 'iframe', 'embed', 'empty', undefined])('Sec-Fetch-Dest: %s gets the media itself', async (dest) => {
+    const res = await visit('/mainnet/registry/nick.eth/image', dest);
+    expect(res.headers.get('Content-Type')).toBe('image/svg+xml');
+    expect(res.headers.get('Vary')).toContain('Sec-Fetch-Dest');
+  });
+
+  it('never puts the page in the edge cache', async () => {
+    const put = vi.fn(async () => {});
+    vi.stubGlobal('caches', { default: { match: vi.fn(async () => undefined), put, delete: vi.fn(async () => true) } });
+    await visit('/mainnet/registry/nick.eth/image', 'document');
+    expect(put).toHaveBeenCalled();
+    for (const [, res] of put.mock.calls as unknown as [unknown, Response][]) {
+      expect(res.headers.get('Content-Type')).toBe('image/svg+xml');
+    }
+  });
+
+  it('leaves a response that is not media as it is', async () => {
+    const res = await visit('/mainnet/avatar/nick.eth/meta', 'document');
+    expect(res.status).toBe(404);
+    expect(res.headers.get('Content-Type')).toMatch(/^application\/json/);
   });
 });
