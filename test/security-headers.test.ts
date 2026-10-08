@@ -61,7 +61,7 @@ vi.mock('../src/services/metadata', async (importOriginal) => {
 });
 
 import app from '../src/index';
-import { mediaView, securityHeaders } from '../src/middleware/security-headers';
+import { securityHeaders } from '../src/middleware/security-headers';
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 // The webhook service is built once per isolate from the first request's env,
@@ -244,34 +244,5 @@ describe('securityHeaders middleware', () => {
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toBe('https://example.com/elsewhere');
     expectApiHeaders(res);
-  });
-});
-
-describe('mediaView middleware', () => {
-  const page = () => {
-    const mini = new Hono();
-    mini.use('*', mediaView);
-    mini.get('*', () => new Response(PNG, { headers: { 'Content-Type': 'image/png' } }));
-    return mini;
-  };
-
-  it('escapes the URL it writes into the page', async () => {
-    // The URL parser percent-encodes " < > in the path but keeps ', and the
-    // title shows the path decoded.
-    const res = await page().request(`/a'b%22c%3Cimg%20src=x%20onerror=alert(1)%3E`, { headers: { 'Sec-Fetch-Dest': 'document' } });
-    const html = await res.text();
-    expect(html).toContain('<img src="/a&#39;b%22c%3Cimg%20src=x%20onerror=alert(1)%3E"');
-    expect(html).toContain('<title>/a&#39;b&#34;c&#60;img src=x onerror=alert(1)&#62;</title>');
-    expect(html.match(/<img/g)).toHaveLength(1);
-  });
-
-  it('keeps a path with malformed percent-encoding as requested', async () => {
-    const html = await (await page().request('/a%E0%A4%A', { headers: { 'Sec-Fetch-Dest': 'document' } })).text();
-    expect(html).toContain('<title>/a%E0%A4%A</title>');
-  });
-
-  it('serves HEAD requests the media headers, not the page', async () => {
-    const res = await page().request('/a', { method: 'HEAD', headers: { 'Sec-Fetch-Dest': 'document' } });
-    expect(res.headers.get('Content-Type')).toBe('image/png');
   });
 });

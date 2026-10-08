@@ -47,7 +47,7 @@ vi.mock('../src/services/metadata', async (importOriginal) => {
 });
 
 import app from '../src/index';
-import { MEDIA_VIEW_CONTENT_SECURITY_POLICY } from '../src/middleware/security-headers';
+import { MEDIA_VIEW_CONTENT_SECURITY_POLICY } from '../src/middleware/media-view';
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const req = (path: string) => app.request(path, undefined, createMockEnv() as unknown as Record<string, unknown>, ctx);
@@ -138,7 +138,7 @@ describe('media opened in a browser tab is shown on a page that draws it with <i
     expect(res.headers.get('Vary')).toBe('Sec-Fetch-Dest');
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
     const html = await res.text();
-    expect(html).toContain(`<img src="${path}" alt="${path}">`);
+    expect(html).toContain(`<img src="${path}" alt="nick.eth"`);
     expect(html).not.toContain('<svg'); // the media itself is never in the page
   });
 
@@ -147,9 +147,9 @@ describe('media opened in a browser tab is shown on a page that draws it with <i
     expect(html).toContain('<img src="/mainnet/registry/nick.eth/image?w=500&#38;h=500"');
   });
 
-  it('titles the page with the decoded path', async () => {
+  it('titles the page with the decoded name', async () => {
     const html = await (await visit('/mainnet/avatar/%F0%9F%A6%8A.eth', 'document')).text();
-    expect(html).toContain('<title>/mainnet/avatar/\u{1F98A}.eth</title>');
+    expect(html).toContain('<title>\u{1F98A}.eth · Avatar · ENS Metadata</title>');
     expect(html).toContain('<img src="/mainnet/avatar/%F0%9F%A6%8A.eth"');
   });
 
