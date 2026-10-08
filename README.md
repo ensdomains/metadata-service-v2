@@ -1,25 +1,17 @@
-<p align="center">
-  <img src=".github/assets/logo.svg" width="88" alt="">
-</p>
-
-<h1 align="center">ENS Metadata Service</h1>
-
-<p align="center">ENS names as NFTs: metadata, cards and avatars, at the edge.</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
+  <img src=".github/assets/banner-light.png" alt="ENS Metadata Service: ENS names as NFTs, with metadata, cards and avatars served from the edge">
+</picture>
 
 <p align="center">
-  <a href="https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/ci.yml"><img src="https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare Workers">
-  <img src="https://img.shields.io/badge/ENS-v1%20%2B%20v2-3889FF" alt="ENS v1 + v2">
-  <img src="https://img.shields.io/badge/networks-mainnet%20%C2%B7%20sepolia-3889FF" alt="Networks: mainnet, sepolia">
+  <a href="https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mdtanrikulu/metadata-service-v2/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Workers">
+  <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/ENS-v1%20%2B%20v2-3889FF?style=flat-square" alt="ENS v1 + v2">
 </p>
 
 <p align="center">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth/image" width="220" alt="nick.eth NFT card">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/vitalik.eth/image" width="220" alt="vitalik.eth NFT card">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/sepolia/registry/test.eth/image" width="220" alt="test.eth NFT card on Sepolia">
-</p>
-
-<p align="center">
+  <a href="#example">Example</a> ·
   <a href="#api">API</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#development">Development</a> ·
@@ -29,13 +21,29 @@
 
 ---
 
-Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and v2 on Ethereum (mainnet + sepolia testnet). The cards above are served live by this service.
+Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and v2 on Ethereum (mainnet + sepolia testnet).
 
 - **ENS v1 & v2 Support**: Native v2 names and legacy v1 names on Ethereum
 - **High Performance**: Cloudflare Workers edge computing with global distribution
 - **Smart Caching**: Edge + KV + R2 caching; the KV and R2 tiers use migration-aware, stale-while-revalidate TTLs, while the per-colo edge tier is a flat 300s cap
 - **Fallback Resilience**: For name lookups, direct chain queries when the indexers are unavailable *or* simply don't know the name, then a stale D1 row as a last resort (the `contract/tokenId` reverse lookup is indexer-only)
 - **SVG Generation**: Canvas-free SVG card generation, with in-Worker PNG rasterization via resvg/HarfBuzz WASM
+
+## Example
+
+```bash
+curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth         # metadata (JSON)
+curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth/image   # NFT card (SVG)
+curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/nick.eth           # avatar image
+```
+
+<p>
+  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth/image" width="200" alt="nick.eth NFT card">
+  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/vitalik.eth/image" width="200" alt="vitalik.eth NFT card">
+  <img src="https://ens-metadata-v2.ensdomains.workers.dev/sepolia/registry/test.eth/image" width="200" alt="test.eth NFT card on Sepolia">
+</p>
+
+<sub>Rendered live by the deployment.</sub>
 
 ## API
 
