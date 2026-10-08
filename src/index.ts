@@ -12,7 +12,7 @@ import {
   rateLimiter,
   requestLogger,
 } from "./middleware/validation";
-import { securityHeaders } from "./middleware/security-headers";
+import { mediaView, securityHeaders } from "./middleware/security-headers";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
 import { canonicalizeName, validateEnsName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
@@ -333,6 +333,10 @@ app.use("*", async (c, next) => {
 // First, so the security headers wrap everything below: other middleware,
 // notFound, onError and edge-cache hits (see middleware/security-headers.ts).
 app.use("*", securityHeaders);
+// Media opened in a browser tab is shown on a page that draws it with <img>
+// (see middleware/security-headers.ts); after securityHeaders, so it wraps the
+// routes, notFound, onError and edge-cache hits.
+app.use("*", mediaView);
 app.use(trimTrailingSlash());
 app.use(
   "*",
