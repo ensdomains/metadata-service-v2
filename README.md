@@ -80,7 +80,16 @@ curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/ethereum.eth 
 
 </details>
 
-Error responses: `400` bad input, `404` unknown name, `410` expired name, `429` rate limited, `503` when the name cannot be resolved because an indexer or RPC tier was unreachable, and `504` after the 30s request timeout. An outage is never reported as a `404`: not on the metadata, image, rasterize and migration-status routes, nor on the avatar, header and avatar-meta routes (see below).
+| Status | Meaning |
+|---|---|
+| `400` | Bad input |
+| `404` | Unknown name |
+| `410` | Expired name |
+| `429` | Rate limited |
+| `503` | The name cannot be resolved because an indexer or RPC tier was unreachable |
+| `504` | No answer within the 30 s request timeout |
+
+An outage is never reported as a `404`: not on the metadata, image, rasterize and migration-status routes, nor on the avatar, header and avatar-meta routes (see below).
 
 <details>
 <summary><b>Avatar, header and card behaviour when an upstream fails</b></summary>
