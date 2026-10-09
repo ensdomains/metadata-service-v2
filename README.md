@@ -32,15 +32,15 @@ Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and 
 ## Example
 
 ```bash
-curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth         # metadata (JSON)
-curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth/image   # NFT card (SVG)
-curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/nick.eth           # avatar image
+curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ethereum.eth         # metadata (JSON)
+curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ethereum.eth/image   # NFT card (SVG)
+curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/ethereum.eth           # avatar image
 ```
 
 <p>
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/nick.eth/image" width="200" alt="nick.eth NFT card">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/vitalik.eth/image" width="200" alt="vitalik.eth NFT card">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/sepolia/registry/test.eth/image" width="200" alt="test.eth NFT card on Sepolia">
+  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ens.eth/image" width="200" alt="ens.eth NFT card">
+  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ethereum.eth/image" width="200" alt="ethereum.eth NFT card">
+  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ensdao.eth/image" width="200" alt="ensdao.eth NFT card">
 </p>
 
 <sub>Rendered live by the deployment.</sub>
