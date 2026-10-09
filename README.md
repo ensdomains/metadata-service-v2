@@ -4,7 +4,7 @@
 </picture>
 
 <p align="center">
-  <a href="https://github.com/mdtanrikulu/metadata-service-v2/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mdtanrikulu/metadata-service-v2/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/ensdomains/metadata-service-v2/actions/workflows/ci.yml"><img src="https://github.com/ensdomains/metadata-service-v2/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Workers">
   <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
   <img src="https://img.shields.io/badge/ENS-v1%20%2B%20v2-3889FF?style=flat-square" alt="ENS v1 + v2">
