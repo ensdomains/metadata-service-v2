@@ -39,13 +39,15 @@ import { isOutageStatus, reportOutage } from './outage-scope';
 /** This service's own public hostnames (see MetadataService's default origin and docs/webhook.md). */
 export const SELF_HOSTNAMES: readonly string[] = [
   'metadata.ens.domains',
-  'ens-metadata-v2.ensdomains.workers.dev',
+  'sepolia.metadata.ens.domains',
+  'ens-metadata.ens-cf.workers.dev',
+  'ens-metadata-stage.ens-cf.workers.dev',
 ];
 
 // Cloudflare serves each version and alias of the worker on a preview URL,
-// `<version or alias>-ens-metadata-v2.ensdomains.workers.dev`, which is not a
+// `<version or alias>-ens-metadata-stage.ens-cf.workers.dev`, which is not a
 // subdomain of its workers.dev host.
-export const SELF_PREVIEW_HOST_SUFFIX = '-ens-metadata-v2.ensdomains.workers.dev';
+export const SELF_PREVIEW_HOST_SUFFIX = '-ens-metadata-stage.ens-cf.workers.dev';
 
 // The host the current request is being served on. The worker can be reached
 // on hosts outside the ones above (another custom domain, a route), and every

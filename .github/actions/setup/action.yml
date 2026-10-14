@@ -4,7 +4,7 @@ description: Set up Node.js + pnpm with a warm store cache and a frozen-lockfile
 inputs:
   node-version:
     description: Node.js version to install.
-    default: "20"
+    default: "24"
 
 runs:
   using: composite

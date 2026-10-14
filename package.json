@@ -7,18 +7,20 @@
   "packageManager": "pnpm@12.5.1",
   "scripts": {
     "db:migrate:local": "wrangler d1 migrations apply ens-metadata-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply ens-metadata-db --remote",
+    "db:migrate:remote": "wrangler d1 migrations apply ens-metadata-db --remote --env=\"\"",
+    "db:migrate:remote:stage": "wrangler d1 migrations apply ens-metadata-stage-db --remote --env stage",
     "setup:local": "node scripts/setup-local-r2.mjs && pnpm run db:migrate:local",
     "dev": "pnpm run setup:local && wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --env=\"\"",
+    "deploy:stage": "wrangler deploy --env stage",
     "test": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
-    "build": "tsc && wrangler deploy --dry-run",
-    "demo": "npx -y serve demo -p 3000"
+    "build": "tsc && wrangler deploy --dry-run --env=\"\" && wrangler deploy --dry-run --env stage",
+    "demo": "pnx -y serve demo -p 3000"
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.0",
@@ -45,9 +47,9 @@
     "eslint": "^9.12.0",
     "typescript": "^5.6.3",
     "vitest": "^2.1.2",
-    "wrangler": "^4.36.0"
+    "wrangler": "^4.149.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

@@ -15,7 +15,7 @@ if (existsSync(rasterizeFontsDir)) {
   const brFiles = readdirSync(rasterizeFontsDir).filter(f => f.endsWith('.br'));
   for (const file of brFiles) {
     execSync(
-      `npx wrangler r2 object put ${BUCKET}/fonts/${file} --file="${resolve(rasterizeFontsDir, file)}" --local`,
+      `pnx wrangler r2 object put ${BUCKET}/fonts/${file} --file="${resolve(rasterizeFontsDir, file)}" --local`,
       { stdio: 'pipe' }
     );
   }
@@ -31,7 +31,7 @@ const satoshiPaths = [
 const satoshiPath = satoshiPaths.find(p => existsSync(p));
 if (satoshiPath) {
   execSync(
-    `npx wrangler r2 object put ${BUCKET}/fonts/Satoshi-Bold.ttf --file="${satoshiPath}" --local`,
+    `pnx wrangler r2 object put ${BUCKET}/fonts/Satoshi-Bold.ttf --file="${satoshiPath}" --local`,
     { stdio: 'pipe' }
   );
   console.log(`[setup-local-r2] Satoshi-Bold.ttf uploaded`);

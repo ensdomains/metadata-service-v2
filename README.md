@@ -32,15 +32,15 @@ Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and 
 ## Example
 
 ```bash
-curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ethereum.eth         # metadata (JSON)
-curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ethereum.eth/image   # NFT card (SVG)
-curl https://ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/ethereum.eth           # avatar image
+curl https://ens-metadata.ens-cf.workers.dev/mainnet/registry/ethereum.eth         # metadata (JSON)
+curl https://ens-metadata.ens-cf.workers.dev/mainnet/registry/ethereum.eth/image   # NFT card (SVG)
+curl https://ens-metadata.ens-cf.workers.dev/mainnet/avatar/ethereum.eth           # avatar image
 ```
 
 <p>
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ens.eth/image" width="200" alt="ens.eth NFT card">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ethereum.eth/image" width="200" alt="ethereum.eth NFT card">
-  <img src="https://ens-metadata-v2.ensdomains.workers.dev/mainnet/registry/ensdao.eth/image" width="200" alt="ensdao.eth NFT card">
+  <img src="https://ens-metadata.ens-cf.workers.dev/mainnet/registry/ens.eth/image" width="200" alt="ens.eth NFT card">
+  <img src="https://ens-metadata.ens-cf.workers.dev/mainnet/registry/ethereum.eth/image" width="200" alt="ethereum.eth NFT card">
+  <img src="https://ens-metadata.ens-cf.workers.dev/mainnet/registry/ensdao.eth/image" width="200" alt="ensdao.eth NFT card">
 </p>
 
 <sub>Rendered live by the deployment.</sub>
@@ -166,27 +166,95 @@ endpoints return `500` locally until `fonts/Satoshi-Bold.ttf` exists in the loca
 
 ## Deployment
 
+Trunk-based, with a stage Worker in front of prod. `main` is always on stage;
+prod is the latest date tag.
+
+| Git event | What runs | Deploys to |
+|---|---|---|
+| Push to a PR branch | Workers Builds: `wrangler preview --env stage`; GitHub: `ci.yml` | a Preview of the stage Worker, URL commented on the PR |
+| Push (merge) to `main` | Workers Builds: stage D1 migrations, then `wrangler deploy --env stage` | `ens-metadata-stage` |
+| Date tag on a `main` commit | GitHub: `release.yml` (tag-on-main check, checks, prod D1 migrations, deploy), after approval on the `prod` environment | `ens-metadata` |
+
+The top level of `wrangler.toml` is prod and `[env.stage]` is stage. Wrangler
+does not inherit vars or bindings into `[env.stage]` or `[env.stage.previews]`,
+so a new var or binding goes into all three (`test/rate-limit.test.ts` checks
+the rate limiters).
+
+### Releasing to prod
+
+Releases are tags named after the UTC date: `YYYY-MM-DD`, then
+`YYYY-MM-DD.2`, `.3`, ... for further releases the same day. Never semver.
+
+```bash
+git switch main && git pull --tags
+DAY=$(date -u +%F); TAG=$DAY; n=1                   # e.g. 2026-10-12
+while git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; do
+  n=$((n + 1)); TAG="$DAY.$n"                       # already released today: next counter
+done
+git tag "$TAG" && git push origin "$TAG"
+```
+
+`release.yml` lists the changes since the previous release tag (one line per
+merged PR, from `scripts/release-notes.mjs`) as the Worker version message and
+as a GitHub release for the tag, created once the deploy succeeds. Preview
+them with `node scripts/release-notes.mjs <tag>`. A tag on a commit that is
+not on `main` is rejected.
+
+### Creating the prod Worker (once)
+
 ```bash
 # Set production secrets (once)
-wrangler secret put MAINNET_RPC_URL
-wrangler secret put SEPOLIA_RPC_URL
-wrangler secret put WEBHOOK_SECRET
+wrangler secret put MAINNET_RPC_URL --env=""
+wrangler secret put SEPOLIA_RPC_URL --env=""
+wrangler secret put WEBHOOK_SECRET --env=""
 
 # Upload font assets to the production R2 bucket (once). Without them /image and
 # /rasterize return 500 on every cache miss and the Worker logs
 # "Font not found in R2: fonts/<file>".
 node scripts/upload-fonts-to-r2.mjs --remote   # rasterize font pack + twemoji → fonts/*.br
-wrangler r2 object put ens-metadata-assets/fonts/Satoshi-Bold.ttf --file=/path/to/Satoshi-Bold.ttf --remote
+wrangler r2 object put ens-metadata-asset-bucket/fonts/Satoshi-Bold.ttf --file=/path/to/Satoshi-Bold.ttf --remote --jurisdiction eu --env=""
 
 # Apply D1 migrations to the remote database (once per new migration)
 pnpm db:migrate:remote
-
-# Deploy to Cloudflare Workers
-pnpm run deploy
 ```
 
-Non-secret production vars (indexer URLs, fallback RPCs, `LOG_LEVEL`,
-`MAX_AVATAR_BYTES`) live in `wrangler.toml` under `[vars]`.
+### Stage and Preview secrets and assets (once)
+
+```bash
+# Secrets are per Worker, and Previews have their own store
+wrangler secret put MAINNET_RPC_URL --env stage                         # stage
+wrangler preview base-config secret put MAINNET_RPC_URL --env stage     # Previews
+# ...and the same for SEPOLIA_RPC_URL and WEBHOOK_SECRET
+
+node scripts/upload-fonts-to-r2.mjs --remote --env stage
+wrangler r2 object put ens-metadata-stage-asset-bucket/fonts/Satoshi-Bold.ttf --file=/path/to/Satoshi-Bold.ttf --remote --jurisdiction eu --env stage
+```
+
+KV namespaces and R2 buckets are created by a Worker's first deploy and
+named `<worker name>-<binding>` (e.g. `ens-metadata-stage-asset-bucket`,
+in the EU jurisdiction); wrangler finds them by name afterwards, so
+`wrangler.toml` holds no ids. D1 databases are created by hand, e.g.
+`wrangler d1 create ens-metadata-stage-db --jurisdiction eu`, since a D1
+binding cannot set a jurisdiction; the deploy attaches by `database_name`.
+
+### Migrations
+
+D1 migrations run automatically before each deploy: stage's in the Workers
+Builds deploy command, prod's in `release.yml`. Keep them additive (add
+columns and tables, drop old ones in a later release) so the running version,
+and any version you roll back to, works against the new schema.
+
+### Rollback and hand deploys
+
+```bash
+wrangler deployments list [--env stage]
+wrangler rollback [<version-id>] [--env stage]   # code only: data is not reverted
+```
+
+After a rollback, fix forward on `main` and cut a new tag. Hand deploys are
+break-glass only (CI down during an incident), from `main`, with that Worker's
+own `CLOUDFLARE_API_TOKEN`: `pnpm deploy:stage`, or
+`pnpm run deploy --tag <the release tag>` for prod, pushing the same git tag.
 
 ## Environment Variables
 

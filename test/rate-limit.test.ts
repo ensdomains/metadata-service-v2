@@ -11,9 +11,21 @@ import type { Env } from '../src/index';
 
 const IP = '203.0.113.7';
 
-// The deployed config, read with wrangler's own parser.
-const readWranglerConfig = () =>
-  unstable_readConfig({ config: path.resolve(__dirname, '../wrangler.toml') }, { hideWarnings: true });
+interface RateLimitDecl {
+  name: string;
+  namespace_id: string;
+  simple: { limit: number; period: number };
+}
+interface DeployedConfig {
+  ratelimits: RateLimitDecl[];
+  previews?: { ratelimits?: RateLimitDecl[] };
+}
+
+// The deployed config, read with wrangler's own parser: the top level (prod)
+// by default, or a named environment. Typed here because wrangler's published
+// types leave the config as `any`.
+const readWranglerConfig = (env?: string): DeployedConfig =>
+  unstable_readConfig({ config: path.resolve(__dirname, '../wrangler.toml'), env }, { hideWarnings: true });
 
 function makeApp() {
   const app = new Hono();
@@ -233,19 +245,34 @@ describe('rateLimiter — webhook bucket', () => {
 });
 
 describe('wrangler.toml [[ratelimits]]', () => {
-  it('declares one binding per bucket, with the same limit and a 60 s period', () => {
-    const config = readWranglerConfig();
+  // Wrangler does not inherit bindings into [env.stage] or its previews, so
+  // each declares the full set itself.
+  const declarations: [string, () => RateLimitDecl[] | undefined][] = [
+    ['prod (top level)', () => readWranglerConfig().ratelimits],
+    ['stage', () => readWranglerConfig('stage').ratelimits],
+    ['stage previews', () => readWranglerConfig('stage').previews?.ratelimits],
+  ];
+
+  it.each(declarations)('%s declares one binding per bucket, with the same limit and a 60 s period', (_, read) => {
+    const ratelimits = read() ?? [];
     const buckets = Object.values(RATE_LIMIT_BUCKETS);
 
-    expect(config.ratelimits).toHaveLength(buckets.length);
+    expect(ratelimits).toHaveLength(buckets.length);
     for (const { binding, limit } of buckets) {
-      const declared = config.ratelimits.find((r) => r.name === binding);
+      const declared = ratelimits.find((r) => r.name === binding);
       expect(declared, binding).toBeDefined();
       expect(declared!.simple).toEqual({ limit, period: 60 });
     }
-    const ids = config.ratelimits.map((r) => r.namespace_id);
+    const ids = ratelimits.map((r) => r.namespace_id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const id of ids) expect(id).toMatch(/^[1-9]\d*$/);
+  });
+
+  it('gives stage its own counters: no namespace_id shared with prod', () => {
+    const prodIds = new Set(readWranglerConfig().ratelimits.map((r) => r.namespace_id));
+    for (const { namespace_id } of readWranglerConfig('stage').ratelimits) {
+      expect(prodIds.has(namespace_id), namespace_id).toBe(false);
+    }
   });
 });
 
