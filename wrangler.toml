@@ -1,4 +1,4 @@
-name = "ens-metadata-v2"
+name = "ens-metadata"
 main = "src/index.ts"
 # Keep this before 2025-09-15: from that date nodejs_compat uses workerd's
 # process v2 (enable_nodejs_process_v2), whose process.release.name is "node",
@@ -7,8 +7,7 @@ main = "src/index.ts"
 # Move past it only once avatars are no longer fetched by the library's own
 # fetcher. The same date also turns on enable_nodejs_fs_module and
 # enable_nodejs_os_module: rasterize-wasm then gets a real fs from its
-# createRequire fallbacks, so check /rasterize too when moving past it. (The
-# workerd in the lockfile, 1.20250924.0, supports dates up to 2025-09-24.)
+# createRequire fallbacks, so check /rasterize too when moving past it.
 compatibility_date = "2025-09-14"
 compatibility_flags = ["nodejs_compat"]
 find_additional_modules = true
@@ -31,65 +30,64 @@ type = "Data"
 globs = ["**/*.br"]
 fallthrough = true
 
-# NOTE: `pnpm run deploy` runs `wrangler deploy` with NO --env, so the DEFAULT
-# (top-level) worker below IS production. Named environments are intentionally
-# omitted: wrangler does not inherit top-level bindings into `[env.*]`, so a
-# `--env production` deploy would ship a worker with no KV/R2/D1. Configure
-# production via the top-level [vars] + bindings here.
+# NOTE: the top-level worker below IS production: `pnpm run deploy` and the
+# release workflow run `wrangler deploy` with NO --env. Stage is `[env.stage]`
+# at the end of this file, deployed as "ens-metadata-stage". Wrangler does
+# not inherit top-level vars or bindings into `[env.*]` (nor into
+# `[env.stage.previews]`), so every var and binding added here must be added
+# to both of those too, or stage silently ships without it.
 
 # KV Namespaces for caching
 [[kv_namespaces]]
 binding = "METADATA_CACHE"
-id = "27a721dd79c94871a8f1e74a5e6d8716"
-preview_id = "metadata_cache_preview"
+preview_id = "ens-metadata-cache-preview"
 
 [[kv_namespaces]]
 binding = "SVG_CACHE"
-id = "9975509b9e614e6cabccd1f9b23553eb"
-preview_id = "svg_cache_preview"
+preview_id = "ens-svg-cache-preview"
 
 # R2 Buckets for asset storage
 [[r2_buckets]]
 binding = "ASSET_BUCKET"
-bucket_name = "ens-metadata-assets"
 preview_bucket_name = "ens-metadata-assets-preview"
+jurisdiction = "eu"
 
 # D1 Database for analytics and state
 [[d1_databases]]
 binding = "DB"
 database_name = "ens-metadata-db"
-database_id = "5b6e560b-4ecf-4e8a-962e-b7d67181c01c"
-preview_database_id = "ens-metadata-database-preview-id"
+preview_database_id = "ens-metadata-db-preview"
 
 # Rate Limiting bindings: one per rate-limit bucket in
 # src/middleware/validation.ts (RATE_LIMIT_BUCKETS), with the same limit per
 # 60s, counted per client IP (CF-Connecting-IP). namespace_id is a positive
 # integer, unique among the rate limiters of the Cloudflare account.
+# NOTE: 7788 are the ASCII codes for MS (Metadata Service)
 [[ratelimits]]
 name = "RATE_LIMITER_DEFAULT"
-namespace_id = "1001"
+namespace_id = "77831001"
 simple = { limit = 120, period = 60 }
 
 [[ratelimits]]
 name = "RATE_LIMITER_BATCH"
-namespace_id = "1002"
+namespace_id = "77831002"
 simple = { limit = 20, period = 60 }
 
 [[ratelimits]]
 name = "RATE_LIMITER_WEBHOOK"
-namespace_id = "1003"
+namespace_id = "77831003"
 # One transaction can emit a burst of events from the one sender, and a 429
 # drops that event's cache purge and warm-up.
 simple = { limit = 600, period = 60 }
 
 [[ratelimits]]
 name = "RATE_LIMITER_RASTERIZE"
-namespace_id = "1004"
+namespace_id = "77831004"
 simple = { limit = 30, period = 60 }
 
 [[ratelimits]]
 name = "RATE_LIMITER_IMAGE"
-namespace_id = "1005"
+namespace_id = "77831005"
 simple = { limit = 60, period = 60 }
 
 
@@ -116,3 +114,144 @@ MAX_AVATAR_BYTES = "26214400"  # 25 MB cap on fetched avatar size (DoS guard)
 # (default 30 days). Off-peak, and off the top of the hour.
 [triggers]
 crons = ["17 4 * * *"]
+
+# ---------------------------------------------------------------------------
+# Stage: `wrangler deploy --env stage` → "ens-metadata-stage". Workers Builds
+# deploys it on every push to main; PR branches get `wrangler preview --env
+# stage`. EVERY var and binding above is redeclared here: nothing is inherited.
+#
+# Stage resources are created by wrangler on the first stage deploy (bindings
+# without an id are auto-provisioned) and found by name afterwards, so no ids
+# are kept here. A provisioned resource is named `<worker name>-<binding>`,
+# e.g. the R2 bucket ens-metadata-stage-asset-bucket. The D1 database is
+# the exception: a D1 binding cannot carry a jurisdiction, so it is created by
+# hand with `wrangler d1 create ens-metadata-stage-db --jurisdiction eu` and the
+# deploy attaches to it by database_name.
+# ---------------------------------------------------------------------------
+
+[env.stage.vars]
+ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
+ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
+MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
+MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
+MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
+SEPOLIA_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth_sepolia"
+SEPOLIA_FALLBACK_RPC_2 = "https://sepolia.drpc.org"
+LOG_LEVEL = "debug"
+MAX_AVATAR_BYTES = "26214400"
+# Secrets, set separately on stage (`wrangler secret put <NAME> --env stage`)
+# and for Previews (`wrangler preview base-config secret put <NAME> --env stage`):
+#   WEBHOOK_SECRET, MAINNET_RPC_URL, SEPOLIA_RPC_URL
+
+# No id: created on the first stage deploy as ens-metadata-stage-metadata-cache
+# and ens-metadata-stage-svg-cache.
+[[env.stage.kv_namespaces]]
+binding = "METADATA_CACHE"
+preview_id = "ens-metadata-cache-preview"
+
+[[env.stage.kv_namespaces]]
+binding = "SVG_CACHE"
+preview_id = "ens-svg-cache-preview"
+
+# Created in the EU jurisdiction on the first stage deploy, as
+# ens-metadata-stage-asset-bucket. The binding must
+# keep `jurisdiction = "eu"` to reach it, and so must `wrangler r2 object`
+# commands (`--jurisdiction eu`).
+[[env.stage.r2_buckets]]
+binding = "ASSET_BUCKET"
+preview_bucket_name = "ens-metadata-stage-assets-preview"
+jurisdiction = "eu"
+
+[[env.stage.d1_databases]]
+binding = "DB"
+database_name = "ens-metadata-stage-db"
+preview_database_id = "ens-metadata-stage-db-preview"
+
+# Same limits as prod; namespace_id must be unique in the account, so stage
+# counts separately from prod.
+[[env.stage.ratelimits]]
+name = "RATE_LIMITER_DEFAULT"
+namespace_id = "77831101"
+simple = { limit = 120, period = 60 }
+
+[[env.stage.ratelimits]]
+name = "RATE_LIMITER_BATCH"
+namespace_id = "77831102"
+simple = { limit = 20, period = 60 }
+
+[[env.stage.ratelimits]]
+name = "RATE_LIMITER_WEBHOOK"
+namespace_id = "77831103"
+simple = { limit = 600, period = 60 }
+
+[[env.stage.ratelimits]]
+name = "RATE_LIMITER_RASTERIZE"
+namespace_id = "77831104"
+simple = { limit = 30, period = 60 }
+
+[[env.stage.ratelimits]]
+name = "RATE_LIMITER_IMAGE"
+namespace_id = "77831105"
+simple = { limit = 60, period = 60 }
+
+# Stage has its own D1, so the retention run only deletes stage data.
+[env.stage.triggers]
+crons = ["17 4 * * *"]
+
+# PR Previews of the stage Worker. Not inherited from stage either: same vars,
+# bound to stage's resources (cache data only, so sharing them is safe).
+[env.stage.previews.vars]
+ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
+ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
+MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
+MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
+MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
+SEPOLIA_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth_sepolia"
+SEPOLIA_FALLBACK_RPC_2 = "https://sepolia.drpc.org"
+LOG_LEVEL = "debug"
+MAX_AVATAR_BYTES = "26214400"
+
+[[env.stage.previews.kv_namespaces]]
+binding = "METADATA_CACHE"
+id = "d7962f42071a49e3b24dd8cee0114f20"
+
+[[env.stage.previews.kv_namespaces]]
+binding = "SVG_CACHE"
+id = "70e8c428c71b4060adc4a7a35b35cf72"
+
+[[env.stage.previews.r2_buckets]]
+binding = "ASSET_BUCKET"
+bucket_name = "ens-metadata-stage-asset-bucket"
+jurisdiction = "eu"
+
+[[env.stage.previews.d1_databases]]
+binding = "DB"
+database_name = "ens-metadata-stage-db"
+database_id = "a5be4382-a4ff-4ff2-a586-e2a437800ef7"
+
+[[env.stage.previews.ratelimits]]
+name = "RATE_LIMITER_DEFAULT"
+namespace_id = "77831101"
+simple = { limit = 120, period = 60 }
+
+[[env.stage.previews.ratelimits]]
+name = "RATE_LIMITER_BATCH"
+namespace_id = "77831102"
+simple = { limit = 20, period = 60 }
+
+[[env.stage.previews.ratelimits]]
+name = "RATE_LIMITER_WEBHOOK"
+namespace_id = "77831103"
+simple = { limit = 600, period = 60 }
+
+[[env.stage.previews.ratelimits]]
+name = "RATE_LIMITER_RASTERIZE"
+namespace_id = "77831104"
+simple = { limit = 30, period = 60 }
+
+[[env.stage.previews.ratelimits]]
+name = "RATE_LIMITER_IMAGE"
+namespace_id = "77831105"
+simple = { limit = 60, period = 60 }

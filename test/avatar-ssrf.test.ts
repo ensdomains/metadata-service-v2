@@ -52,8 +52,8 @@ describe('assertFetchableMediaUrl', () => {
     ['this service, trailing-dot FQDN', 'https://metadata.ens.domains./mainnet/avatar/nick.eth'],
     ['this service, several trailing dots and mixed case', 'https://METADATA.ens.domains../x'],
     ['a subdomain of this service', 'https://a.metadata.ens.domains/x'],
-    ['the workers.dev deployment', 'https://ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/x.eth'],
-    ['the workers.dev deployment, trailing dot', 'https://ens-metadata-v2.ensdomains.workers.dev./x'],
+    ['the workers.dev deployment', 'https://ens-metadata.ens-cf.workers.dev/mainnet/avatar/x.eth'],
+    ['the workers.dev deployment, trailing dot', 'https://ens-metadata.ens-cf.workers.dev./x'],
   ])('blocks %s (anti-recursion)', (_label, url) => {
     expect(blocked(url)).toBe(true);
   });
@@ -320,15 +320,15 @@ describe('media body size cap applies while streaming', () => {
 // redirect limit does not bound recursion across separate requests.
 describe("the worker's other hostnames", () => {
   it.each([
-    'https://1a2b3c4d-ens-metadata-v2.ensdomains.workers.dev/mainnet/avatar/loop.eth',
-    'https://staging-ens-metadata-v2.ensdomains.workers.dev./mainnet/avatar/loop.eth',
-    'https://STAGING-ENS-METADATA-V2.ensdomains.workers.dev/x',
+    'https://1a2b3c4d-ens-metadata-stage.ens-cf.workers.dev/mainnet/avatar/loop.eth',
+    'https://ens-metadata-stage.ens-cf.workers.dev./mainnet/avatar/loop.eth',
+    'https://ENS-METADATA-STAGE.ens-cf.workers.dev/x',
   ])('blocks its preview URL %s', (url) => {
     expect(blocked(url)).toBe(true);
   });
 
   it('does not block other workers on the same workers.dev subdomain', () => {
-    expect(blocked('https://other-worker.ensdomains.workers.dev/a.png')).toBe(false);
+    expect(blocked('https://other-worker.ens-cf.workers.dev/a.png')).toBe(false);
   });
 
   it('blocks the host the current request is served on, and its subdomains', async () => {

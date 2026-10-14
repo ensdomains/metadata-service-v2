@@ -15,7 +15,7 @@ is not tied to it.
 ## Endpoint
 
 ```
-POST https://ens-metadata-v2.ensdomains.workers.dev/webhook
+POST https://ens-metadata.ens-cf.workers.dev/webhook
 Content-Type: application/json
 ```
 
@@ -115,7 +115,7 @@ For the canonicalized `name`, across **both** networks:
 ```js
 import crypto from 'node:crypto';
 
-const URL = 'https://ens-metadata-v2.ensdomains.workers.dev/webhook';
+const URL = 'https://ens-metadata.ens-cf.workers.dev/webhook';
 const SECRET = process.env.WEBHOOK_SECRET; // the 64-char hex secret
 
 const ts = Math.floor(Date.now() / 1000);
@@ -163,7 +163,7 @@ TS=$(date +%s)
 BODY='{"event_type":"NameRenewed","protocol":"v2","name":"anthropic.eth","namehash":null,"block_number":0,"tx_hash":"0x","log_index":0,"contract_address":"0x","data":"{}","timestamp":'"$TS"'}'
 SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$SECRET" | sed 's/^.* //')
 
-curl -X POST https://ens-metadata-v2.ensdomains.workers.dev/webhook \
+curl -X POST https://ens-metadata.ens-cf.workers.dev/webhook \
   -H "content-type: application/json" \
   -H "x-webhook-timestamp: $TS" \
   -H "x-webhook-signature: sha256=$SIG" \

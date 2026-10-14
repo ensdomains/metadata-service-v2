@@ -58,7 +58,7 @@ describe('the ens-avatar resolvers use the guarded fetcher', () => {
 
   it.each([
     'https://metadata.ens.domains../mainnet/avatar/x.eth',
-    'https://ens-metadata-v2.ensdomains.workers.dev../x',
+    'https://ens-metadata.ens-cf.workers.dev../x',
     'http://localhost./meta.json',
     'http://metadata.google.internal./computeMetadata/v1/',
     'http://127.0.0.1../meta.json',
