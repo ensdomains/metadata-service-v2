@@ -29,7 +29,7 @@ export interface V1Contracts {
   resolver: string;
 }
 
-// ENS v2 contracts. Mainnet values are placeholder strings until v2 deploys there
+// ENS v2 contracts. Contracts not yet deployed on a network are placeholder strings
 // (the `!startsWith('0x')` guard in blockchain.ts relies on them not being addresses).
 export interface V2Contracts {
   rootRegistry: string;
@@ -85,12 +85,19 @@ export const NETWORKS = {
       // the current PublicResolver. Only a last-resort fallback default.
       resolver: '0xF29100983E058B709F3D539b0c765937B804AC15',
     },
-    // ENS v2 — not yet deployed on mainnet; placeholder strings (not addresses).
+    // ENS v2 — zigens mainnet manifest (v2_deployment_block 26105294);
+    // root.getSubregistry('eth') verified on-chain 2026-10-15. Placeholder
+    // strings (not addresses) mark what isn't deployed yet.
     v2: {
-      rootRegistry: 'ROOT_REGISTRY_ADDRESS',
-      ethRegistry: 'ETH_REGISTRY_ADDRESS',
-      migrationContract: 'MIGRATION_CONTROLLER_ADDRESS',
-      resolver: 'ENSV2_RESOLVER_ADDRESS',
+      rootRegistry: '0x2553c09be6447beffdb86fa622ad41fb8f77a91e',  // root_registry
+      ethRegistry: '0xf60aba43e1f7f3dab1186ff03b561401c9df85e2',   // eth_registry
+      // Siblings (no runtime consumer): MigrationHelper 0x3760c796fd928d54afaee61174a0f8f37649fbd4,
+      // UnlockedMigrationController 0xab821ca676cf2e0790fa273526a165cfa86aeb64.
+      migrationContract: '0xa19d4d49230200b3e81290a87dd12ea916af7be6', // locked_migration_controller
+      resolver: 'ENSV2_RESOLVER_ADDRESS', // no PublicResolverV2 in the manifest
+      // The mainnet UR (0xeEeE…EeEe, and the manifest's 0xcffd2ae6…) has no
+      // ROOT_REGISTRY() yet (reverts, 2026-10-15), so v2 registries come from
+      // the addresses above. Set the vanity proxy once it serves v2.
       universalResolver: 'UNIVERSAL_RESOLVER_V2_ADDRESS',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',

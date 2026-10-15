@@ -5,9 +5,8 @@ import { MIGRATION_STATUS } from '../src/types';
 // Wiring tests for the signal→status derivation that feeds the (already
 // unit-tested) migration reducer: statusFromSource / classifyName /
 // checkExpiry, exercised through the public MetadataService surface with the
-// fallback + blockchain layers stubbed. Sepolia-focused: mainnet has no v2
-// deployment yet (placeholder contracts), so the v2-dialect paths only run
-// where indexerV2ApiVersion === 'v2'.
+// fallback + blockchain layers stubbed. Sepolia-focused: the v2-dialect paths only run where
+// indexerV2ApiVersion === 'v2' (mainnet has no v2 indexer yet).
 
 const OWNER = '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809';
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -205,7 +204,7 @@ describe('checkExpiry — v2-over-v1 precedence (the fox.eth scenario)', () => {
     await expect(svc.checkExpiry('gone.eth')).rejects.toBeInstanceOf(DomainExpiredError);
   });
 
-  it('v2 not configured (mainnet-style) → v1 registrar is authoritative', async () => {
+  it('v2 not configured → v1 registrar is authoritative', async () => {
     const getV2Registration = vi.fn();
     stub(svc, {
       blockchain: {

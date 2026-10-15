@@ -530,8 +530,8 @@ export class BlockchainService {
   private v2RegistryCache: Map<NetworkName, { root: `0x${string}`; eth: `0x${string}`; fetchedAt: number }> = new Map();
   private static readonly V2_REGISTRY_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-  /** Whether ENS v2 is configured (deployed) on this network. Mainnet keeps
-   *  placeholder strings until v2 ships there, which disables every v2 path. */
+  /** Whether ENS v2 is configured (deployed) on this network. A network with
+   *  only placeholder strings has every v2 path disabled. */
   isV2Configured(network: NetworkName): boolean {
     return ENS_V2_CONTRACTS[network].universalResolver.startsWith('0x')
       || ENS_V2_CONTRACTS[network].ethRegistry.startsWith('0x');
@@ -607,7 +607,7 @@ export class BlockchainService {
   // function silently coercing an outage to `unmigrated`.
   async isUnmigratedName(network: NetworkName, name: string): Promise<boolean> {
     const registries = await this.getV2Registries(network);
-    // v2 not deployed on this network (mainnet placeholders) → everything is v1.
+    // v2 not deployed on this network (placeholders) → everything is v1.
     if (!registries) return true;
 
     // labelhash is case-sensitive but ENS names are not: hash the canonical label,
@@ -770,7 +770,7 @@ export class BlockchainService {
   // an endpoint.
   async getResolverHierarchical(network: NetworkName, name: string): Promise<string> {
     const registries = await this.getV2Registries(network);
-    // v2 not configured on this network (e.g. mainnet placeholders) — nothing to walk.
+    // v2 not configured on this network (placeholders) — nothing to walk.
     if (!registries) return '0x0000000000000000000000000000000000000000';
 
     const labels = name.split('.').reverse(); // ['eth', 'bar', 'foo']

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { encodeAbiParameters, encodeErrorResult, parseAbi, toFunctionSelector } from 'viem';
-import { BlockchainService } from '../src/services/blockchain';
+import { BlockchainService, ENS_V2_CONTRACTS } from '../src/services/blockchain';
 import { ResolverService } from '../src/services/resolver';
 import { namehash } from '../src/utils/ens';
 
@@ -40,6 +40,8 @@ function stubNetwork() {
     const body = JSON.parse(String(init?.body));
     const answer = (req: { id: number; params: [{ to: string; data: string }] }) => {
       const { to, data } = req.params[0];
+      // A v1 name: AVAILABLE (all-zero state) in the v2 .eth registry.
+      if (to.toLowerCase() === ENS_V2_CONTRACTS.mainnet.ethRegistry) return { jsonrpc: '2.0', id: req.id, result: `0x${'00'.repeat(160)}` };
       const fn = SELECTORS[data.slice(0, 10)] ?? data.slice(0, 10);
       rpcCalls.push(fn);
       // The owner's resolver answers every record read with an OffchainLookup
