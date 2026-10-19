@@ -41,7 +41,7 @@ vi.mock('../src/services/rasterize', () => ({
 // only the layout engine and the R2 font are faked.
 vi.mock('adaptive-layout-composer', () => ({
   createDynamicSVGImage: vi.fn(async (opts: { backgroundImageUrl: string | null }) =>
-    `<svg data-avatar="${opts.backgroundImageUrl ? 'yes' : 'no'}"/>`,
+    new TextEncoder().encode(`<svg data-avatar="${opts.backgroundImageUrl ? 'yes' : 'no'}"/>`),
   ),
   initializeFont: vi.fn(async () => {}),
 }));

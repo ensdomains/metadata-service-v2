@@ -1,5 +1,8 @@
 declare module 'adaptive-layout-composer' {
   export interface SVGImageOptions {
+    layout?: 'ens-v2';
+    // ens-v2: trusted SVG fragment drawn as the background when there is no avatar.
+    backgroundMarkup?: string | null;
     width?: number;
     height?: number;
     text?: string;

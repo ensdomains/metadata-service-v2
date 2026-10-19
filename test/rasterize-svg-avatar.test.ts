@@ -71,7 +71,7 @@ vi.mock('../src/services/metadata', async (importOriginal) => {
 });
 
 import app from '../src/index';
-import { ImageGenerationService } from '../src/services/image';
+import { ImageGenerationService, weaveBackground } from '../src/services/image';
 import type { MigrationStatus } from '../src/types';
 
 const svc = new ImageGenerationService();
@@ -106,6 +106,14 @@ describe('ImageGenerationService.forRasterization', () => {
     const stripped = svc.forRasterization(withAvatar, 'a-b.eth');
     expect(stripped).toContain('<rect width="800" height="600" fill="#4ECDC4"/>');
     expect(collapse(stripped)).toBe(collapse(await card('a-b.eth', { size })));
+  });
+
+  it("uses the name's weave on an ENS v2 card, at the custom card size", async () => {
+    const size = { width: 800, height: 600 };
+    const withAvatar = await card('a-b.eth', { avatarBase64: svgB64, avatarMimeType: 'image/svg+xml', migrationStatus: 'migrated', size });
+    const stripped = svc.forRasterization(withAvatar, 'a-b.eth', 'migrated');
+    expect(stripped).toContain(weaveBackground('a-b.eth', 800, 600));
+    expect(collapse(stripped)).toBe(collapse(await card('a-b.eth', { migrationStatus: 'migrated', size })));
   });
 
   it('leaves a card with a raster avatar untouched', async () => {

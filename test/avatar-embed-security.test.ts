@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 // The layout composer interpolates `backgroundImageUrl` into
 // `<image href="...">` without escaping; capture what we hand it.
 vi.mock('adaptive-layout-composer', () => ({
-  createDynamicSVGImage: vi.fn().mockResolvedValue('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+  createDynamicSVGImage: vi.fn().mockResolvedValue(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>')),
   initializeFont: vi.fn(),
 }));
 
@@ -101,6 +101,6 @@ describe('card cache version', () => {
     await cache.getImage('Nick.eth', { name: 'Nick.eth' }, ctx);
     const key = (kv.get as Mock).mock.calls[0][0] as string;
     expect(key.startsWith('svg:nick.eth:')).toBe(true); // webhook invalidation prefix
-    expect(key.endsWith(':v2')).toBe(true);
+    expect(key.endsWith(':v3')).toBe(true);
   });
 });

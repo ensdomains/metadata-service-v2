@@ -99,7 +99,7 @@ function describeEndpoint(url: URL): Endpoint | null {
       subject: decode(identifier),
       summary: png
         ? 'The name’s NFT card, rendered to PNG by this service.'
-        : 'The name’s NFT image, as SVG: the name, its status badge and its avatar.',
+        : 'The name’s NFT image, as SVG: the name over its avatar. Names on ENS v2 get the ENS v2 card, with their etherloom weave when they have no avatar.',
       route: `/{network}/{registryType}/{identifier}/${format}`,
       path: [
         networkParam(decode(network)),
@@ -125,7 +125,7 @@ function describeEndpoint(url: URL): Endpoint | null {
         {
           name: 'status',
           value: url.searchParams.get('status') ?? undefined,
-          doc: '<code>unmigrated</code>, <code>migrated</code> or <code>native</code>: the badge to draw. The name must still exist',
+          doc: '<code>unmigrated</code>, <code>migrated</code> or <code>native</code>: the card to draw (<code>migrated</code> and <code>native</code> get the ENS v2 card). The name must still exist',
         },
       ],
       errors: (

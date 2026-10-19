@@ -8,13 +8,14 @@ import { createMockKV, createMockR2 } from './mocks/hono-env';
 
 // Mock adaptive-layout-composer
 vi.mock('adaptive-layout-composer', () => ({
-  createDynamicSVGImage: vi.fn().mockResolvedValue('<svg>Mock SVG</svg>'),
+  createDynamicSVGImage: vi.fn().mockResolvedValue(new TextEncoder().encode('<svg>Mock SVG</svg>')),
 }));
 
 // Mock ENS utilities
 vi.mock('../src/utils/ens', () => ({
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
+  namehash: () => '0x' + '00'.repeat(32),
   validateEnsName: vi.fn().mockReturnValue(true),
   canonicalizeName: (n: string) => n.toLowerCase(),
 }));
