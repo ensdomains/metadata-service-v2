@@ -393,8 +393,10 @@ describe('RPC endpoints that failed earlier in the request', () => {
     expect(out.value!.urls).toEqual([PRIMARY]);
   });
 
-  // A v1 wrapped name (AVAILABLE on v2) with no resolver.
+  // A v1 wrapped name (AVAILABLE on v2) with no resolver, behind a UR proxy
+  // that doesn't serve v2 yet (as on mainnet before its upgrade).
   const wrappedName = {
+    [at(ENS_V2_CONTRACTS.mainnet.universalResolver, 'ROOT_REGISTRY')]: rpcRevert,
     [at(ENS_V2_CONTRACTS.mainnet.ethRegistry, 'getState')]: answer('getState', { status: 0, expiry: 0n, latestOwner: ZERO, tokenId: 0n, resource: 0n }),
     [at(CONTRACTS.mainnet.registry, 'owner')]: answer('owner', CONTRACTS.mainnet.nameWrapper),
     [at(CONTRACTS.mainnet.registry, 'resolver')]: answer('resolver', ZERO),

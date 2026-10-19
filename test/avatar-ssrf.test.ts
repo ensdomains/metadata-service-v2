@@ -272,7 +272,7 @@ describe('AvatarService uses the guard for every media fetch', () => {
   });
 
   it('passes the self deny list (with trailing-dot forms) and a short timeout to the ens-avatar resolvers', () => {
-    const svc = new AvatarService('https://rpc.invalid', NETWORKS.sepolia.chain, undefined, NETWORKS.sepolia.v2.universalResolver);
+    const svc = new AvatarService('https://rpc.invalid', NETWORKS.sepolia.chain, undefined, '0x' + '11'.repeat(20));
     for (const key of ['resolver', 'legacyResolver'] as const) {
       const opts = (svc as unknown as Record<string, { options?: { urlDenyList?: string[]; timeout?: number } }>)[key].options;
       expect(opts?.urlDenyList).toEqual(expect.arrayContaining(['metadata.ens.domains', 'metadata.ens.domains.']));

@@ -50,10 +50,17 @@ function recordingFetch(handler: (url: string, init?: RequestInit) => Response) 
 
 describe('the ens-avatar resolvers use the guarded fetcher', () => {
   it('is installed on every resolver', () => {
-    const svc = new AvatarService('https://rpc.invalid', mainnet, undefined, '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe');
+    const svc = new AvatarService('https://rpc.invalid', mainnet, undefined, '0x' + '11'.repeat(20));
     const { resolver, legacyResolver } = svc as unknown as Record<string, { fetcher: unknown }>;
     expect(resolver.fetcher).toBe(legacyResolver.fetcher);
     expect(Object.keys(resolver.fetcher as object).sort()).toEqual(['get', 'getArrayBuffer', 'head']);
+  });
+
+  it("keeps no second resolver when the configured UR is viem's default", () => {
+    // The vanity proxy is viem's default on mainnet: a "legacy" lookup would ask
+    // the same contract again on every miss.
+    const svc = new AvatarService('https://rpc.invalid', mainnet, undefined, '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe');
+    expect((svc as unknown as { legacyResolver?: unknown }).legacyResolver).toBeUndefined();
   });
 
   it.each([

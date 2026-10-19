@@ -97,13 +97,12 @@ export const NETWORKS = {
       migrationContract: '0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d', // LockedMigrationController
       // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
       resolver: '0x66f9f566ff2f26309c1bd9134388478a801da3e1', // PublicResolverV2
-      // The vanity proxy (0xeEeE…EeEe) still points at the v1 UR: the DAO
-      // proposal's last call upgrades it to the ManagedUniversalResolverProxy
+      // The vanity proxy still points at the v1 UR until the DAO proposal's last
+      // call upgrades it to the ManagedUniversalResolverProxy
       // 0xcffd2ae680cd110d28739a70922636b5937b022b. Until then ROOT_REGISTRY()
-      // reverts (2026-10-19) and v2 registries come from the addresses above.
-      // Set 0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe once that executes; never
-      // pin the UniversalResolverV2 implementation (see sepolia below).
-      universalResolver: 'UNIVERSAL_RESOLVER_V2_ADDRESS',
+      // reverts, so BlockchainService uses the registries above and walks them
+      // itself; it switches to the proxy on its own once the probe answers.
+      universalResolver: '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
       legacyResolver: '0xF29100983E058B709F3D539b0c765937B804AC15',
