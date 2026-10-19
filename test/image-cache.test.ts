@@ -15,7 +15,6 @@ vi.mock('adaptive-layout-composer', () => ({
 vi.mock('../src/utils/ens', () => ({
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
-  namehash: () => '0x' + '00'.repeat(32),
   validateEnsName: vi.fn().mockReturnValue(true),
   canonicalizeName: (n: string) => n.toLowerCase(),
 }));

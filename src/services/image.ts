@@ -3,10 +3,12 @@ import { createDynamicSVGImage, initializeFont } from "adaptive-layout-composer"
 import { generateIdenticon } from "@ensdomains/etherloom";
 import { ens_beautify } from "@adraffy/ens-normalize";
 import type { MigrationStatus } from "../types";
-import { getCharacterSet, namehash } from "../utils/ens";
+import { namehash } from "viem/ens";
+import { getCharacterSet } from "../utils/ens";
 import { isOnV2 } from "../utils/migration";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
+import type { Rasterizer } from "./rasterize";
 import { isSafeImageType } from "./media-safety";
 import { rasterDimensions } from "./raster-dimensions";
 
@@ -48,6 +50,11 @@ export function weaveBackground(name: string, width: number, height: number): st
   return `<svg width="${width}" height="${height}" viewBox="0 0 ${w} ${h}">${inner}</svg>`
     + `<rect width="${width}" height="${height}" fill="${CARD_COLOR}" opacity="0.5"/>`;
 }
+
+// Names the composer measures exactly by itself: Satoshi's Latin letters and
+// digits, and CJK (drawn 1 em wide). Any other name's label is measured with
+// the rasterizer, with the fonts the PNG is drawn in.
+const BUILT_IN_MEASURE_RE = /^[\p{Script=Latin}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}0-9._$-]*$/u;
 
 // The v1 card's background colour, by character set.
 function v1Background(characterSet: string): string {
@@ -121,9 +128,12 @@ export interface GeneratedImage {
 export class ImageGenerationService {
   private readonly defaultSize = { width: 518, height: 518 };
   private avatarService?: AvatarService;
+  // The isolate's rasterizer (getRasterizer in rasterize.ts), for measuring names.
+  private rasterizer?: (bucket: R2Bucket) => Promise<Rasterizer>;
 
-  constructor(avatarService?: AvatarService) {
+  constructor(avatarService?: AvatarService, rasterizer?: (bucket: R2Bucket) => Promise<Rasterizer>) {
     this.avatarService = avatarService;
+    this.rasterizer = rasterizer;
   }
 
   // Generate SVG image for ENS domain
@@ -163,26 +173,15 @@ export class ImageGenerationService {
         : null;
 
       // Load Satoshi font from R2 (memoized per isolate)
-      let satoshiFontBase64: string | undefined;
+      let satoshi: { buffer: ArrayBuffer; base64: string } | undefined;
       if (bucket) {
-        const satoshi = await getSatoshiFont(bucket);
+        satoshi = await getSatoshiFont(bucket);
         await initializeFont(satoshi.buffer);
-        satoshiFontBase64 = satoshi.base64;
       }
 
-      const text = escapeXmlText(displayName(name));
       const result = isOnV2(migrationStatus)
-        ? await createDynamicSVGImage({
-          layout: 'ens-v2',
-          text,
-          width: size.width,
-          height: size.height,
-          fontFamily: 'Satoshi',
-          fontBase64: satoshiFontBase64,
-          backgroundImageUrl,
-          backgroundMarkup: backgroundImageUrl ? null : weaveBackground(name, size.width, size.height),
-        })
-        : await this.v1Card(name, text, size, backgroundImageUrl, satoshiFontBase64);
+        ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket)
+        : await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64);
 
       return {
         svg: new TextDecoder().decode(result),
@@ -232,6 +231,41 @@ export class ImageGenerationService {
       throw new Error(`Refusing to rasterize the card for ${name}: unexpected embedded data URI`);
     }
     return out;
+  }
+
+  // The ENS v2 card. A name the composer can't measure exactly by itself is
+  // measured with the rasterizer, so its label fits the name in the PNG. If
+  // the rasterizer can't start, the card uses the built-in measurement.
+  private async v2Card(
+    name: string,
+    size: { width: number; height: number },
+    backgroundImageUrl: string | null,
+    satoshi: { buffer: ArrayBuffer; base64: string } | undefined,
+    bucket: R2Bucket | undefined,
+  ): Promise<Uint8Array> {
+    const display = displayName(name);
+    const options = {
+      layout: 'ens-v2' as const,
+      text: escapeXmlText(display),
+      width: size.width,
+      height: size.height,
+      fontFamily: 'Satoshi',
+      fontBase64: satoshi?.base64,
+      backgroundImageUrl,
+      backgroundMarkup: backgroundImageUrl ? null : weaveBackground(name, size.width, size.height),
+    };
+    if (!satoshi || !bucket || !this.rasterizer || BUILT_IN_MEASURE_RE.test(display)) return createDynamicSVGImage(options);
+    try {
+      const rasterizer = await this.rasterizer(bucket);
+      return await createDynamicSVGImage({
+        ...options,
+        // The same buffer every time: the rasterizer parses each primary font once.
+        measureText: (t, fontSize, o) => rasterizer.measureText(t, fontSize, { ...o, primaryFont: satoshi.buffer }),
+      });
+    } catch (error) {
+      console.warn(`[image] measuring ${name} with the rasterizer failed, using the built-in measurement:`, error);
+      return createDynamicSVGImage(options);
+    }
   }
 
   // The v1 card (names not on ENS v2), unchanged: the name over the avatar or

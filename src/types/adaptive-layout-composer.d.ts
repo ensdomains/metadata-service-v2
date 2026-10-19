@@ -3,6 +3,8 @@ declare module 'adaptive-layout-composer' {
     layout?: 'ens-v2';
     // ens-v2: trusted SVG fragment drawn as the background when there is no avatar.
     backgroundMarkup?: string | null;
+    // ens-v2: measures the (unescaped) name instead of the built-in measurement.
+    measureText?: (text: string, fontSize: number, options: { features: string[] }) => number | Promise<number>;
     width?: number;
     height?: number;
     text?: string;

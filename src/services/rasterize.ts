@@ -93,26 +93,37 @@ async function initRasterizer(bucket: R2Bucket): Promise<any> {
   });
 }
 
+export interface Rasterizer {
+  render(svg: string): Promise<ArrayBuffer | Uint8Array>;
+  measureText(text: string, fontSize: number, options: { primaryFont?: ArrayBuffer; features?: string[] }): Promise<number>;
+}
+
+// The isolate's rasterizer, initialized on first use. The card's name label is
+// measured with it too (see ImageGenerationService), so labels match the PNG.
+export async function getRasterizer(bucket: R2Bucket, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Rasterizer> {
+  if (!_rasterizer) {
+    if (!_init || Date.now() - _init.startedAt > RASTERIZER_INIT_STALE_MS) {
+      const init: Promise<unknown> = initRasterizer(bucket).then(
+        (r) => {
+          _rasterizer ??= r;
+          return r;
+        },
+        (err) => {
+          if (_init?.promise === init) _init = null;
+          throw err;
+        },
+      );
+      _init = { promise: init, startedAt: Date.now() };
+      ctx?.waitUntil(init.catch(() => {}));
+    }
+    await _init.promise;
+  }
+  return _rasterizer;
+}
+
 export class RasterizeService {
   async rasterize(svg: string, bucket: R2Bucket, ctx?: Pick<ExecutionContext, 'waitUntil'>): Promise<Uint8Array> {
-    if (!_rasterizer) {
-      if (!_init || Date.now() - _init.startedAt > RASTERIZER_INIT_STALE_MS) {
-        const init: Promise<unknown> = initRasterizer(bucket).then(
-          (r) => {
-            _rasterizer ??= r;
-            return r;
-          },
-          (err) => {
-            if (_init?.promise === init) _init = null;
-            throw err;
-          },
-        );
-        _init = { promise: init, startedAt: Date.now() };
-        ctx?.waitUntil(init.catch(() => {}));
-      }
-      await _init.promise;
-    }
-    const pngBuffer = await _rasterizer.render(svg);
+    const pngBuffer = await (await getRasterizer(bucket, ctx)).render(svg);
     return new Uint8Array(pngBuffer);
   }
 }
