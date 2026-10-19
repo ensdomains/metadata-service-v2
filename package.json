@@ -34,7 +34,7 @@
     "graphql-request": "^7.2.0",
     "harfbuzzjs": "https://github.com/mdtanrikulu/harfbuzzjs/archive/48f2da5ebd3912c9b60188bf39a863e0099e9328.tar.gz",
     "hono": "^4.13.8",
-    "rasterize-wasm": "https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz",
+    "rasterize-wasm": "https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz",
     "tiny-brotli-dec-wasm": "^1.0.1",
     "viem": "^2.21.19"
   },

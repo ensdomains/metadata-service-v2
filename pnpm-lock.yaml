@@ -203,8 +203,8 @@ importers:
         specifier: ^4.13.8
         version: 4.13.8
       rasterize-wasm:
-        specifier: https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz
-        version: https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz
+        specifier: https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz
+        version: https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz
       tiny-brotli-dec-wasm:
         specifier: ^1.0.1
         version: 1.0.1
@@ -2063,9 +2063,9 @@ packages:
   queue-microtask@1.2.3:
     resolution: {integrity: sha512-NuaNSa6flKT5JaSYQzJok04JzTL1CA6aGhv5rfLW3PgqA+M2ChpZQnAC8h8i4ZFkBS8X5RqkDBHA7r4hej3K9A==}
 
-  rasterize-wasm@https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz:
-    resolution: {integrity: sha512-sN2KiRfqL1amckEw8mRQ8C1aatMNWVRP/XqOWCXE0wI1VIoBwpgAW6dKz3amW3eTkZxlqJPMGqKO6MO4qVO74w==, tarball: https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz}
-    version: 1.0.3
+  rasterize-wasm@https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz:
+    resolution: {integrity: sha512-hBJPAfnFEkr58RrnQu5Le1t/Jx8p22vGPGaZnWyun4a2Y0+4tPpYCxb3qflMMxDYm873er5SZDgs5+iklLOyYg==, tarball: https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz}
+    version: 1.1.0
 
   reflect.getprototypeof@1.0.10:
     resolution: {integrity: sha512-00o4I+DVrefhv+nX0ulyi3biSHCPDe+yLv5o/p6d/UVlirijB8E16FtfwSAi4g3tcqrQ4lRAqQSoFEZJehYEcw==}
@@ -4254,7 +4254,7 @@ snapshots:
 
   queue-microtask@1.2.3: {}
 
-  rasterize-wasm@https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz:
+  rasterize-wasm@https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz:
     dependencies:
       '@resvg/resvg-wasm': 2.6.2
       bidi-js: 1.0.3
