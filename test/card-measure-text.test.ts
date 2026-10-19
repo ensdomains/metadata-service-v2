@@ -61,11 +61,6 @@ describe('ENS v2 card label', () => {
     expect(state.calls).toBe(0);
   });
 
-  it('draws a name that does not normalize, as given, on its weave', async () => {
-    // Such names exist on-chain; the weave hashes the labels as given.
-    expect(await card('ab_c.eth')).toContain('>ab_c.eth</text>');
-  });
-
   it('keeps the v1 card off the rasterizer', async () => {
     await card('مرحبا.eth', 'unmigrated');
     expect(state.calls).toBe(0);

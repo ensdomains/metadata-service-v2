@@ -12,7 +12,8 @@ vi.mock('adaptive-layout-composer', () => ({
 }));
 
 // Mock ENS utilities
-vi.mock('../src/utils/ens', () => ({
+vi.mock('../src/utils/ens', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/utils/ens')>()),
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
   validateEnsName: vi.fn().mockReturnValue(true),

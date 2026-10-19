@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ImageGenerationService, weaveBackground } from '../src/services/image';
+import { isNormalized } from '../src/utils/ens';
 
 // Mock adaptive-layout-composer
 vi.mock('adaptive-layout-composer', () => ({
@@ -7,10 +8,15 @@ vi.mock('adaptive-layout-composer', () => ({
 }));
 
 // Mock ENS utilities
-vi.mock('../src/utils/ens', () => ({
+vi.mock('../src/utils/ens', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/ens')>();
+  return {
+  ...actual,
+  isNormalized: vi.fn(actual.isNormalized),
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
-}));
+  };
+});
 
 describe('ImageGenerationService', () => {
   const imageService = new ImageGenerationService();
@@ -148,16 +154,29 @@ describe('ImageGenerationService', () => {
   });
 
   describe('user-content safety (XSS)', () => {
-    it('escapes XML-special characters in the name before it enters the SVG', async () => {
+    it('never puts the text of a name that is not normalized into the SVG', async () => {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');
       const mockCreateSVG = vi.mocked(createDynamicSVGImage);
       mockCreateSVG.mockClear();
 
       await imageService.generateDomainImage({ name: 'evil</text><script>alert(1)</script>.eth' });
 
+      // Shown as its token id, shortened (as v1).
+      expect((mockCreateSVG.mock.calls[0][0] as { text: string }).text).toMatch(/^\[0x[0-9a-f]{4}\.\.\.[0-9a-f]{4}\]\.eth$/);
+    });
+
+    it('escapes XML-special characters in a name it draws (defense in depth)', async () => {
+      const { createDynamicSVGImage } = await import('adaptive-layout-composer');
+      const mockCreateSVG = vi.mocked(createDynamicSVGImage);
+      mockCreateSVG.mockClear();
+      vi.mocked(isNormalized).mockReturnValue(true); // as if it passed normalization
+
+      await imageService.generateDomainImage({ name: 'evil</text><script>alert(1)</script>.eth' });
+      const actual = await vi.importActual<typeof import('../src/utils/ens')>('../src/utils/ens');
+      vi.mocked(isNormalized).mockImplementation(actual.isNormalized);
+
       const passedText = (mockCreateSVG.mock.calls[0][0] as { text: string }).text;
       expect(passedText).not.toMatch(/[<>]/);            // no raw angle brackets reach the SVG markup
-      expect(passedText).not.toContain('<script>');
       expect(passedText).toContain('&lt;script&gt;');    // escaped form instead
     });
 
@@ -191,8 +210,8 @@ describe('ImageGenerationService', () => {
       expect(await textFor(name)).toBe(shown);
     });
 
-    it('draws a name ens_beautify rejects as given', async () => {
-      expect(await textFor('ab_c.eth')).toBe('ab_c.eth');
+    it('shows a name that is not normalized as its token id, shortened (as v1)', async () => {
+      expect(await textFor('ab_c.eth')).toBe('[0xf96b...0db8].eth'); // labelhash('ab_c')
     });
   });
 

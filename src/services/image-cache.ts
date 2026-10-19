@@ -1,6 +1,6 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
 import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type NetworkName } from '../types';
-import { canonicalizeName } from '../utils/ens';
+import { canonicalizeName, isNormalized } from '../utils/ens';
 import type { StorageManager } from '../utils/storage';
 import { toSafeImage } from './media-safety';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';
@@ -46,7 +46,7 @@ const CARD_CACHE_VERSION = 'v3';
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
   // prefix (`svg:${name}:`) still matches across both networks.
-  return `svg:${canonicalizeName(name)}:${network}:${params.migrationStatus}:${params.width}:${params.height}:${CARD_CACHE_VERSION}`;
+  return `svg:${canonicalizeName(name)}:${network}:${params.registryType}:${params.migrationStatus}:${params.width}:${params.height}:${CARD_CACHE_VERSION}`;
 }
 
 export class ImageCacheService {
@@ -79,6 +79,8 @@ export class ImageCacheService {
     executionCtx: ExecutionContext,
   ): Promise<ImageCacheResult> {
     const params: ImageCacheParams = {
+      // The card of a name that isn't normalized shows the route's token id.
+      registryType: options.registryType || 'registry',
       migrationStatus: options.migrationStatus || MIGRATION_STATUS.UNMIGRATED,
       width: options.size?.width || 518,
       height: options.size?.height || 518,
@@ -195,9 +197,11 @@ export class ImageCacheService {
     // Network-qualified avatar cache key: the same name resolves to different
     // avatars per network, so mainnet/sepolia must not share an R2 avatar entry.
     const avatarKey = `${canonicalizeName(name)}:${this.network}`;
+    // As in v1, a name that isn't normalized gets no avatar: don't look it up.
+    const wantsAvatar = isNormalized(name);
 
     // Try R2 avatar cache first
-    if (!avatarBase64) {
+    if (wantsAvatar && !avatarBase64) {
       try {
         const r2Avatar = await this.storage.getAvatar(avatarKey);
         // Re-classify the cached bytes instead of trusting the stored type:
@@ -216,7 +220,7 @@ export class ImageCacheService {
     }
 
     // If still no avatar, resolve via RPC (the expensive path)
-    if (!avatarBase64) {
+    if (wantsAvatar && !avatarBase64) {
       try {
         const avatar = await this.avatarService.getAvatarImage(name);
         if (avatar) {

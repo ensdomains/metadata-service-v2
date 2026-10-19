@@ -1,7 +1,7 @@
 import { namehash } from "@ensdomains/ensjs/utils";
 import { ens_normalize as normalize } from "@adraffy/ens-normalize";
 import { keccak256, numberToHex, pad, toHex } from "viem";
-import { packetToBytes, labelhash } from "viem/ens";
+import { packetToBytes, labelhash, namehash as namehashAsGiven } from "viem/ens";
 
 // Type declaration for Intl.Segmenter
 declare namespace Intl {
@@ -294,6 +294,19 @@ export function getSegmentLength(name: string): number {
 // Check if name is normalized
 export function isNormalized(name: string): boolean {
   return _checkNormalized(name);
+}
+
+// How v1 shows a name that isn't normalized, on its card and in its metadata:
+// the token id, shortened ("[0x1234...abcd].eth"), never the name, which can
+// pass for another name. The token id is the .eth registrar's (the labelhash)
+// for a .eth 2LD on the registry route, else the NameWrapper's (the namehash).
+// Both hash the labels as given: the name doesn't normalize.
+export function maskedName(name: string, registryType: 'registry' | 'namewrapper'): string {
+  const labels = name.split('.');
+  const tokenId = registryType === 'registry' && labels.length === 2 && labels[1] === 'eth'
+    ? labelhash(labels[0])
+    : namehashAsGiven(name);
+  return tokenId.replace(/^(.{0,6}).*(.{4})$/, '[$1...$2].eth');
 }
 
 function _checkNormalized(name: string): boolean {
