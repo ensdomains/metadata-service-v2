@@ -85,19 +85,24 @@ export const NETWORKS = {
       // the current PublicResolver. Only a last-resort fallback default.
       resolver: '0xF29100983E058B709F3D539b0c765937B804AC15',
     },
-    // ENS v2 — zigens mainnet manifest (v2_deployment_block 26105294);
-    // root.getSubregistry('eth') verified on-chain 2026-10-15. Placeholder
-    // strings (not addresses) mark what isn't deployed yet.
+    // ENS v2 — ensdomains/contracts-v2 deployments/mainnet/addresses.md
+    // (deployed 2026-10-18; v2_deployment_block 26105294); root.getSubregistry('eth')
+    // verified on-chain 2026-10-19. Placeholder strings (not addresses) mark
+    // what isn't live yet.
     v2: {
-      rootRegistry: '0x2553c09be6447beffdb86fa622ad41fb8f77a91e',  // root_registry
-      ethRegistry: '0xf60aba43e1f7f3dab1186ff03b561401c9df85e2',   // eth_registry
-      // Siblings (no runtime consumer): MigrationHelper 0x3760c796fd928d54afaee61174a0f8f37649fbd4,
+      rootRegistry: '0x2553c09be6447beffdb86fa622ad41fb8f77a91e',  // RootRegistry
+      ethRegistry: '0xf60aba43e1f7f3dab1186ff03b561401c9df85e2',   // ETHRegistry
+      // Siblings (no runtime consumer): MigrationHelper 0x0b92006fa187b4c98d0a7dfc9d3b918b6d243485,
       // UnlockedMigrationController 0xab821ca676cf2e0790fa273526a165cfa86aeb64.
-      migrationContract: '0xa19d4d49230200b3e81290a87dd12ea916af7be6', // locked_migration_controller
-      resolver: 'ENSV2_RESOLVER_ADDRESS', // no PublicResolverV2 in the manifest
-      // The mainnet UR (0xeEeE…EeEe, and the manifest's 0xcffd2ae6…) has no
-      // ROOT_REGISTRY() yet (reverts, 2026-10-15), so v2 registries come from
-      // the addresses above. Set the vanity proxy once it serves v2.
+      migrationContract: '0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d', // LockedMigrationController
+      // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
+      resolver: '0x66f9f566ff2f26309c1bd9134388478a801da3e1', // PublicResolverV2
+      // The vanity proxy (0xeEeE…EeEe) still points at the v1 UR: the DAO
+      // proposal's last call upgrades it to the ManagedUniversalResolverProxy
+      // 0xcffd2ae680cd110d28739a70922636b5937b022b. Until then ROOT_REGISTRY()
+      // reverts (2026-10-19) and v2 registries come from the addresses above.
+      // Set 0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe once that executes; never
+      // pin the UniversalResolverV2 implementation (see sepolia below).
       universalResolver: 'UNIVERSAL_RESOLVER_V2_ADDRESS',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
