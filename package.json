@@ -28,7 +28,7 @@
     "@ensdomains/ensjs": "^3.7.0",
     "@ensdomains/etherloom": "0.1.0-alpha.4",
     "@resvg/resvg-wasm": "^2.6.2",
-    "adaptive-layout-composer": "https://github.com/ensdomains/adaptive-layout-composer/archive/3688c765f77bf80a7ac85b1086cb55c86c0f6dea.tar.gz",
+    "adaptive-layout-composer": "https://github.com/ensdomains/adaptive-layout-composer/archive/1b98001791ba511266826d8ce890e7bf8a9beca3.tar.gz",
     "bidi-js": "^1.0.3",
     "graphql": "^16.11.0",
     "graphql-request": "^7.2.0",

@@ -49,6 +49,18 @@ describe('ENS v2 card themes in the rendered SVG', () => {
     });
   }
 
+  it("draws a subname one label per line, its parents in the theme's lighter colour", async () => {
+    const theme = cardTheme('#007C20');
+    const { svg } = await service.generateDomainImage({
+      name: 'second.wallet.jeff.eth',
+      migrationStatus: 'native',
+      skipAvatarLookup: true,
+      themeRecord: '#007C20',
+    });
+    const lines = [...svg.matchAll(/<text [^>]*fill="([^"]+)"[^>]*>([^<]*)<\/text>/g)].map((m) => [m[2], m[1]]);
+    expect(lines).toEqual([['second.', theme.accent], ['wallet.', theme.weave], ['jeff.eth', theme.weave]]);
+  });
+
   it("keeps the theme when an avatar it can't rasterize is swapped for the weave", async () => {
     const svgAvatar = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64');
     const { svg } = await service.generateDomainImage({

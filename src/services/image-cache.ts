@@ -42,8 +42,9 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // rendered before the avatar type allowlist could carry markup injected through
 // the avatar's MIME type (WEB-1549). v3: the ENS v2 card design (no status
 // badges, etherloom weave when there is no avatar). v4: the v2 card's theme
-// comes from the name's `theme` record.
-const CARD_CACHE_VERSION = 'v4';
+// comes from the name's `theme` record. v5: subnames one label per line, long
+// names wrapped onto more lines.
+const CARD_CACHE_VERSION = 'v5';
 
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
