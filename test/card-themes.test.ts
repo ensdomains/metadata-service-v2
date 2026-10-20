@@ -61,6 +61,28 @@ describe('ENS v2 card themes in the rendered SVG', () => {
     expect(lines).toEqual([['second.', theme.accent], ['wallet.', theme.weave], ['jeff.eth', theme.weave]]);
   });
 
+  it.each([
+    ['a long single label', 'thisisalongcharacternamethatkeeps.eth'],
+    ['a 255-character label', `${('thisisa255characternamethatkeepsgoing' + 'andgoing'.repeat(30)).slice(0, 252)}ggg.eth`],
+  ])('wraps %s onto lines that keep the name, stack without overlapping and stay on the card', async (_, name) => {
+    const { svg } = await service.generateDomainImage({ name, migrationStatus: 'native', skipAvatarLookup: true });
+    const lines = [...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-size="([\d.]+)px"[^>]*>([^<]*)<\/text>/g)]
+      .map((m) => ({ x: Number(m[1]), y: Number(m[2]), size: Number(m[3]), text: m[4] }));
+    const label = svg.match(/<rect x="74" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="6"/)!.slice(1).map(Number);
+    const [labelY, labelWidth, labelHeight] = label;
+
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.map((l) => l.text).join('')).toBe(name);
+    // Each baseline at least a line's height below the last, so lines never overlap.
+    for (let i = 1; i < lines.length; i++) expect(lines[i].y - lines[i - 1].y).toBeGreaterThanOrEqual(lines[i].size);
+    // In the 550-unit design space: the label stays left of the accent square's
+    // margin, its top below y = 90, and every line inside it.
+    expect(74 + labelWidth + 32).toBeLessThanOrEqual(550 - 12);
+    expect(labelY).toBeGreaterThanOrEqual(90);
+    expect(lines[0].y - lines[0].size).toBeGreaterThanOrEqual(labelY);
+    expect(lines[lines.length - 1].y).toBeLessThanOrEqual(labelY + labelHeight);
+  });
+
   it("keeps the theme when an avatar it can't rasterize is swapped for the weave", async () => {
     const svgAvatar = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64');
     const { svg } = await service.generateDomainImage({
