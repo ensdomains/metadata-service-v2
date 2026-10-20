@@ -155,7 +155,7 @@ describe('ImageGenerationService', () => {
     it("colours the ENS v2 card's logo tile, label, name and square with the name's theme", async () => {
       const theme = cardTheme('test.eth');
       const opts = await composerOptions('native');
-      expect(opts?.colors).toEqual({ accent: theme.accent, label: theme.card, logo: theme.card });
+      expect(opts?.colors).toEqual({ accent: theme.accent, label: theme.card, logo: theme.card, parent: theme.weave });
       expect(weaveBackground('test.eth', 550, 550)).toContain(`fill="${theme.card}" opacity="0.5"`);
     });
 

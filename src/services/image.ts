@@ -36,7 +36,8 @@ const DESIGN_SIZE = 550;
 
 // The Name NFT design's themes: `accent` is the logo tile, name and square; `card`
 // is the background and the label; `weave` is chosen so that, under the veil, the
-// weave's main tone is the design's pattern colour.
+// weave's main tone is the design's pattern colour, and also colours a subname's
+// parent labels (the design's `highlight`).
 const CARD_THEMES = [
   { accent: "#0082BB", card: "#F6FBFD", weave: "#80C4E0" },
   { accent: "#984D1B", card: "#FCFCF2", weave: "#E0B67E" },
@@ -274,7 +275,7 @@ export class ImageGenerationService {
     const theme = cardTheme(name);
     const options = {
       layout: 'ens-v2' as const,
-      colors: { accent: theme.accent, label: theme.card, logo: theme.card },
+      colors: { accent: theme.accent, label: theme.card, logo: theme.card, parent: theme.weave },
       text: escapeXmlText(display),
       width: size.width,
       height: size.height,
