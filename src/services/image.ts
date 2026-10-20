@@ -28,27 +28,39 @@ const DATA_HREF_RE = /<[^<>]*\bhref\s*=\s*["']\s*data:/gi;
 
 // Names on ENS v2 (migrated or native) get the ENS v2 card; v1 names keep the
 // v1 card. The v2 card's no-avatar background, as in its design: the name's etherloom
-// weave on the card colour, under a 50% veil of it. The weave and its colour
-// (one of the etherloom demo's identicon colours) come from the namehash alone,
-// so they stay with the name across transfers. It is drawn in the composer's
-// 550-unit design space, scaled like the rest of the card; the weave's own
-// canvas is rounded up to whole cells, and the nested <svg> crops it.
-const CARD_COLOR = "#F6FBFD";
+// weave on the card colour, under a 50% veil of it. The weave and the card's theme
+// come from the namehash alone, so they stay with the name across transfers. It is
+// drawn in the composer's 550-unit design space, scaled like the rest of the card;
+// the weave's own canvas is rounded up to whole cells, and the nested <svg> crops it.
 const DESIGN_SIZE = 550;
-const WEAVE_COLORS = ["#f03090", "#e8455f", "#ff9800", "#f5b400", "#2e9e5b", "#009688", "#3366cc", "#6c63ff", "#9c27b0", "#1f2937"];
+
+// The Name NFT design's themes: `accent` is the logo tile, name and square; `card`
+// is the background and the label; `weave` is chosen so that, under the veil, the
+// weave's main tone is the design's pattern colour.
+const CARD_THEMES = [
+  { accent: "#0082BB", card: "#F6FBFD", weave: "#80C4E0" },
+  { accent: "#984D1B", card: "#FCFCF2", weave: "#E0B67E" },
+  { accent: "#007C20", card: "#E8F6EF", weave: "#74AC7D" },
+  { accent: "#353535", card: "#FAF9F6", weave: "#C6C7C4" },
+  { accent: "#E72A96", card: "#FDF1F4", weave: "#FFB1D0" },
+] as const;
+
+export function cardTheme(name: string) {
+  return CARD_THEMES[Number(BigInt(namehash(name)) % BigInt(CARD_THEMES.length))];
+}
 
 export function weaveBackground(name: string, width: number, height: number): string {
   const node = namehash(name);
-  const color = WEAVE_COLORS[Number(BigInt(node) % BigInt(WEAVE_COLORS.length))];
+  const theme = cardTheme(name);
   const k = Math.min(width, height) / DESIGN_SIZE;
   const w = +(width / k).toFixed(3);
   const h = +(height / k).toFixed(3);
-  const weave = generateIdenticon({ namehash: node }, color, {
-    width: Math.ceil(w), height: Math.ceil(h), cellSize: 45, padding: 8, backgroundColor: CARD_COLOR,
+  const weave = generateIdenticon({ namehash: node }, theme.weave, {
+    width: Math.ceil(w), height: Math.ceil(h), cellSize: 45, padding: 8, backgroundColor: theme.card,
   });
   const inner = weave.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "");
   return `<svg width="${width}" height="${height}" viewBox="0 0 ${w} ${h}">${inner}</svg>`
-    + `<rect width="${width}" height="${height}" fill="${CARD_COLOR}" opacity="0.5"/>`;
+    + `<rect width="${width}" height="${height}" fill="${theme.card}" opacity="0.5"/>`;
 }
 
 // Names the composer measures exactly by itself: Satoshi's Latin letters and
@@ -259,8 +271,10 @@ export class ImageGenerationService {
     bucket: R2Bucket | undefined,
   ): Promise<Uint8Array> {
     const display = displayName(name);
+    const theme = cardTheme(name);
     const options = {
       layout: 'ens-v2' as const,
+      colors: { accent: theme.accent, label: theme.card, logo: theme.card },
       text: escapeXmlText(display),
       width: size.width,
       height: size.height,

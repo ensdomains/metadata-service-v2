@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ImageGenerationService, weaveBackground } from '../src/services/image';
+import { ImageGenerationService, cardTheme, weaveBackground } from '../src/services/image';
 import { isNormalized } from '../src/utils/ens';
 
 // Mock adaptive-layout-composer
@@ -150,6 +150,18 @@ describe('ImageGenerationService', () => {
     it("draws an ENS v2 name's weave when it has no avatar", async () => {
       const opts = await composerOptions('migrated', { width: 800, height: 600 });
       expect(opts?.backgroundMarkup).toBe(weaveBackground('test.eth', 800, 600));
+    });
+
+    it("colours the ENS v2 card's logo tile, label, name and square with the name's theme", async () => {
+      const theme = cardTheme('test.eth');
+      const opts = await composerOptions('native');
+      expect(opts?.colors).toEqual({ accent: theme.accent, label: theme.card, logo: theme.card });
+      expect(weaveBackground('test.eth', 550, 550)).toContain(`fill="${theme.card}" opacity="0.5"`);
+    });
+
+    it('gives every design theme to some name', () => {
+      const accents = new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map((l) => cardTheme(`${l}.eth`).accent));
+      expect(accents.size).toBe(5);
     });
   });
 
