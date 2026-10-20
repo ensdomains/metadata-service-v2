@@ -50,6 +50,7 @@ vi.mock('../src/services/font', () => ({
 }));
 
 import { MetadataService } from '../src/services/metadata';
+import { AvatarService } from '../src/services/avatar';
 import { WebhookService } from '../src/services/webhook';
 import { MIGRATION_STATUS } from '../src/types';
 import app from '../src/index';
@@ -60,6 +61,8 @@ vi.spyOn(MetadataService.prototype, 'recordMigrationStatus').mockResolvedValue(u
 vi.spyOn(WebhookService.prototype, 'handleWebhook').mockImplementation(
   async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
 );
+// These cards are unthemed: only the avatar lookup is under test.
+vi.spyOn(AvatarService.prototype, 'getTextRecord').mockResolvedValue(null);
 const getAvatar = vi.spyOn(AvatarResolver.prototype, 'getAvatar');
 const getHeader = vi.spyOn(AvatarResolver.prototype, 'getHeader');
 const getMetadata = vi.spyOn(AvatarResolver.prototype, 'getMetadata');

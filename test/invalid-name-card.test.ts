@@ -50,13 +50,14 @@ describe("the card of a name that isn't normalized", () => {
 
   it('never looks the avatar up, and is cached per route', async () => {
     const kv = createMockKV();
-    const avatarService = { getAvatarImage: vi.fn(), getAvatarBase64: vi.fn() };
+    const avatarService = { getAvatarImage: vi.fn(), getAvatarBase64: vi.fn(), getTextRecord: vi.fn() };
     const cache = new ImageCacheService(kv, new StorageManager(createMockR2()), new ImageGenerationService(avatarService as unknown as AvatarService), avatarService as unknown as AvatarService, 'mainnet');
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
     await cache.getImage('ab_c.eth', { name: 'ab_c.eth', registryType: 'registry' }, ctx);
     await cache.getImage('ab_c.eth', { name: 'ab_c.eth', registryType: 'namewrapper' }, ctx);
     expect(avatarService.getAvatarImage).not.toHaveBeenCalled();
     expect(avatarService.getAvatarBase64).not.toHaveBeenCalled();
+    expect(avatarService.getTextRecord).not.toHaveBeenCalled();
     const keys = vi.mocked(kv.get).mock.calls.map((call) => String(call[0]));
     expect(keys[0]).not.toBe(keys[1]);
     expect(keys.every((k) => k.startsWith('svg:ab_c.eth:'))).toBe(true); // webhook invalidation prefix

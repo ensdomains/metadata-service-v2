@@ -126,11 +126,11 @@ describe('ImageGenerationService', () => {
   });
 
   describe('card by migration status', () => {
-    async function composerOptions(migrationStatus: 'unmigrated' | 'migrated' | 'native', size?: { width: number; height: number }) {
+    async function composerOptions(migrationStatus: 'unmigrated' | 'migrated' | 'native', size?: { width: number; height: number }, themeRecord?: string | null) {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');
       const mockCreateSVG = vi.mocked(createDynamicSVGImage);
       mockCreateSVG.mockClear();
-      await imageService.generateDomainImage({ name: 'test.eth', migrationStatus, size });
+      await imageService.generateDomainImage({ name: 'test.eth', migrationStatus, size, themeRecord });
       return mockCreateSVG.mock.calls[0][0];
     }
 
@@ -152,16 +152,30 @@ describe('ImageGenerationService', () => {
       expect(opts?.backgroundMarkup).toBe(weaveBackground('test.eth', 800, 600));
     });
 
-    it("colours the ENS v2 card's logo tile, label, name and square with the name's theme", async () => {
-      const theme = cardTheme('test.eth');
-      const opts = await composerOptions('native');
-      expect(opts?.colors).toEqual({ accent: theme.accent, label: theme.card, logo: theme.card, parent: theme.weave });
-      expect(weaveBackground('test.eth', 550, 550)).toContain(`fill="${theme.card}" opacity="0.5"`);
+    it("colours the ENS v2 card with the theme its `theme` record names", async () => {
+      const garnet = cardTheme('#E72A96');
+      const opts = await composerOptions('native', undefined, '#E72A96');
+      expect(opts?.colors).toEqual({ accent: '#E72A96', label: garnet.card, logo: garnet.card, parent: garnet.weave });
+      expect(opts?.backgroundMarkup).toBe(weaveBackground('test.eth', 518, 518, garnet));
+      expect(opts?.backgroundMarkup).toContain(`fill="${garnet.card}" opacity="0.5"`);
     });
 
-    it('gives every design theme to some name', () => {
-      const accents = new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map((l) => cardTheme(`${l}.eth`).accent));
-      expect(accents.size).toBe(5);
+    it('draws the unthemed card when the name has no theme record', async () => {
+      const opts = await composerOptions('native');
+      expect(opts?.colors).toMatchObject({ accent: '#353535', label: '#FAF9F6', logo: '#FAF9F6' });
+    });
+
+    it("maps theme records as the manager app writes them, aliases included", () => {
+      const accent = (record?: string | null) => cardTheme(record).accent;
+      expect([accent('#0082BB'), accent('#0080BC')]).toEqual(['#0082BB', '#0082BB']);
+      expect(accent('#984D1B')).toBe('#984D1B');
+      expect([accent('#007C20'), accent('#007C23')]).toEqual(['#007C20', '#007C20']);
+      expect([accent('#E72A96'), accent('#ED2496')]).toEqual(['#E72A96', '#E72A96']);
+      expect(accent(' #e72a96 ')).toBe('#E72A96');
+      // Quartz has no card design yet; other values and no record are unthemed.
+      for (const record of ['#02293B', '#112233', 'pink', '', null, undefined]) {
+        expect(accent(record)).toBe('#353535');
+      }
     });
   });
 

@@ -7,16 +7,8 @@ import { ImageGenerationService, cardTheme } from '../src/services/image';
 // A 1×1 PNG, enough for the composer to draw an avatar background.
 const AVATAR = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
-// One name per theme, found the same way the service picks a theme.
-function namePerTheme(): Map<string, string> {
-  const names = new Map<string, string>();
-  for (let i = 0; names.size < 5 && i < 1000; i++) {
-    const name = `theme${i}.eth`;
-    const { accent } = cardTheme(name);
-    if (!names.has(accent)) names.set(accent, name);
-  }
-  return names;
-}
+// Each theme's `theme` record, as the manager app writes it, and no record (unthemed).
+const RECORDS = ['#0082BB', '#984D1B', '#007C20', '#E72A96', null];
 
 function fills(svg: string) {
   return {
@@ -30,30 +22,45 @@ function fills(svg: string) {
 
 describe('ENS v2 card themes in the rendered SVG', () => {
   const service = new ImageGenerationService();
-  const names = namePerTheme();
 
-  it('reaches every theme', () => {
-    expect(names.size).toBe(5);
+  it('has a distinct design theme for each record and for no record', () => {
+    expect(new Set(RECORDS.map((record) => cardTheme(record).accent)).size).toBe(RECORDS.length);
   });
 
   for (const withAvatar of [false, true]) {
-    it(`colours the tile, logo, label, name and square with the name's theme (${withAvatar ? 'avatar' : 'no avatar'})`, async () => {
-      for (const name of names.values()) {
-        const theme = cardTheme(name);
+    it(`colours the tile, logo, label, name and square with the record's theme (${withAvatar ? 'avatar' : 'no avatar'})`, async () => {
+      for (const themeRecord of RECORDS) {
+        const theme = cardTheme(themeRecord);
         const { svg } = await service.generateDomainImage({
-          name,
+          name: 'jeff.eth',
           migrationStatus: 'native',
           skipAvatarLookup: true,
+          themeRecord,
           ...(withAvatar ? { avatarBase64: AVATAR, avatarMimeType: 'image/png' } : {}),
         });
         const f = fills(svg);
-        expect(f, name).toEqual({ tile: theme.accent, logo: theme.card, label: theme.card, name: [theme.accent], square: theme.accent });
+        expect(f, String(themeRecord)).toEqual({ tile: theme.accent, logo: theme.card, label: theme.card, name: [theme.accent], square: theme.accent });
         if (withAvatar) {
-          expect(svg, name).toContain('<image href="data:image/png;base64,');
+          expect(svg, String(themeRecord)).toContain('<image href="data:image/png;base64,');
         } else {
-          expect(svg, name).toContain(`fill="${theme.card}" opacity="0.5"/>`);
+          expect(svg, String(themeRecord)).toContain(`fill="${theme.card}" opacity="0.5"/>`);
         }
       }
     });
   }
+
+  it("keeps the theme when an avatar it can't rasterize is swapped for the weave", async () => {
+    const svgAvatar = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64');
+    const { svg } = await service.generateDomainImage({
+      name: 'jeff.eth',
+      migrationStatus: 'native',
+      skipAvatarLookup: true,
+      themeRecord: '#E72A96',
+      avatarBase64: svgAvatar,
+      avatarMimeType: 'image/svg+xml',
+    });
+    const rasterized = service.forRasterization(svg, 'jeff.eth', 'native');
+    expect(rasterized).not.toContain('<image href="data:');
+    expect(rasterized).toContain(`fill="${cardTheme('#E72A96').card}" opacity="0.5"/>`);
+  });
 });

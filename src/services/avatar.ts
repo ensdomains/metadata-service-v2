@@ -532,6 +532,29 @@ export class AvatarService {
   }
 
   /**
+   * Read a plain text record (e.g. `theme`), trimmed, with the same resolver
+   * fallback, timeout and miss/failure split as the media records.
+   *
+   * @returns the value, or null when the name has no such record.
+   * @throws UpstreamError when the lookup failed.
+   */
+  async getTextRecord(name: string, key: string): Promise<string | null> {
+    let normalized: string;
+    try {
+      normalized = normalize(name);
+    } catch {
+      return null;
+    }
+    return this.withLegacyFallback((resolver) =>
+      this.lookup(async () => {
+        if (!resolver.client) return null;
+        const { record } = await resolver.client.getEnsRecord(normalized, key);
+        return record?.trim() || null;
+      }, `${key} record`, name),
+    );
+  }
+
+  /**
    * Resolve an ENS name's `avatar` record to its metadata object — the v1-parity
    * `/{network}/avatar/{name}/meta` response. For NFT avatars this includes
    * `host_meta` (chain/contract/token) and `is_owner`; for URI avatars it's the

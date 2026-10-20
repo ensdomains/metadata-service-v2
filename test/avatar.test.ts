@@ -652,3 +652,31 @@ describe('AvatarService.getAvatarMeta with the real ens-avatar resolver', () => 
     },
   );
 });
+
+describe('AvatarService.getTextRecord', () => {
+  const withRecord = (record: string | null): FakeResolver => ({ client: fakeClient(record), getMetadata: vi.fn() });
+
+  it('reads the record through the primary resolver, trimmed', async () => {
+    const primary = withRecord('  #E72A96 ');
+    const svc = makeService(primary);
+    await expect(svc.getTextRecord('nick.eth', 'theme')).resolves.toBe('#E72A96');
+    expect(primary.client!.getEnsRecord).toHaveBeenCalledWith('nick.eth', 'theme');
+  });
+
+  it('falls back to the legacy resolver when the primary has no record', async () => {
+    const svc = makeService(withRecord(null), withRecord('#007C20'));
+    await expect(svc.getTextRecord('nick.eth', 'theme')).resolves.toBe('#007C20');
+  });
+
+  it('is null for no record, an empty one, or a name that does not normalize', async () => {
+    await expect(makeService(withRecord(null)).getTextRecord('nick.eth', 'theme')).resolves.toBeNull();
+    await expect(makeService(withRecord('   ')).getTextRecord('nick.eth', 'theme')).resolves.toBeNull();
+    await expect(makeService(withRecord('#E72A96')).getTextRecord('NICK..eth', 'theme')).resolves.toBeNull();
+  });
+
+  it('throws UpstreamError when the lookup fails', async () => {
+    const primary = withRecord(null);
+    primary.client!.getEnsRecord.mockRejectedValue(new HttpRequestError({ url: 'https://rpc.invalid' }));
+    await expect(makeService(primary).getTextRecord('nick.eth', 'theme')).rejects.toBeInstanceOf(UpstreamError);
+  });
+});

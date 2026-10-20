@@ -24,6 +24,7 @@ vi.mock('../src/utils/ens', async (importOriginal) => ({
 vi.mock('../src/services/avatar', () => ({
   AvatarService: vi.fn().mockImplementation(() => ({
     getAvatarImage: vi.fn().mockResolvedValue(null),
+    getTextRecord: vi.fn().mockResolvedValue(null),
     getAvatarBase64: vi.fn().mockResolvedValue(null),
   })),
 }));
@@ -299,6 +300,41 @@ describe('ImageCacheService', () => {
       // One lookup per render: a second one would double the wait on an outage.
       expect(avatarService.getAvatarImage).toHaveBeenCalledTimes(2);
       expect(avatarService.getAvatarBase64).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Theme record', () => {
+    it("looks up a v2 name's `theme` record and draws the card with it", async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      vi.mocked(avatarService.getTextRecord).mockResolvedValueOnce('#E72A96');
+      const generate = vi.spyOn(imageService, 'generateDomainImage');
+
+      await imageCacheService.getImage('nick.eth', { ...defaultOptions, migrationStatus: 'native' }, executionCtx);
+
+      expect(avatarService.getTextRecord).toHaveBeenCalledWith('nick.eth', 'theme');
+      expect(generate.mock.calls[0][0]).toMatchObject({ themeRecord: '#E72A96' });
+    });
+
+    it('does not look the theme up for the v1 card', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+
+      await imageCacheService.getImage('nick.eth', { ...defaultOptions, migrationStatus: 'unmigrated' }, executionCtx);
+
+      expect(avatarService.getTextRecord).not.toHaveBeenCalled();
+    });
+
+    it('does not cache a card whose theme lookup failed, and says so', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      vi.mocked(avatarService.getTextRecord).mockRejectedValueOnce(new Error('RPC timeout'));
+
+      const result = await imageCacheService.getImage('nick.eth', { ...defaultOptions, migrationStatus: 'native' }, executionCtx);
+      await Promise.all(waitUntilPromises);
+
+      expect(result.avatarFailed).toBe(true);
+      expect(svgCacheKv.put).not.toHaveBeenCalled();
     });
   });
 

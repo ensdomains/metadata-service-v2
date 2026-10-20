@@ -28,31 +28,52 @@ const DATA_HREF_RE = /<[^<>]*\bhref\s*=\s*["']\s*data:/gi;
 
 // Names on ENS v2 (migrated or native) get the ENS v2 card; v1 names keep the
 // v1 card. The v2 card's no-avatar background, as in its design: the name's etherloom
-// weave on the card colour, under a 50% veil of it. The weave and the card's theme
-// come from the namehash alone, so they stay with the name across transfers. It is
-// drawn in the composer's 550-unit design space, scaled like the rest of the card;
-// the weave's own canvas is rounded up to whole cells, and the nested <svg> crops it.
+// weave on the card colour, under a 50% veil of it. The weave comes from the
+// namehash alone, so it stays with the name across transfers; its colours are the
+// card's theme. It is drawn in the composer's 550-unit design space, scaled like the
+// rest of the card; the weave's own canvas is rounded up to whole cells, and the
+// nested <svg> crops it.
 const DESIGN_SIZE = 550;
 
 // The Name NFT design's themes: `accent` is the logo tile, name and square; `card`
 // is the background and the label; `weave` is chosen so that, under the veil, the
 // weave's main tone is the design's pattern colour, and also colours a subname's
 // parent labels (the design's `highlight`).
-const CARD_THEMES = [
-  { accent: "#0082BB", card: "#F6FBFD", weave: "#80C4E0" },
-  { accent: "#984D1B", card: "#FCFCF2", weave: "#E0B67E" },
-  { accent: "#007C20", card: "#E8F6EF", weave: "#74AC7D" },
-  { accent: "#353535", card: "#FAF9F6", weave: "#C6C7C4" },
-  { accent: "#E72A96", card: "#FDF1F4", weave: "#FFB1D0" },
-] as const;
+const CARD_THEMES = {
+  lapis: { accent: "#0082BB", card: "#F6FBFD", weave: "#80C4E0" },
+  citrine: { accent: "#984D1B", card: "#FCFCF2", weave: "#E0B67E" },
+  peridot: { accent: "#007C20", card: "#E8F6EF", weave: "#74AC7D" },
+  garnet: { accent: "#E72A96", card: "#FDF1F4", weave: "#FFB1D0" },
+  unthemed: { accent: "#353535", card: "#FAF9F6", weave: "#C6C7C4" },
+} as const;
 
-export function cardTheme(name: string) {
-  return CARD_THEMES[Number(BigInt(namehash(name)) % BigInt(CARD_THEMES.length))];
+export type CardTheme = (typeof CARD_THEMES)[keyof typeof CARD_THEMES];
+
+// A name's theme is its `theme` text record, as the manager app writes it: one
+// of its theme colours or an older alias of one. Quartz (#02293B) has no card
+// design yet, so it, any other value and no record get the unthemed card.
+const THEME_RECORDS: Record<string, keyof typeof CARD_THEMES> = {
+  "#0082BB": "lapis",
+  "#0080BC": "lapis",
+  "#984D1B": "citrine",
+  "#007C20": "peridot",
+  "#007C23": "peridot",
+  "#E72A96": "garnet",
+  "#ED2496": "garnet",
+};
+
+export function cardTheme(themeRecord?: string | null): CardTheme {
+  return CARD_THEMES[THEME_RECORDS[(themeRecord ?? "").trim().toUpperCase()] ?? "unthemed"];
 }
 
-export function weaveBackground(name: string, width: number, height: number): string {
+// The theme a rendered v2 card was drawn in, from its logo tile's colour.
+function themeOfCard(svg: string): CardTheme {
+  const accent = svg.match(/<rect x="12" y="478" width="60" height="60" rx="[\d.]+" fill="(#[0-9A-Fa-f]{6})"\/>/)?.[1];
+  return Object.values(CARD_THEMES).find((theme) => theme.accent === accent) ?? CARD_THEMES.unthemed;
+}
+
+export function weaveBackground(name: string, width: number, height: number, theme: CardTheme = CARD_THEMES.unthemed): string {
   const node = namehash(name);
-  const theme = cardTheme(name);
   const k = Math.min(width, height) / DESIGN_SIZE;
   const w = +(width / k).toFixed(3);
   const h = +(height / k).toFixed(3);
@@ -139,6 +160,9 @@ export interface ImageGenerationOptions {
   // The caller already looked the avatar up (avatarBase64 is unset when the
   // name has none or the lookup failed): do not look it up again.
   skipAvatarLookup?: boolean;
+  // The name's `theme` text record, which picks the ENS v2 card's theme; null or
+  // unset draws the unthemed card. The caller looks it up (see ImageCacheService).
+  themeRecord?: string | null;
 }
 
 export interface GeneratedImage {
@@ -208,7 +232,7 @@ export class ImageGenerationService {
       const result = !isNormalized(name)
         ? await this.invalidNameCard(name, options.registryType ?? 'registry', size, satoshi?.base64)
         : isOnV2(migrationStatus)
-        ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket)
+        ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket, cardTheme(options.themeRecord))
         : await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64);
 
       return {
@@ -249,7 +273,7 @@ export class ImageGenerationService {
           return element;
         }
         return isOnV2(migrationStatus)
-          ? weaveBackground(name, Number(width), Number(height))
+          ? weaveBackground(name, Number(width), Number(height), themeOfCard(svg))
           : `<rect width="${width}" height="${height}" fill="${v1Background(getCharacterSet(name))}"/>`;
       },
     );
@@ -270,9 +294,9 @@ export class ImageGenerationService {
     backgroundImageUrl: string | null,
     satoshi: { buffer: ArrayBuffer; base64: string } | undefined,
     bucket: R2Bucket | undefined,
+    theme: CardTheme,
   ): Promise<Uint8Array> {
     const display = displayName(name);
-    const theme = cardTheme(name);
     const options = {
       layout: 'ens-v2' as const,
       colors: { accent: theme.accent, label: theme.card, logo: theme.card, parent: theme.weave },
@@ -282,7 +306,7 @@ export class ImageGenerationService {
       fontFamily: 'Satoshi',
       fontBase64: satoshi?.base64,
       backgroundImageUrl,
-      backgroundMarkup: backgroundImageUrl ? null : weaveBackground(name, size.width, size.height),
+      backgroundMarkup: backgroundImageUrl ? null : weaveBackground(name, size.width, size.height, theme),
     };
     if (!satoshi || !bucket || !this.rasterizer || BUILT_IN_MEASURE_RE.test(display)) return createDynamicSVGImage(options);
     try {
