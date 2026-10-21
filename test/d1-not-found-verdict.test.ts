@@ -19,7 +19,6 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 
 type Internals = {
   indexerV2: { getDomain: (name: string) => Promise<unknown> };
-  indexerV1: { getDomain: (name: string) => Promise<unknown> };
   blockchain: { executeWithFallback: (...args: unknown[]) => Promise<unknown> };
   d1: unknown;
 };
@@ -27,9 +26,7 @@ type Internals = {
 function makeService(v2: 'miss' | 'down') {
   const svc = new MetadataService(
     {
-      indexerV2Endpoint: 'https://indexer.test/graphql',
-      indexerV2ApiVersion: 'v2',
-      indexerV1Endpoint: 'https://v1.test/subgraph',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network: 'sepolia',
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
@@ -42,10 +39,9 @@ function makeService(v2: 'miss' | 'down') {
   const v2GetDomain = vi
     .spyOn(s.indexerV2, 'getDomain')
     .mockImplementation(async () => {
-      if (v2 === 'down') throw new UpstreamError('zigens 502');
-      return { domain: null, usedFallback: false };
+      if (v2 === 'down') throw new UpstreamError('bigname 502');
+      return { domain: null };
     });
-  vi.spyOn(s.indexerV1, 'getDomain').mockResolvedValue({ domain: null, usedFallback: false });
   // The chain has no owner for the name anywhere (v2 status AVAILABLE, no v1 owner).
   const fakeClient = {
     readContract: async ({ functionName }: { functionName: string }) => {
@@ -110,7 +106,7 @@ describe('D1 last-resort tier vs not-found verdicts', () => {
 });
 
 describe('a malformed primary-index response is not a clean miss', () => {
-  const MALFORMED = ['{}', '{"data":null}', '{"message":"maintenance"}', '{"data":{}}', '{"data":{"domainz":null}}'];
+  const MALFORMED = ['{}', '{"data":null}', '{"message":"maintenance"}', '{"data":{}}', '{"data":{"names":null}}'];
 
   // Replace the stubbed v2 tier with the real indexer transport answering `body`.
   function answerV2With(svc: MetadataService, body: string) {
@@ -131,8 +127,8 @@ describe('a malformed primary-index response is not a clean miss', () => {
   });
 
   it.each(MALFORMED)('HTTP 200 %s with no D1 row: an upstream failure (503), not a 404', async (body) => {
-    // The v1 index and the chain miss cleanly, but the v2 index never said the
-    // name is absent, so the outcome is "unknown", not "not found".
+    // The chain misses cleanly, but the index never said the name is absent,
+    // so the outcome is "unknown", not "not found".
     const { svc, d1 } = makeService('miss');
     d1.getDomain.mockResolvedValue(null);
     answerV2With(svc, body);

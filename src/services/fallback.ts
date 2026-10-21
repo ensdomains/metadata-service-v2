@@ -26,7 +26,7 @@ export interface FallbackConfig {
 
 export interface FallbackResult<T> {
   data: T;
-  source: 'indexerV2' | 'indexerV1' | 'blockchain';
+  source: 'indexerV2' | 'blockchain';
   usedFallback: boolean;
   /**
    * How many tiers were tried before `source` and fell through to the next one
@@ -40,9 +40,8 @@ export interface FallbackResult<T> {
    * True when the primary (v2) indexer tier actually ran to a definitive answer
    * for this request (returned data, or a clean not-found miss). False when the
    * tier was skipped (disabled / circuit-breaker open) or hit an upstream
-   * failure. Callers use this to decide whether "absent from the v2 index" has
-   * been PROVEN: an indexerV1-sourced result with v2Consulted=false must not be
-   * blindly classified `unmigrated` — the name may well be on v2.
+   * failure. Callers use this to decide whether "absent from the index" has
+   * been PROVEN (a definitive not-found).
    */
   v2Consulted: boolean;
 }
@@ -74,8 +73,6 @@ export class FallbackService {
     private indexerV2: IndexerService,
     private blockchain: BlockchainService,
     private resolver: ResolverService,
-    // Optional secondary v1 ENSNode indexer (e.g. sepolia v1 names absent from zigens).
-    private indexerV1?: IndexerService,
     // Optional cross-isolate state for the indexerV2 breaker (see breaker-state.ts).
     private sharedBreaker?: SharedBreakerState,
   ) {}
@@ -84,7 +81,6 @@ export class FallbackService {
   async executeWithFallback<T>(
     operation: {
       indexerV2: () => Promise<T>;
-      indexerV1?: () => Promise<T>;
       blockchain: () => Promise<T>;
     },
     operationName: string
@@ -131,26 +127,6 @@ export class FallbackService {
           this.consecutiveV2Failures = 0;
           console.log(`IndexerV2 ${operationName} miss (${(error as Error)?.message ?? 'not found'}), trying next tier`);
         }
-        fallthroughs++;
-      }
-    }
-
-    // Secondary: v1 ENSNode subgraph (for v1-only names not present in the v2 indexer)
-    if (this.indexerV1 && operation.indexerV1) {
-      try {
-        const data = await operation.indexerV1();
-        return {
-          data,
-          source: 'indexerV1',
-          usedFallback: true,
-          fallthroughs,
-          v2Consulted,
-        };
-      } catch (error) {
-        lastError = error as Error;
-        if (error instanceof UpstreamError) sawUpstream = true;
-        const kind = error instanceof UpstreamError ? 'upstream failure' : 'miss';
-        console.log(`v1 ENSNode ${operationName} ${kind}, falling back to blockchain:`, (error as Error)?.message);
         fallthroughs++;
       }
     }
@@ -258,13 +234,6 @@ export class FallbackService {
           }
           return domain;
         },
-        indexerV1: async () => {
-          const { domain } = await this.indexerV1!.getDomain(name);
-          if (!domain) {
-            throw new NotFoundError(`Domain ${name} not found in indexerV1`);
-          }
-          return domain;
-        },
         blockchain: async () => {
           // resolveName is v2-aware: for a name REGISTERED in the live v2
           // registry it returns the v2 owner/resolver/expiry (a native-v2 name
@@ -325,13 +294,6 @@ export class FallbackService {
           }
           return status;
         },
-        indexerV1: async () => {
-          const { status } = await this.indexerV1!.getMigrationStatus(name);
-          if (!status) {
-            throw new NotFoundError(`Migration status for ${name} not found in indexerV1`);
-          }
-          return status;
-        },
         blockchain: async () => {
           const nameData = await this.resolver.resolveName(
             name,
@@ -370,13 +332,6 @@ export class FallbackService {
           const { hierarchy } = await this.indexerV2.getHierarchy(name);
           if (!hierarchy) {
             throw new NotFoundError(`Hierarchy for ${name} not found in indexerV2`);
-          }
-          return hierarchy;
-        },
-        indexerV1: async () => {
-          const { hierarchy } = await this.indexerV1!.getHierarchy(name);
-          if (!hierarchy) {
-            throw new NotFoundError(`Hierarchy for ${name} not found in indexerV1`);
           }
           return hierarchy;
         },

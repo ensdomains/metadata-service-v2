@@ -56,7 +56,7 @@ type HierarchyInternals = {
 function hierarchyService(kv: ReturnType<typeof strictKv>) {
   const svc = new MetadataService(
     {
-      indexerV2Endpoint: 'https://ensnode.test/graphql',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network: 'mainnet',
       fallbackToBlockchain: true,
       internalCacheEnabled: true,

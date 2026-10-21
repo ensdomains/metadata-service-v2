@@ -12,7 +12,7 @@ import {
 import { ccipBudgetedHttp, guardedCcipRequest } from './ccip-request';
 import { NETWORKS, SUPPORTED_NETWORKS, type NetworkName, type V1Contracts, type V2Contracts } from '../config/networks';
 import type { NetworkConfig } from '../types';
-import { namehash, labelhash, canonicalizeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
+import { namehash, labelhash, canonicalizeName, dnsDecodeName, dnsEncodeName, eth2ldLabel, isEmptyAddress } from '../utils/ens';
 import { RequestDeadlineError, UpstreamError } from './errors';
 import {
   beginRpcAttempt,
@@ -85,6 +85,14 @@ export const NAME_WRAPPER_ABI = [
       { name: 'fuses', type: 'uint32' },
       { name: 'expiry', type: 'uint64' },
     ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    // The DNS-encoded name of every node the NameWrapper has wrapped.
+    inputs: [{ name: '', type: 'bytes32' }],
+    name: 'names',
+    outputs: [{ name: '', type: 'bytes' }],
     stateMutability: 'view',
     type: 'function',
   },
@@ -881,6 +889,22 @@ export class BlockchainService {
     } catch (error) {
       return false;
     }
+  }
+
+  /**
+   * The name the NameWrapper holds under `node` (its token id), or null when
+   * it has never wrapped one. Throws UpstreamError when the chain cannot be read.
+   */
+  async getWrappedName(network: NetworkName, node: `0x${string}`): Promise<string | null> {
+    const { result } = await this.executeWithFallback(network, async (client) => {
+      const wrapper = getContract({
+        address: CONTRACTS[network].nameWrapper as `0x${string}`,
+        abi: NAME_WRAPPER_ABI,
+        client,
+      });
+      return wrapper.read.names([node]);
+    }, { markEndpointFailures: true });
+    return dnsDecodeName(result);
   }
 
   // Enhanced ENS resolution: get expiry date for .eth names (0n = no such

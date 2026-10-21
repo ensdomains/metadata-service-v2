@@ -155,9 +155,8 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
     SVG_CACHE: createMockKV(),
     ASSET_BUCKET: createMockR2(),
     DB: undefined,
-    ENSNODE_MAINNET_URL: 'https://api.ensnode.test/graphql',
-    ENSNODE_SEPOLIA_V2_URL: 'https://zigens.test/graphql',
-    ENSNODE_SEPOLIA_V1_URL: 'https://v1subgraph.test/graphql',
+    BIGNAME_MAINNET_URL: 'https://api.bigname.test',
+    BIGNAME_SEPOLIA_URL: 'https://sepolia.api.bigname.test',
     MAINNET_RPC_URL: 'https://mainnet.test.rpc',
     SEPOLIA_RPC_URL: 'https://sepolia.test.rpc',
     WEBHOOK_ALLOW_UNAUTHENTICATED: 'true', // dev acceptance path — no signature needed

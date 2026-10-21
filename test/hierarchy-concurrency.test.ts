@@ -48,7 +48,7 @@ function makeResolver(behave: (domainName: string) => { delayMs: number; error?:
 function makeService(resolveName: ReturnType<typeof vi.fn>): FallbackService {
   const miss = async () => { throw new NotFoundError('not in index'); };
   const indexer = () => ({ getDomain: vi.fn(miss), getMigrationStatus: vi.fn(miss), getHierarchy: vi.fn(miss) });
-  return new FallbackService(DEFAULT_FALLBACK_CONFIG, indexer() as never, {} as never, { resolveName } as never, indexer() as never);
+  return new FallbackService(DEFAULT_FALLBACK_CONFIG, indexer() as never, {} as never, { resolveName } as never);
 }
 
 // Settles `work` on the fake clock: the levels' delays then order them the

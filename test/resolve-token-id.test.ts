@@ -1,15 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MetadataService } from '../src/services/metadata';
 import { CONTRACTS } from '../src/services/blockchain';
-import { constructEthNameHash, Version, tokenIdToHex } from '../src/utils/ens';
+import { tokenIdToHex } from '../src/utils/ens';
 import { UpstreamError } from '../src/services/errors';
 
 // Mock all heavy dependencies
-vi.mock('graphql-request', () => ({
-  GraphQLClient: vi.fn().mockImplementation(() => ({
-    request: vi.fn(),
-  })),
-}));
+const mockGetWrappedName = vi.fn();
 
 vi.mock('../src/services/blockchain', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/services/blockchain')>();
@@ -18,6 +14,7 @@ vi.mock('../src/services/blockchain', async (importOriginal) => {
     BlockchainService: vi.fn().mockImplementation(() => ({
       getOwner: vi.fn(),
       getResolver: vi.fn(),
+      getWrappedName: mockGetWrappedName,
       healthCheck: vi.fn(),
       // v2 wiring: not configured in this suite (mainnet-style placeholders)
       isV2Configured: vi.fn().mockReturnValue(false),
@@ -48,15 +45,15 @@ vi.mock('../src/services/sync', () => ({
   DEFAULT_SYNC_CONFIG: {},
 }));
 
-// Mock the ensnode service to control getDomainByNamehash / getDomainByTokenId
-const mockGetDomainByNamehash = vi.fn();
+// Mock the indexer service to control the token lookups
+const mockGetEthDomainByLabelhash = vi.fn();
 const mockGetDomainByTokenId = vi.fn();
 const mockIsRegistry = vi.fn();
 vi.mock('../src/services/indexer', () => ({
   IndexerService: vi.fn().mockImplementation(() => ({
     getDomain: vi.fn(),
     getDomains: vi.fn(),
-    getDomainByNamehash: mockGetDomainByNamehash,
+    getEthDomainByLabelhash: mockGetEthDomainByLabelhash,
     getDomainByTokenId: mockGetDomainByTokenId,
     isRegistry: mockIsRegistry,
     getMigrationStatus: vi.fn(),
@@ -105,14 +102,14 @@ describe('MetadataService.resolveTokenId', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    // Default: tokenId-filter lookup misses (matches a zigens deploy without the
-    // filter); individual tests override for filter-hit scenarios.
-    mockGetDomainByTokenId.mockResolvedValue({ domain: null, usedFallback: false });
+    mockGetDomainByTokenId.mockResolvedValue({ domain: null });
+    mockGetEthDomainByLabelhash.mockResolvedValue({ domain: null });
+    mockGetWrappedName.mockResolvedValue(null);
     mockIsRegistry.mockResolvedValue(false);
 
     metadataService = new MetadataService(
       {
-        indexerV2Endpoint: 'https://test-ensnode.example.com/subgraph',
+        indexerV2Endpoint: 'https://api.bigname.test',
         fallbackToBlockchain: false,
         internalCacheEnabled: false,
         d1Enabled: false,
@@ -129,82 +126,65 @@ describe('MetadataService.resolveTokenId', () => {
   describe('BaseRegistrar (registry) tokenId resolution', () => {
     const registrarAddress = CONTRACTS.mainnet.registrar;
 
-    it('should resolve a BaseRegistrar tokenId to an ENS name', async () => {
+    it('reads the .eth name by the labelhash the token id is', async () => {
       // tokenId for "nick" label (decimal representation of labelhash)
       const tokenId = '79233663829379634837589865448569342784712482819484549289560981379859480642508';
-
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'nick.eth', labelName: 'nick' },
-        usedFallback: false,
-      });
+      mockGetEthDomainByLabelhash.mockResolvedValue({ domain: { name: 'nick.eth', labelName: 'nick' } });
 
       const result = await metadataService.resolveTokenId('mainnet', registrarAddress, tokenId);
 
-      expect(result.name).toBe('nick.eth');
-      expect(result.registryType).toBe('registry');
-
-      // Verify the namehash was computed correctly
-      const expectedNamehash = constructEthNameHash(tokenId, Version.v1);
-      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(expectedNamehash);
+      expect(result).toEqual({ name: 'nick.eth', registryType: 'registry' });
+      expect(mockGetEthDomainByLabelhash).toHaveBeenCalledWith(tokenIdToHex(tokenId));
     });
 
     it('should be case-insensitive for contract address', async () => {
-      const tokenId = '12345';
+      mockGetEthDomainByLabelhash.mockResolvedValue({ domain: { name: 'test.eth' } });
 
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'test.eth' },
-        usedFallback: false,
-      });
-
-      // Use uppercase address
-      await metadataService.resolveTokenId('mainnet', registrarAddress.toUpperCase(), tokenId);
-      expect(mockGetDomainByNamehash).toHaveBeenCalled();
+      await metadataService.resolveTokenId('mainnet', registrarAddress.toUpperCase(), '12345');
+      expect(mockGetEthDomainByLabelhash).toHaveBeenCalled();
     });
 
     it('should throw when domain not found for tokenId', async () => {
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: null,
-        usedFallback: false,
-      });
-
       await expect(
         metadataService.resolveTokenId('mainnet', registrarAddress, '999999')
       ).rejects.toThrow('No domain found for tokenId 999999');
+    });
+
+    it('surfaces an indexer outage (503, not a cacheable 404)', async () => {
+      mockGetEthDomainByLabelhash.mockRejectedValue(new UpstreamError('indexer down'));
+      await expect(
+        metadataService.resolveTokenId('mainnet', registrarAddress, '12345')
+      ).rejects.toBeInstanceOf(UpstreamError);
     });
   });
 
   describe('NameWrapper tokenId resolution', () => {
     const nameWrapperAddress = CONTRACTS.mainnet.nameWrapper;
 
-    it('should resolve a NameWrapper tokenId (namehash) to an ENS name', async () => {
-      // NameWrapper tokenId is a namehash (as decimal)
+    it('reads the name the NameWrapper keeps for the node the token id is', async () => {
       const namehashDecimal = '28830309785498705498605967065639339498816498484392297776506587544614029665578';
-      const expectedHex = tokenIdToHex(namehashDecimal);
-
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'vitalik.eth' },
-        usedFallback: false,
-      });
+      mockGetWrappedName.mockResolvedValue('vitalik.eth');
 
       const result = await metadataService.resolveTokenId('mainnet', nameWrapperAddress, namehashDecimal);
 
-      expect(result.name).toBe('vitalik.eth');
-      expect(result.registryType).toBe('namewrapper');
-      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(expectedHex);
+      expect(result).toEqual({ name: 'vitalik.eth', registryType: 'namewrapper' });
+      expect(mockGetWrappedName).toHaveBeenCalledWith('mainnet', tokenIdToHex(namehashDecimal));
+      expect(mockGetEthDomainByLabelhash).not.toHaveBeenCalled();
     });
 
     it('should handle hex tokenId for NameWrapper', async () => {
       const namehashHex = '0x3fce7d1364a893e213bc4571b6eb3ea1ba863783bfaf328185af16547c5cebea';
-
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'wrapped.eth' },
-        usedFallback: false,
-      });
+      mockGetWrappedName.mockResolvedValue('wrapped.eth');
 
       const result = await metadataService.resolveTokenId('mainnet', nameWrapperAddress, namehashHex);
 
-      expect(result.name).toBe('wrapped.eth');
-      expect(result.registryType).toBe('namewrapper');
+      expect(result).toEqual({ name: 'wrapped.eth', registryType: 'namewrapper' });
+    });
+
+    it('404s a node the NameWrapper never wrapped', async () => {
+      await expect(
+        metadataService.resolveTokenId('mainnet', nameWrapperAddress, '12345')
+      ).rejects.toThrow('No domain found for tokenId 12345');
     });
   });
 
@@ -223,177 +203,75 @@ describe('MetadataService.resolveTokenId', () => {
   describe('v2 ETHRegistry (sepolia)', () => {
     // The configured last-known live registry (config/networks.ts sepolia.v2.ethRegistry)
     const V2_ETH_REGISTRY = '0x657ea849311d3d5823348dded7c2aaafb3ede09e';
+    // fox.eth labelhash with low 32 bits = version 1
+    const VERSIONED = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
 
-    it('recognizes the v2 ETHRegistry address and resolves a namehash-form tokenId', async () => {
-      // Some consumers pass namehash-form ids; zigens domain(id:) resolves those.
-      const hash = '0x54cb177469278d1e8e843f0d60633cb4b038af8c4c5be8993161e87ca4a50b4c'; // namehash(fox.eth)
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'fox.eth' },
-        usedFallback: false,
-      });
+    it('resolves a native versioned tokenId via the indexer, scoped to the registry', async () => {
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'fox.eth' } });
 
-      const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash);
+      const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, VERSIONED);
 
-      expect(result.name).toBe('fox.eth');
-      expect(result.registryType).toBe('registry');
-      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(hash);
+      expect(result).toEqual({ name: 'fox.eth', registryType: 'registry' });
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(VERSIONED, V2_ETH_REGISTRY);
     });
 
-    it('resolves a native versioned tokenId via the indexer tokenId filter', async () => {
-      // fox.eth labelhash with low 32 bits = version 1
-      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
-      mockGetDomainByTokenId.mockResolvedValue({
-        domain: { name: 'fox.eth' },
-        usedFallback: false,
-      });
+    it('converts a decimal-form (marketplace) tokenId to hex before the lookup', async () => {
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'fox.eth' } });
 
-      const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, versionedTokenId);
+      await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, BigInt(VERSIONED).toString(10));
 
-      expect(result.name).toBe('fox.eth');
-      expect(result.registryType).toBe('registry');
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedTokenId, V2_ETH_REGISTRY);
-      // The filter hit short-circuits — no namehash-form fallback query.
-      expect(mockGetDomainByNamehash).not.toHaveBeenCalled();
-    });
-
-    it('converts a decimal-form (marketplace) tokenId to hex before the filter lookup', async () => {
-      const versionedHex = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
-      const decimal = BigInt(versionedHex).toString(10);
-      mockGetDomainByTokenId.mockResolvedValue({
-        domain: { name: 'fox.eth' },
-        usedFallback: false,
-      });
-
-      const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, decimal);
-
-      expect(result.name).toBe('fox.eth');
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedHex, V2_ETH_REGISTRY);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(VERSIONED, V2_ETH_REGISTRY);
     });
 
     it.each([
-      ['0X5A95EE1DC2A184B02AF4E3B4DEAE1B95AACBF29F651487D77E4A9B3C00000001', '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001'],
+      [VERSIONED.toUpperCase(), VERSIONED],
       ['0x1', `0x${'0'.repeat(63)}1`],
-    ])('looks %s up in canonical form (lowercase, 64 hex digits) in both lookups', async (written, canonical) => {
-      mockGetDomainByNamehash.mockResolvedValue({ domain: { name: 'fox.eth' }, usedFallback: false });
+    ])('looks %s up in canonical form (lowercase, 64 hex digits)', async (written, canonical) => {
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'fox.eth' } });
 
       await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, written);
 
       expect(mockGetDomainByTokenId).toHaveBeenCalledWith(canonical, V2_ETH_REGISTRY);
-      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(canonical);
     });
 
-    it('falls through to the namehash path when the filter lookup misses (filter not deployed)', async () => {
-      const hash = '0x54cb177469278d1e8e843f0d60633cb4b038af8c4c5be8993161e87ca4a50b4c'; // namehash(fox.eth)
-      mockGetDomainByTokenId.mockResolvedValue({ domain: null, usedFallback: false });
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'fox.eth' },
-        usedFallback: false,
-      });
+    it('scopes the lookup to the registry, lowercased', async () => {
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'fox.eth' } });
 
-      const result = await metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash);
+      await metadataService.resolveTokenId('sepolia', '0x657eA849311d3D5823348ddEd7C2AaAFb3EDE09E', VERSIONED);
 
-      expect(result.name).toBe('fox.eth');
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(hash, V2_ETH_REGISTRY);
-      expect(mockGetDomainByNamehash).toHaveBeenCalledWith(hash);
+      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(VERSIONED, V2_ETH_REGISTRY);
     });
 
-    it('surfaces an outage (UpstreamError, not 404) when the filter and namehash lookups are both down', async () => {
-      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
-      mockGetDomainByTokenId.mockRejectedValue(new UpstreamError('indexer down'));
-      mockGetDomainByNamehash.mockRejectedValue(new UpstreamError('indexer down'));
-
+    it('404s a token the indexer cannot name', async () => {
       await expect(
-        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, versionedTokenId)
-      ).rejects.toBeInstanceOf(UpstreamError);
-    });
-
-    it('scopes the lookup to the registry in the URL, lowercased', async () => {
-      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
-      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'fox.eth' }, usedFallback: false });
-
-      await metadataService.resolveTokenId('sepolia', '0x657eA849311d3D5823348ddEd7C2AaAFb3EDE09E', versionedTokenId);
-
-      expect(mockGetDomainByTokenId).toHaveBeenCalledWith(versionedTokenId, V2_ETH_REGISTRY);
-    });
-
-    it('does not serve a subname for a namehash-form id: an ETHRegistry token is a name directly under eth', async () => {
-      const hash = '0x' + 'ab'.repeat(32); // namehash of a subname
-      mockGetDomainByNamehash.mockResolvedValue({ domain: { name: 'jamon.sepolia.is-a-capybara.eth' }, usedFallback: false });
-
-      await expect(
-        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash)
+        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, VERSIONED)
       ).rejects.toThrow('No domain found for tokenId');
     });
 
-    it('surfaces an outage of the token lookup when the namehash path answers with a miss (503, not 404)', async () => {
-      // domain(id:) resolves only namehashes, so its miss says nothing about a native id.
-      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000001';
-      mockGetDomainByTokenId.mockRejectedValue(new UpstreamError('indexer down'));
-      mockGetDomainByNamehash.mockResolvedValue({ domain: null, usedFallback: false });
+    it('does not serve a subname: an ETHRegistry token is a name directly under eth', async () => {
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'jamon.sepolia.is-a-capybara.eth' } });
 
       await expect(
-        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, versionedTokenId)
+        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, VERSIONED)
+      ).rejects.toThrow('No domain found for tokenId');
+    });
+
+    it('surfaces an outage (UpstreamError, not 404)', async () => {
+      mockGetDomainByTokenId.mockRejectedValue(new UpstreamError('indexer down'));
+
+      await expect(
+        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, VERSIONED)
       ).rejects.toBeInstanceOf(UpstreamError);
     });
 
-    describe('as deployed on sepolia: v2 configured, with the v1 subgraph', () => {
-      let svc: MetadataService;
+    it('takes the ETHRegistry path, not the registry lookup, where v2 is configured', async () => {
+      (metadataService as unknown as { blockchain: { isV2Configured: ReturnType<typeof vi.fn> } })
+        .blockchain.isV2Configured.mockReturnValue(true);
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'fox.eth' } });
 
-      beforeEach(() => {
-        svc = new MetadataService(
-          {
-            indexerV2Endpoint: 'https://test-ensnode.example.com/subgraph',
-            indexerV1Endpoint: 'https://v1.test/subgraph',
-            fallbackToBlockchain: false,
-            internalCacheEnabled: false,
-            d1Enabled: false,
-          },
-          mockKV as unknown as KVNamespace,
-          { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
-          mockD1 as unknown as D1Database,
-        );
-        (svc as unknown as { blockchain: { isV2Configured: ReturnType<typeof vi.fn> } })
-          .blockchain.isV2Configured.mockReturnValue(true);
-      });
-
-      it('takes the ETHRegistry path, not the registry lookup: a namehash-form id still resolves', async () => {
-        const hash = '0x54cb177469278d1e8e843f0d60633cb4b038af8c4c5be8993161e87ca4a50b4c'; // namehash(fox.eth)
-        mockGetDomainByNamehash.mockResolvedValue({ domain: { name: 'fox.eth' }, usedFallback: false });
-
-        await expect(svc.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash))
-          .resolves.toEqual({ name: 'fox.eth', registryType: 'registry' });
-        expect(mockIsRegistry).not.toHaveBeenCalled();
-      });
-
-      it('does not serve a subname the v1 subgraph names for a namehash-form id', async () => {
-        const hash = '0x' + 'ab'.repeat(32); // namehash of a subname
-        mockGetDomainByNamehash
-          .mockResolvedValueOnce({ domain: null, usedFallback: false }) // v2
-          .mockResolvedValueOnce({ domain: { name: 'sub.foo.eth' }, usedFallback: false }); // v1
-
-        await expect(svc.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash)).rejects.toThrow('No domain found for tokenId');
-        expect(mockGetDomainByNamehash).toHaveBeenCalledTimes(2);
-      });
-
-      it('rethrows the v2 outage when only the v1 subgraph answers, with a subname', async () => {
-        const hash = '0x' + 'ab'.repeat(32);
-        mockGetDomainByNamehash
-          .mockRejectedValueOnce(new UpstreamError('indexer down')) // v2
-          .mockResolvedValueOnce({ domain: { name: 'sub.foo.eth' }, usedFallback: false }); // v1
-
-        await expect(svc.resolveTokenId('sepolia', V2_ETH_REGISTRY, hash)).rejects.toBeInstanceOf(UpstreamError);
-      });
-    });
-
-    it('404s (NotFound, not "unknown contract") for a native v2 tokenId that no indexer can reverse', async () => {
-      // The ERC1155 tokenId is the labelhash with its low 32 bits replaced by the
-      // token version — the real labelhash is unrecoverable, so the indexer misses.
-      const versionedTokenId = '0x5a95ee1dc2a184b02af4e3b4deae1b95aacbf29f651487d77e4a9b3c00000000';
-      mockGetDomainByNamehash.mockResolvedValue({ domain: null, usedFallback: false });
-
-      await expect(
-        metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, versionedTokenId)
-      ).rejects.toThrow('No domain found for tokenId');
+      await expect(metadataService.resolveTokenId('sepolia', V2_ETH_REGISTRY, VERSIONED))
+        .resolves.toEqual({ name: 'fox.eth', registryType: 'registry' });
+      expect(mockIsRegistry).not.toHaveBeenCalled();
     });
   });
 
@@ -409,7 +287,7 @@ describe('MetadataService.resolveTokenId', () => {
     });
 
     it('names a token of a registry the indexer knows, scoped to that registry', async () => {
-      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'jamon.sepolia.is-a-capybara.eth' }, usedFallback: false });
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'jamon.sepolia.is-a-capybara.eth' } });
 
       const result = await metadataService.resolveTokenId(
         'sepolia',
@@ -420,8 +298,6 @@ describe('MetadataService.resolveTokenId', () => {
       expect(result).toEqual({ name: 'jamon.sepolia.is-a-capybara.eth', registryType: 'registry' });
       expect(mockIsRegistry).toHaveBeenCalledWith(SUBREGISTRY);
       expect(mockGetDomainByTokenId).toHaveBeenCalledWith(TOKEN_ID, SUBREGISTRY);
-      // No unscoped namehash lookup: a random id must not name an unrelated domain.
-      expect(mockGetDomainByNamehash).not.toHaveBeenCalled();
     });
 
     it('404s an address the indexer knows no registry at, without a token lookup', async () => {
@@ -437,11 +313,10 @@ describe('MetadataService.resolveTokenId', () => {
       await expect(
         metadataService.resolveTokenId('sepolia', SUBREGISTRY, TOKEN_ID)
       ).rejects.toThrow('No domain found for tokenId');
-      expect(mockGetDomainByNamehash).not.toHaveBeenCalled();
     });
 
     it('404s a root registry token: a top-level name is not served', async () => {
-      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'eth' }, usedFallback: false });
+      mockGetDomainByTokenId.mockResolvedValue({ domain: { name: 'eth' } });
 
       await expect(
         metadataService.resolveTokenId('sepolia', SUBREGISTRY, TOKEN_ID)
@@ -461,18 +336,11 @@ describe('MetadataService.resolveTokenId', () => {
 
   describe('Sepolia network', () => {
     it('should use sepolia contract addresses', async () => {
-      const sepoliaRegistrar = CONTRACTS.sepolia.registrar;
-      const tokenId = '12345';
+      mockGetEthDomainByLabelhash.mockResolvedValue({ domain: { name: 'test.eth' } });
 
-      mockGetDomainByNamehash.mockResolvedValue({
-        domain: { name: 'test.eth' },
-        usedFallback: false,
-      });
+      const result = await metadataService.resolveTokenId('sepolia', CONTRACTS.sepolia.registrar, '12345');
 
-      const result = await metadataService.resolveTokenId('sepolia', sepoliaRegistrar, tokenId);
-
-      expect(result.name).toBe('test.eth');
-      expect(result.registryType).toBe('registry');
+      expect(result).toEqual({ name: 'test.eth', registryType: 'registry' });
     });
 
     it('should reject unknown contract address on sepolia', async () => {

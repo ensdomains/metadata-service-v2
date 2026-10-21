@@ -6,8 +6,7 @@ import { MIGRATION_STATUS } from '../src/types';
 // unit-tested) migration reducer: statusFromSource / classifyName /
 // checkExpiry, exercised through the public MetadataService surface with the
 // fallback + blockchain layers stubbed. Sepolia-focused: mainnet has no v2
-// deployment yet (placeholder contracts), so the v2-dialect paths only run
-// where indexerV2ApiVersion === 'v2'.
+// deployment yet (placeholder contracts).
 
 const OWNER = '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809';
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -15,9 +14,7 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 function makeSepoliaService(): MetadataService {
   return new MetadataService(
     {
-      indexerV2Endpoint: 'https://zigens.test/graphql',
-      indexerV2ApiVersion: 'v2',
-      indexerV1Endpoint: 'https://ensnode-v1.test/subgraph',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network: 'sepolia',
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
@@ -41,7 +38,7 @@ function stub(svc: MetadataService, overrides: Partial<Priv>): Priv {
 }
 
 function fallbackReturning(result: {
-  source: 'indexerV2' | 'indexerV1' | 'blockchain';
+  source: 'indexerV2' | 'blockchain';
   v2Consulted: boolean;
   data: Record<string, unknown>;
 }) {
@@ -97,26 +94,21 @@ describe('statusFromSource wiring (via getMigrationStatus)', () => {
     expect((await svc.getMigrationStatus('legacy.eth')).status).toBe(MIGRATION_STATUS.UNMIGRATED);
   });
 
-  it('v1-subgraph record WITH the v2 index consulted (clean miss) → unmigrated, no chain call', async () => {
-    const isUnmigratedName = vi.fn();
+  it('v2 row without a migration timestamp → migrated, not native (bigname does not prove native yet)', async () => {
     stub(svc, {
       fallback: fallbackReturning({
-        source: 'indexerV1', v2Consulted: true,
-        data: { name: 'old.eth', isMigrated: true /* 2019 registrar flag — must be ignored */, owner: { id: OWNER } },
+        source: 'indexerV2', v2Consulted: true,
+        data: { name: 'fox.eth', owner: { id: OWNER }, protocol: 'v2' },
       }),
-      blockchain: { isUnmigratedName },
     });
-    expect((await svc.getMigrationStatus('old.eth')).status).toBe(MIGRATION_STATUS.UNMIGRATED);
-    expect(isUnmigratedName).not.toHaveBeenCalled(); // proven absent from v2 — no RPC needed
+    expect((await svc.getMigrationStatus('fox.eth')).status).toBe(MIGRATION_STATUS.MIGRATED);
   });
 
-  it('v1-subgraph record WITHOUT a v2 answer (breaker open) → corroborates on-chain', async () => {
-    // The migrated name still has its v1 subgraph row; during a zigens outage it
-    // must NOT be blindly badged unmigrated — the chain says it is on v2.
+  it('blockchain record without its precomputed status → corroborates on-chain', async () => {
     const isUnmigratedName = vi.fn().mockResolvedValue(false);
     stub(svc, {
       fallback: fallbackReturning({
-        source: 'indexerV1', v2Consulted: false,
+        source: 'blockchain', v2Consulted: false,
         data: { name: 'moved.eth', owner: { id: OWNER } },
       }),
       blockchain: { isUnmigratedName },
@@ -128,7 +120,7 @@ describe('statusFromSource wiring (via getMigrationStatus)', () => {
   it('on-chain corroboration unreadable → degrades to unmigrated (logged, not thrown)', async () => {
     stub(svc, {
       fallback: fallbackReturning({
-        source: 'indexerV1', v2Consulted: false,
+        source: 'blockchain', v2Consulted: false,
         data: { name: 'moved.eth', owner: { id: OWNER } },
       }),
       blockchain: { isUnmigratedName: vi.fn().mockRejectedValue(new Error('all RPCs failed')) },
@@ -248,8 +240,8 @@ describe('metadata output: version + registryType (v1 parity)', () => {
   it('unmigrated name via /namewrapper/ → version 1 (v1w), namewrapper self-URLs', async () => {
     stub(svc, {
       fallback: fallbackReturning({
-        source: 'indexerV1', v2Consulted: true,
-        data: { name: 'wrapped.eth', owner: { id: OWNER } },
+        source: 'indexerV2', v2Consulted: true,
+        data: { name: 'wrapped.eth', owner: { id: OWNER }, protocol: 'v1' },
       }),
     });
     const meta = await svc.getMetadata('sepolia', 'namewrapper', 'wrapped.eth', 'https://meta.test');
@@ -261,8 +253,8 @@ describe('metadata output: version + registryType (v1 parity)', () => {
   it('unmigrated name via /registry/ → version 0 (v1 parity default)', async () => {
     stub(svc, {
       fallback: fallbackReturning({
-        source: 'indexerV1', v2Consulted: true,
-        data: { name: 'plain.eth', owner: { id: OWNER } },
+        source: 'indexerV2', v2Consulted: true,
+        data: { name: 'plain.eth', owner: { id: OWNER }, protocol: 'v1' },
       }),
     });
     const meta = await svc.getMetadata('sepolia', 'registry', 'plain.eth', 'https://meta.test');

@@ -134,7 +134,7 @@ const registrar: Record<string, bigint> = {
 function makeMainnetService(): MetadataService {
   const svc = new MetadataService(
     {
-      indexerV2Endpoint: 'https://indexer.test/graphql',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network: 'mainnet',
       fallbackToBlockchain: true,
       internalCacheEnabled: false,

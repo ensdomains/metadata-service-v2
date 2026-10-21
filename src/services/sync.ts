@@ -1,8 +1,7 @@
-// Sync service for storing ensnode data in D1 for fast local queries
+// Sync service for storing indexer (bigname) data in D1 for fast local queries
 import { D1Service } from './d1';
 import { IndexerService, type IndexerDomain } from './indexer';
 import { validateEnsName, canonicalizeName } from '../utils/ens';
-import { MIGRATION_STATUS } from '../types';
 import { classifyV2IndexerRecord } from '../utils/migration';
 
 export interface SyncConfig {
@@ -27,7 +26,7 @@ export class SyncService {
     private config: SyncConfig
   ) {}
 
-  // Sync a single domain from ensnode to D1. `fetched` is the domain the caller
+  // Sync a single domain from the indexer to D1. `fetched` is the domain the caller
   // already read from the same indexer (getMetadata): it is stored as-is
   // instead of being queried again.
   async syncDomain(name: string, force: boolean = false, fetched?: IndexerDomain): Promise<SyncResult> {
@@ -58,10 +57,8 @@ export class SyncService {
 
       processed = 1;
 
-      // Fetch from ensnode, unless the caller already has the domain
-      const { domain, usedFallback } = fetched
-        ? { domain: fetched, usedFallback: false }
-        : await this.indexerV2.getDomain(name);
+      // Fetch from the indexer, unless the caller already has the domain
+      const { domain } = fetched ? { domain: fetched } : await this.indexerV2.getDomain(name);
 
       if (domain) {
         await this.d1.storeDomain(domain, 'ensnode');
@@ -70,9 +67,9 @@ export class SyncService {
         // Also sync related data
         await this.syncDomainRelatedData(name, domain);
 
-        console.log(`Synced domain ${name} to D1${usedFallback ? ' (used fallback)' : ''}`);
+        console.log(`Synced domain ${name} to D1`);
       } else {
-        console.warn(`Domain ${name} not found in ensnode`);
+        console.warn(`Domain ${name} not found in the indexer`);
       }
 
       await this.d1.updateSyncStatus('domains', true);
@@ -132,7 +129,7 @@ export class SyncService {
         };
       }
 
-      // Fetch from ensnode in batch
+      // Fetch from the indexer in batch
       const { domains } = await this.indexerV2.getDomains(namesToSync);
 
       if (domains && domains.length > 0) {
@@ -169,8 +166,9 @@ export class SyncService {
     };
   }
 
-  // Sync migration status for a domain
-  async syncMigrationStatus(name: string, force: boolean = false): Promise<SyncResult> {
+  // Sync migration status for a domain. `fetched` is the domain the caller
+  // already read: its row carries the migration signals, so it is not read again.
+  async syncMigrationStatus(name: string, force: boolean = false, fetched?: IndexerDomain): Promise<SyncResult> {
     const startTime = Date.now();
     let processed = 0;
     let stored = 0;
@@ -198,18 +196,11 @@ export class SyncService {
 
       processed = 1;
 
-      // Fetch from ensnode
-      const { status } = await this.indexerV2.getMigrationStatus(name);
+      // Fetch from the indexer, unless the caller already has the domain
+      const { status } = fetched ? { status: fetched } : await this.indexerV2.getMigrationStatus(name);
 
       if (status) {
-        // v2 (zigens) dialect: classify for real — the record carries the v2
-        // migration signals (isMigrated/owner/protocol). v1 subgraph dialect:
-        // its isMigrated means the 2019 registrar migration, NOT v2, and
-        // presence in the v1 subgraph proves nothing about v2 → store
-        // 'unmigrated' (the safe legacy default).
-        const migrationStatus = this.indexerV2.apiVersion === 'v2'
-          ? classifyV2IndexerRecord(status)
-          : MIGRATION_STATUS.UNMIGRATED;
+        const migrationStatus = classifyV2IndexerRecord(status);
         await this.d1.storeMigrationStatus(name, migrationStatus, {
           owner: status.owner?.id,
           expirationDate: status.expiryDate,
@@ -218,7 +209,7 @@ export class SyncService {
 
         console.log(`Synced migration status for ${name} to D1 (${migrationStatus})`);
       } else {
-        console.warn(`Migration status for ${name} not found in ensnode`);
+        console.warn(`Migration status for ${name} not found in the indexer`);
       }
 
       await this.d1.updateSyncStatus('migration', true);
@@ -255,11 +246,11 @@ export class SyncService {
 
       processed = 1;
 
-      // Fetch from ensnode
+      // Fetch from the indexer
       const { hierarchy } = await this.indexerV2.getHierarchy(name);
 
       if (hierarchy) {
-        // Convert ensnode hierarchy to D1 format
+        // Convert the indexer hierarchy to D1 format
         const hierarchyLevels = this.convertHierarchyToLevels(hierarchy, name);
 
         await this.d1.storeHierarchy(name, hierarchyLevels);
@@ -267,7 +258,7 @@ export class SyncService {
 
         console.log(`Synced hierarchy for ${name} to D1 (${hierarchyLevels.length} levels)`);
       } else {
-        console.warn(`Hierarchy for ${name} not found in ensnode`);
+        console.warn(`Hierarchy for ${name} not found in the indexer`);
       }
 
       await this.d1.updateSyncStatus('hierarchy', true);
@@ -361,7 +352,7 @@ export class SyncService {
           const result = await this.syncDomainsBatch(batch, true);
           results.push(result);
 
-          // Small delay between batches to avoid overwhelming ensnode
+          // Small delay between batches to avoid overwhelming the indexer
           if (i + this.config.batchSize < staleDomains.length) {
             await new Promise(resolve => setTimeout(resolve, 100));
           }
@@ -397,7 +388,7 @@ export class SyncService {
     return results;
   }
 
-  // Helper: Convert ensnode hierarchy to level-based format for D1
+  // Helper: Convert the indexer hierarchy to level-based format for D1
   private convertHierarchyToLevels(hierarchy: any, rootName: string): Array<{
     name: string;
     owner: string;
@@ -434,10 +425,9 @@ export class SyncService {
   }
 
   // Helper: Sync related data for a domain (migration + hierarchy)
-  private async syncDomainRelatedData(name: string, _domain: IndexerDomain): Promise<void> {
-    // Always sync migration status (v1 isMigrated is unreliable for v2 status)
+  private async syncDomainRelatedData(name: string, domain: IndexerDomain): Promise<void> {
     try {
-      await this.syncMigrationStatus(name);
+      await this.syncMigrationStatus(name, false, domain);
     } catch (error) {
       console.warn(`Failed to sync migration status for ${name}:`, error);
     }

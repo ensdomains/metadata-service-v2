@@ -27,9 +27,6 @@ import {
   getCharacterSet,
   getSegmentLength,
   isNormalized,
-  constructEthNameHash,
-  Version,
-  tokenIdToHex,
 } from "../utils/ens";
 import { CONTRACTS } from "./blockchain";
 import { NETWORKS } from "../config/networks";
@@ -83,12 +80,8 @@ export interface D1RecordData {
 }
 
 export interface MetadataServiceConfig {
+  /** bigname API for this network; it serves ENSv1 and ENSv2 names. */
   indexerV2Endpoint: string;
-  indexerV2FallbackEndpoint?: string;
-  indexerV2ApiVersion?: 'v1' | 'v2';
-  /** Optional secondary v1 ENSNode subgraph, queried after the primary v2 indexer
-   *  misses (zigens is v2-only). Always queried with v1 ('namehash' id) semantics. */
-  indexerV1Endpoint?: string;
   fallbackToBlockchain: boolean;
   internalCacheEnabled: boolean; // KV cache for internal optimizations
   d1Enabled: boolean;
@@ -104,17 +97,7 @@ function isEthRegistryName(name: string): boolean {
 
 export class MetadataService {
   private network: NetworkName;
-  /**
-   * Whether the primary indexer speaks the v2 (zigens) dialect — i.e. whether
-   * this network HAS an ENS v2 deployment with a v2 indexer. This is the
-   * discriminator for v2 classification paths (NOT a hardcoded network name):
-   * when mainnet v2 ships, flipping `indexerV2ApiVersion` to 'v2' in
-   * config/networks.ts lights up the v2 paths here with no code change.
-   */
-  private isV2Indexer: boolean;
   public indexerV2: IndexerService;
-  // Secondary v1 subgraph (e.g. sepolia, whose primary indexer zigens is v2-only).
-  private indexerV1?: IndexerService;
   private internalCache?: CacheService; // For internal optimizations only
   private cache: CacheService; // Backwards compatibility
   public blockchain: BlockchainService;
@@ -133,18 +116,10 @@ export class MetadataService {
     db?: D1Database,
   ) {
     this.network = config.network || 'mainnet';
-    this.isV2Indexer = config.indexerV2ApiVersion === 'v2';
     this.indexerV2 = new IndexerService({
-      primaryEndpoint: config.indexerV2Endpoint,
-      fallbackEndpoint: config.indexerV2FallbackEndpoint,
-      apiVersion: config.indexerV2ApiVersion,
+      endpoint: config.indexerV2Endpoint,
+      chainId: NETWORKS[this.network].chain.id,
     });
-
-    // Secondary v1 ENSNode subgraph (e.g. sepolia v1 names, which zigens lacks).
-    const indexerV1 = config.indexerV1Endpoint
-      ? new IndexerService({ primaryEndpoint: config.indexerV1Endpoint, apiVersion: 'v1' })
-      : undefined;
-    this.indexerV1 = indexerV1;
 
     // Initialize internal cache for indexerV2 responses if enabled
     if (config.internalCacheEnabled) {
@@ -178,7 +153,6 @@ export class MetadataService {
       this.indexerV2,
       this.blockchain,
       this.resolver,
-      indexerV1,
       // The indexer breaker's trips are shared with the other isolates through
       // KV, per network (each network has its own indexer).
       new SharedBreakerState(kv, `breaker:indexerV2:${this.network}`, fallbackConfig.indexerV2.healthCheckIntervalMs),
@@ -211,12 +185,9 @@ export class MetadataService {
         data: domain,
         source,
         usedFallback,
-        v2Consulted,
       } = await this.fallback.getDomainMetadata(identifier);
 
-      // Check if domain is expired. A lapsed expiryDate only 410s when the
-      // source is actually authoritative for it — a v1-subgraph row's expiry is
-      // stale for a name that is live on v2 (see expiredVerdictIsAuthoritative).
+      // Check if domain is expired.
       const expiryRaw = domain.expiryDate;
       if (expiryRaw) {
         const expiryMs = typeof expiryRaw === 'string' && expiryRaw.includes('T')
@@ -224,34 +195,27 @@ export class MetadataService {
           : typeof expiryRaw === 'string'
             ? parseInt(expiryRaw, 10) * 1000
             : Number(expiryRaw) * 1000;
-        if (
-          expiryMs > 0 && expiryMs < Date.now()
-          && await this.expiredVerdictIsAuthoritative(identifier, source, v2Consulted)
-        ) {
+        if (expiryMs > 0 && expiryMs < Date.now()) {
           throw new DomainExpiredError(identifier, new Date(expiryMs));
         }
       }
 
       let metadata: MetadataResponse;
 
-      if (source === "indexerV2" || source === "indexerV1") {
+      if (source === "indexerV2") {
         metadata = await this.buildMetadataFromIndexer(
           domain as IndexerDomain,
           network,
           baseUrl,
-          source,
-          v2Consulted,
           registryType,
         );
 
         // Store in D1 if enabled, off the response path: the sync (its D1 reads
         // and writes, and its migration/hierarchy follow-ups) runs under
         // waitUntil and stores the domain fetched above instead of querying
-        // the indexer for it again. Only primary-indexer rows are stored, as
-        // syncDomain always did: an indexerV1 hit means the primary indexer
-        // just missed or failed for this name. Without an execution context
-        // the sync still runs, just not registered with the runtime.
-        if (source === "indexerV2" && this.sync) {
+        // the indexer for it again. Without an execution context the sync
+        // still runs, just not registered with the runtime.
+        if (this.sync) {
           const sync = this.sync
             .syncDomain(identifier, false, domain as IndexerDomain)
             .catch((error) =>
@@ -388,37 +352,6 @@ export class MetadataService {
   }
 
   /**
-   * Whether a lapsed indexer expiryDate may 410 the name (410 is a cacheable,
-   * destructive verdict — same policy as checkExpiry above). On a v2-configured
-   * network, migrated names keep their v1-subgraph rows whose expiryDate is the
-   * LAPSED v1 registrar expiry (e.g. fox.eth on sepolia), so an
-   * `indexerV1`-sourced expiry is only authoritative when the v2 index was
-   * consulted and cleanly missed, or the chain corroborates the name is not
-   * REGISTERED on v2. FAILS OPEN (no 410) when v2 cannot be read — otherwise a
-   * zigens outage would convert every migrated-with-lapsed-v1 name into 410s.
-   */
-  private async expiredVerdictIsAuthoritative(
-    name: string,
-    source: 'indexerV2' | 'indexerV1' | 'blockchain' | string,
-    v2Consulted: boolean,
-  ): Promise<boolean> {
-    // v2-dialect rows carry their own protocol's expiry; the blockchain tier
-    // resolves expiry v2-aware. Only the secondary v1 subgraph can be stale.
-    if (source !== 'indexerV1') return true;
-    // No v2 on this network → the v1 registrar is genuinely authoritative.
-    if (!this.blockchain.isV2Configured(this.network)) return true;
-    // The v2 index answered and doesn't have this name → not REGISTERED on v2.
-    if (v2Consulted) return true;
-    try {
-      const v2 = await this.blockchain.getV2Registration(this.network, name);
-      return !(v2 && v2.status === 2); // live on v2 → the v1 expiry is stale
-    } catch (error) {
-      console.warn(`[expiry] v2 unreadable while corroborating lapsed v1 expiry for ${name} — failing open (no 410):`, error);
-      return false;
-    }
-  }
-
-  /**
    * Single-pass resolve for image/rasterize rendering: returns the name's
    * MigrationStatus (for the badge) AND enforces existence — throws NotFoundError
    * if the name isn't registered in any source (so the caller 404s), or
@@ -435,8 +368,8 @@ export class MetadataService {
       throw new InvalidNameError();
     }
     // Throws NotFoundError when nothing can resolve the name.
-    const { data, source, v2Consulted } = await this.fallback.getDomainMetadata(name);
-    return this.statusFromSource(source, network, name, data, v2Consulted, opts?.strict);
+    const { data, source } = await this.fallback.getDomainMetadata(name);
+    return this.statusFromSource(source, network, name, data, opts?.strict);
   }
 
   // Resolve contract address + tokenId to ENS name. Recognizes the v1
@@ -463,87 +396,34 @@ export class MetadataService {
     const contracts = CONTRACTS[network];
     const addr = contractAddress.toLowerCase();
 
-    let registryType: 'registry' | 'namewrapper';
-    let nameHash: string;
-    // Set for the ETHRegistry, whose namehash-form ids may name only its own
-    // names (see below).
-    let ethRegistryToken = false;
-    // An outage of the ETHRegistry token lookup, which only it can answer for
-    // a native id: kept for when nothing else names the token.
-    let tokenLookupOutage: UpstreamError | null = null;
-
     if (addr === contracts.registrar.toLowerCase()) {
-      // BaseRegistrar: tokenId is labelhash → convert to .eth namehash
-      registryType = 'registry';
-      nameHash = constructEthNameHash(tokenHex, Version.v1);
-    } else if (addr === contracts.nameWrapper.toLowerCase()) {
-      // NameWrapper: tokenId is already a namehash
-      registryType = 'namewrapper';
-      nameHash = tokenIdToHex(tokenHex);
-    } else if (await this.isV2RegistryAddress(network, addr)) {
-      // v2 ETHRegistry (ERC1155). Marketplaces pass the native tokenId — a
-      // labelhash whose low 32 bits are the token version — which is
-      // irreversible from the hash alone, so ask the indexer's tokenId/
-      // canonicalId filters first, scoped to this registry. Returns a clean
-      // miss (falls through below) while the filters aren't in the deployed
-      // zigens schema yet.
-      registryType = 'registry';
-      const hexId = tokenHex;
-      try {
-        const { domain } = await this.indexerV2.getDomainByTokenId(hexId, addr);
-        if (domain?.name) return { name: domain.name, registryType };
-      } catch (error) {
-        if (!(error instanceof UpstreamError)) throw error;
-        // Outage. The namehash path below can still name a namehash-form id,
-        // but never a native one (domain(id:) resolves only namehashes), so a
-        // miss there is not an answer: it rethrows this (503, not a 404).
-        tokenLookupOutage = error;
+      // BaseRegistrar: the token id is the .eth name's labelhash.
+      const { domain } = await this.indexerV2.getEthDomainByLabelhash(tokenHex);
+      if (!domain) throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
+      return { name: domain.name, registryType: 'registry' };
+    }
+    if (addr === contracts.nameWrapper.toLowerCase()) {
+      // NameWrapper: the token id is the node, and the wrapper keeps the name
+      // of every node it has wrapped.
+      const name = await this.blockchain.getWrappedName(network, tokenHex);
+      if (!name) throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
+      return { name, registryType: 'namewrapper' };
+    }
+    if (await this.isV2RegistryAddress(network, addr)) {
+      // v2 ETHRegistry (ERC1155). Marketplaces pass the native token id, a
+      // labelhash whose low 32 bits are the token version, which only the
+      // indexer can map back to a name. A token can only be a name directly
+      // under eth.
+      const { domain } = await this.indexerV2.getDomainByTokenId(tokenHex, addr);
+      if (!domain?.name || !isEthRegistryName(domain.name)) {
+        throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
       }
-      // Fall through for namehash-form ids, which some consumers pass and
-      // zigens' domain(id:) resolves directly.
-      nameHash = hexId;
-      ethRegistryToken = true;
-    } else if (this.blockchain.isV2Configured(network)) {
+      return { name: domain.name, registryType: 'registry' };
+    }
+    if (this.blockchain.isV2Configured(network)) {
       return this.resolveV2RegistryToken(addr, contractAddress, tokenHex, tokenId);
-    } else {
-      throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
     }
-
-    // The v2 indexer keys domains by name string but its domain(id:) lookup also
-    // resolves namehashes (verified live) — so this works on both dialects.
-    // A primary outage must not abort the lookup: fall through to the v1 tier
-    // (matching the name-form resolution order) and only fail if both are out.
-    let domain: { name?: string } | null | undefined;
-    let v2Outage: UpstreamError | null = null;
-    try {
-      ({ domain } = await this.indexerV2.getDomainByNamehash(nameHash));
-    } catch (error) {
-      if (!(error instanceof UpstreamError) || !this.indexerV1) throw error;
-      v2Outage = error;
-      console.warn(`[tokenId] primary indexer unavailable for ${nameHash}, trying v1 subgraph:`, error);
-    }
-    // A namehash names any domain, but an ETHRegistry token can only be one of
-    // the names directly under eth (a subname's namehash is not its token).
-    if (ethRegistryToken && domain?.name && !isEthRegistryName(domain.name)) domain = null;
-
-    // The primary indexer is v2-only on sepolia, so a v1 unmigrated name (e.g. a
-    // BaseRegistrar registration) is absent from it. Reverse namehash→name can't
-    // be done on-chain (a label can't be recovered from its hash), so fall back
-    // to the secondary v1 subgraph — matching the name-form resolution path.
-    if (!domain?.name && this.indexerV1) {
-      ({ domain } = await this.indexerV1.getDomainByNamehash(nameHash));
-      if (ethRegistryToken && domain?.name && !isEthRegistryName(domain.name)) domain = null;
-    }
-
-    if (!domain?.name) {
-      // A v1 miss proves nothing when the v2 index was never consulted (the
-      // name may be v2-native) — surface the outage, not a cacheable 404.
-      if (v2Outage) throw v2Outage;
-      if (tokenLookupOutage) throw tokenLookupOutage;
-      throw new NotFoundError(`No domain found for tokenId ${tokenId}`);
-    }
-
-    return { name: domain.name, registryType };
+    throw new NotFoundError(`Unknown contract address: ${contractAddress}`);
   }
 
   /**
@@ -614,13 +494,9 @@ export class MetadataService {
   /**
    * Map a fallback-resolved record to a MigrationStatus, by source. Shared by
    * getMigrationStatus, metadata assembly, and the image path so they can't drift:
-   *  - `indexerV2` on a v2-dialect network (zigens) → v2 indexer classification
-   *    (incl. the `protocol: "v1"` row guard — presence in the index alone does
-   *    NOT mean on-v2);
-   *  - `indexerV1` (v1 ENSNode subgraph): `unmigrated` ONLY when the v2 index was
-   *    actually consulted and cleanly missed (`v2Consulted`). When the v2 tier
-   *    was skipped/down, presence in the v1 subgraph proves nothing (migrated
-   *    names keep their v1 rows) → corroborate on-chain;
+   *  - `indexerV2` (bigname) → classification from the row's protocol (an
+   *    ENSv1 row is `unmigrated`: presence in the index alone does NOT mean
+   *    on-v2);
    *  - `blockchain` → the on-chain classification computed by the v2-aware
    *    resolver (travels on `chainMigrationStatus`; never `native`).
    * Degrades to `unmigrated` (the safe legacy default) when the chain is
@@ -630,26 +506,19 @@ export class MetadataService {
    * transient failure can never durably overwrite a correct stored status.
    */
   private async statusFromSource(
-    source: 'indexerV2' | 'indexerV1' | 'blockchain',
+    source: 'indexerV2' | 'blockchain',
     network: NetworkName,
     name: string,
     data: { isMigrated?: boolean; owner?: { id?: string }; ownerId?: string; protocol?: string; chainMigrationStatus?: string },
-    v2Consulted: boolean,
     strict = false,
   ): Promise<MigrationStatus> {
-    if (source === 'indexerV2' && this.isV2Indexer) {
+    if (source === 'indexerV2') {
       return classifyV2IndexerRecord(data);
     }
-    if (source === 'blockchain' && isMigrationStatus(data.chainMigrationStatus)) {
+    if (isMigrationStatus(data.chainMigrationStatus)) {
       return data.chainMigrationStatus;
     }
-    if (source === 'indexerV1' && v2Consulted) {
-      // The v2 index answered and doesn't have this name → genuinely not on v2.
-      return classifyMigrationStatus({ isUnmigrated: true });
-    }
-    // Remaining cases need the chain: indexerV1 without a v2 answer, `indexerV2`
-    // on a v1-dialect network (e.g. mainnet today), or a blockchain record
-    // missing its precomputed status.
+    // A blockchain record missing its precomputed status needs the chain.
     try {
       return await this.classifyOnChain(network, name);
     } catch (error) {
@@ -675,10 +544,9 @@ export class MetadataService {
         data: status,
         source,
         usedFallback,
-        v2Consulted,
       } = await this.fallback.getMigrationStatus(name);
 
-      const migrationStatus = await this.statusFromSource(source, this.network, name, status, v2Consulted);
+      const migrationStatus = await this.statusFromSource(source, this.network, name, status);
 
       const response: MigrationStatusResponse = {
         name,
@@ -872,14 +740,10 @@ export class MetadataService {
               }
             }
 
-            // Straight from the primary indexer batch query → source=indexerV2,
-            // and the v2 index was by definition consulted.
             const metadata = await this.buildMetadataFromIndexer(
               domain,
               network || "mainnet",
               baseUrl,
-              "indexerV2",
-              true,
             );
             return { name, metadata };
           } else {
@@ -996,19 +860,15 @@ export class MetadataService {
   }
 
   // Build metadata response from indexer domain data. Classification is unified
-  // through statusFromSource (v2-dialect record / proven-v1 / on-chain
-  // corroboration) so metadata, /migration-status, and the image badge can't drift.
+  // through statusFromSource so metadata, /migration-status, and the image
+  // badge can't drift.
   private async buildMetadataFromIndexer(
     domain: IndexerDomain,
     network: NetworkName,
     baseUrl: string | undefined,
-    source: 'indexerV2' | 'indexerV1',
-    v2Consulted: boolean,
     registryType: 'registry' | 'namewrapper' = 'registry',
   ): Promise<MetadataResponse> {
-    const v2MigrationStatus = await this.statusFromSource(
-      source, network, domain.name, domain, v2Consulted,
-    );
+    const v2MigrationStatus = await this.statusFromSource('indexerV2', network, domain.name, domain);
 
     const urls = this.selfUrls(domain.name, network, registryType, baseUrl);
 
@@ -1342,7 +1202,7 @@ export class MetadataService {
           .catch(() => ({ connected: false, recordCount: 0 })),
       ]);
 
-    // Flag ENSNode as degraded if reachable but slow (>1000ms for a trivial query)
+    // Flag the indexer as degraded if reachable but slow (>1000ms for its status)
     const indexerV2Latency = 'latency' in indexerV2Health ? indexerV2Health.latency?.primary : undefined;
     const indexerV2Status = indexerV2Health.primary
       ? (indexerV2Latency && indexerV2Latency > 1000 ? "degraded" : "ok")
