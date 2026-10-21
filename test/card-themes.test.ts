@@ -16,7 +16,7 @@ function fills(svg: string) {
     logo: svg.match(/<path fill-rule="evenodd" clip-rule="evenodd" d="M42\.7634[^"]+" fill="([^"]+)"\/>/)?.[1],
     label: svg.match(/<rect x="74" y="[\d.]+" width="[\d.]+" height="[\d.]+" rx="6" fill="([^"]+)"\/>/)?.[1],
     name: [...svg.matchAll(/<text [^>]*fill="([^"]+)"[^>]*>/g)].map((m) => m[1]),
-    square: svg.match(/<rect x="[\d.]+" y="[\d.-]+" width="32" height="32" rx="6" fill="([^"]+)"\/>/)?.[1],
+    square: svg.match(/<rect x="[\d.]+" y="[\d.-]+" width="40" height="40" rx="6" fill="([^"]+)"\/>/)?.[1],
   };
 }
 
@@ -77,7 +77,7 @@ describe('ENS v2 card themes in the rendered SVG', () => {
     for (let i = 1; i < lines.length; i++) expect(lines[i].y - lines[i - 1].y).toBeGreaterThanOrEqual(lines[i].size);
     // In the 550-unit design space: the label stays left of the accent square's
     // margin, its top below y = 90, and every line inside it.
-    expect(74 + labelWidth + 32).toBeLessThanOrEqual(550 - 12);
+    expect(74 + labelWidth + 40).toBeLessThanOrEqual(550 - 12);
     expect(labelY).toBeGreaterThanOrEqual(90);
     expect(lines[0].y - lines[0].size).toBeGreaterThanOrEqual(labelY);
     expect(lines[lines.length - 1].y).toBeLessThanOrEqual(labelY + labelHeight);
