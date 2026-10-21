@@ -8,6 +8,8 @@ import {
 } from '../src/services/indexer';
 import { UpstreamError } from '../src/services/errors';
 import { labelhash, namehash } from '../src/utils/ens';
+import { classifyV2IndexerRecord } from '../src/utils/migration';
+import { MIGRATION_STATUS } from '../src/types';
 
 const ENDPOINT = 'https://sepolia.api.bigname.test';
 const CHAIN_ID = 11155111;
@@ -240,6 +242,13 @@ describe('getMigrationStatus', () => {
     responses.push(error(404, 'not_found'));
     expect((await make().getMigrationStatus('missing.eth')).status).toBeNull();
   });
+
+  it('keeps an unknown migration history unknown (never read as born on v2)', async () => {
+    responses.push(ok(v2Name('fox.eth')));
+    const { status } = await make().getMigrationStatus('fox.eth');
+    expect(status?.isMigrated).toBeUndefined();
+    expect(classifyV2IndexerRecord(status!)).toBe(MIGRATION_STATUS.MIGRATED);
+  });
 });
 
 describe('getHierarchy', () => {
@@ -328,6 +337,14 @@ describe('getDomainByTokenId', () => {
     expect(calls).toHaveLength(3);
   });
 
+  it.each([
+    ['an overview without its address', [ok({})]],
+    ['labels that are not a list', [overview('vendor.eth'), ok({ labels: [] })]],
+  ])('is an UpstreamError for %s', async (_label, replies) => {
+    responses.push(...replies);
+    await expect(make().getDomainByTokenId(fooToken, REGISTRY)).rejects.toBeInstanceOf(UpstreamError);
+  });
+
   it.each([['released'], ['unregistered']])('is a miss for a %s label', async (status) => {
     responses.push(overview('vendor.eth'), ok([label('foo.vendor.eth', { status })]));
     expect((await make().getDomainByTokenId(fooToken, REGISTRY)).domain).toBeNull();
@@ -391,6 +408,14 @@ describe('isRegistry', () => {
     await expect(svc.isRegistry(ADDRESS)).rejects.toBeInstanceOf(UpstreamError);
     expect(await svc.isRegistry(ADDRESS)).toBe(true);
     expect(calls).toHaveLength(4);
+  });
+
+  it('throws UpstreamError for an overview without its address, and does not cache it', async () => {
+    responses.push(ok({}), registry());
+    const svc = make();
+    await expect(svc.isRegistry(ADDRESS)).rejects.toBeInstanceOf(UpstreamError);
+    expect(await svc.isRegistry(ADDRESS)).toBe(true);
+    expect(calls).toHaveLength(2);
   });
 
   it('keeps at most REGISTRY_CACHE_MAX_ENTRIES addresses, dropping the least recently used', async () => {

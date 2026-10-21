@@ -60,6 +60,7 @@ interface LookupResult {
 }
 
 interface RegistryOverview {
+  address: string;
   name?: { name?: string } | null;
   counts?: { labels?: number };
 }
@@ -115,7 +116,8 @@ export interface IndexerDomain {
 
 export interface IndexerMigrationStatus {
   name: string;
-  isMigrated: boolean;
+  /** Absent when unknown, as on IndexerDomain: never read as born on v2. */
+  isMigrated?: boolean;
   ownerId?: string;
   resolverId?: string;
   parentId?: string;
@@ -142,6 +144,14 @@ export interface IndexerHierarchyItem {
 class RetryableError extends Error {}
 
 const parentOf = (name: string): string => name.split('.').slice(1).join('.');
+
+/** A registry overview, or UpstreamError for a reply without its address (not an answer). */
+function registryOverview(answer: Envelope<RegistryOverview> | null, registry: string): RegistryOverview | null {
+  if (answer && typeof (answer.data as { address?: unknown }).address !== 'string') {
+    throw new UpstreamError(`malformed bigname registry overview for ${registry}`);
+  }
+  return answer?.data ?? null;
+}
 
 /** Unix seconds, or undefined for an absent expiry or one that never comes. */
 function finiteSeconds(value: string | null | undefined): string | undefined {
@@ -327,10 +337,10 @@ export class IndexerService {
    */
   async getDomainByTokenId(tokenId: `0x${string}`, registry: string): Promise<{ domain: IndexerDomain | null }> {
     const registryPath = `/v1/registries/${this.chainId}/${registry.toLowerCase()}`;
-    const overview = await this.request<RegistryOverview>(registryPath);
-    const registryName = overview?.data.name?.name;
+    const overview = registryOverview(await this.request<RegistryOverview>(registryPath), registry);
+    const registryName = overview?.name?.name;
     if (!overview || typeof registryName !== 'string') return { domain: null };
-    const labelCount = overview.data.counts?.labels ?? Number.POSITIVE_INFINITY;
+    const labelCount = overview.counts?.labels ?? Number.POSITIVE_INFINITY;
     if (labelCount > MAX_REGISTRY_LABELS_SCANNED) {
       console.warn(`[indexer] registry ${registry} has ${labelCount} labels, not scanned for token ${tokenId}`);
       return { domain: null };
@@ -344,6 +354,7 @@ export class IndexerService {
       if (cursor) query.set('cursor', cursor);
       const answer = await this.request<BignameName[]>(`${registryPath}/labels?${query}`);
       if (!answer) return { domain: null };
+      if (!Array.isArray(answer.data)) throw new UpstreamError(`malformed bigname registry labels for ${registry}`);
       const row = answer.data.find((label) => label.labelhash && canonicalTokenId(label.labelhash) === wanted);
       if (row) {
         if (row.status === 'unregistered' || row.status === 'released' || !row.name) return { domain: null };
@@ -382,8 +393,7 @@ export class IndexerService {
       }
     }
 
-    const answer = await this.request<RegistryOverview>(`/v1/registries/${this.chainId}/${key}`);
-    const known = answer !== null;
+    const known = registryOverview(await this.request<RegistryOverview>(`/v1/registries/${this.chainId}/${key}`), key) !== null;
 
     const ttl = known ? REGISTRY_KNOWN_TTL_MS : REGISTRY_UNKNOWN_TTL_MS;
     this.registryCache.set(key, { known, until: Date.now() + ttl });
@@ -411,7 +421,7 @@ export class IndexerService {
     return {
       status: {
         name: domain.name,
-        isMigrated: domain.isMigrated ?? false,
+        isMigrated: domain.isMigrated,
         ownerId: domain.ownerId,
         resolverId: domain.resolverId,
         parentId: domain.parentId,
