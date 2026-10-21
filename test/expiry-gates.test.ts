@@ -10,26 +10,21 @@ vi.mock('../src/services/rasterize', () => ({
 import app from '../src/index';
 import { BlockchainService } from '../src/services/blockchain';
 import { MetadataService, DomainExpiredError } from '../src/services/metadata';
-import { UpstreamError } from '../src/services/errors';
 
 // Expiry gates:
-//  1) getMetadata's internal lapsed-expiryDate gate must only 410 when the
-//     expired verdict is authoritative (expiredVerdictIsAuthoritative) — an
-//     indexerV1-sourced v1-registrar expiry is stale for a name live on v2.
+//  1) getMetadata 410s a name whose indexer expiry has passed, and serves one
+//     whose expiry is ahead.
 //  2) /batch-metadata must run the same per-name checkExpiry gate as the
 //     single-name GET, BEFORE the shared KV metadata cache.
 
 const OWNER = '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809';
-const ZERO = '0x0000000000000000000000000000000000000000';
-const LAPSED_V1_EXPIRY = String(Math.floor(Date.now() / 1000) - 150 * 86400); // lapsed months ago
-const V2_FUTURE_EXPIRY = BigInt(Math.floor(Date.now() / 1000) + 365 * 86400); // ~1y in the future
+const LAPSED_EXPIRY = String(Math.floor(Date.now() / 1000) - 150 * 86400); // lapsed months ago
+const FUTURE_EXPIRY = Math.floor(Date.now() / 1000) + 365 * 86400; // ~1y in the future
 
 function makeService(network: 'mainnet' | 'sepolia'): MetadataService {
   return new MetadataService(
     {
-      indexerV2Endpoint: 'https://zigens.test/graphql',
-      indexerV2ApiVersion: network === 'sepolia' ? 'v2' : 'v1',
-      indexerV1Endpoint: 'https://ensnode-v1.test/subgraph',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network,
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
@@ -45,12 +40,9 @@ type Priv = {
   blockchain: Record<string, ReturnType<typeof vi.fn>>;
 };
 
-// zigens outage shape: the v2 indexer tier was skipped (breaker open), so the
-// fallback serves the ENSNode v1-subgraph row whose expiryDate is the LAPSED v1
-// registrar expiry. v2Consulted varies per case.
-function stubLapsedV1Row(
+function stubIndexerRow(
   svc: MetadataService,
-  opts: { v2Consulted: boolean; blockchain: Record<string, ReturnType<typeof vi.fn>> },
+  opts: { expiryDate: string; blockchain: Record<string, ReturnType<typeof vi.fn>> },
 ): Priv {
   const p = svc as unknown as Priv;
   const result = {
@@ -59,11 +51,12 @@ function stubLapsedV1Row(
       id: '0x1234',
       labelName: 'fox',
       owner: { id: OWNER },
-      expiryDate: LAPSED_V1_EXPIRY,
+      protocol: 'v2',
+      expiryDate: opts.expiryDate,
     },
-    source: 'indexerV1' as const,
-    usedFallback: true,
-    v2Consulted: opts.v2Consulted,
+    source: 'indexerV2' as const,
+    usedFallback: false,
+    v2Consulted: true,
     fallthroughs: 0,
   };
   p.fallback = {
@@ -74,107 +67,35 @@ function stubLapsedV1Row(
   return p;
 }
 
-describe('getMetadata: lapsed indexerV1 expiryDate only 410s when authoritative', () => {
-  it('does NOT 410 a name live on v2 (indexerV1 row, v2Consulted=false, chain says REGISTERED)', async () => {
-    // regression: getMetadata 410'd off an indexerV1-sourced lapsed v1 expiry even
-    // though on-chain v2 said REGISTERED until well in the future (fox.eth on sepolia).
+describe('getMetadata: the indexer expiry gate', () => {
+  it('410s a name whose indexer expiry has passed', async () => {
     const svc = makeService('sepolia');
-    stubLapsedV1Row(svc, {
-      v2Consulted: false,
-      blockchain: {
-        isV2Configured: vi.fn().mockReturnValue(true),
-        getV2Registration: vi.fn().mockResolvedValue({ status: 2, expiry: V2_FUTURE_EXPIRY, owner: OWNER }),
-        isUnmigratedName: vi.fn().mockResolvedValue(false),
-      },
-    });
+    stubIndexerRow(svc, { expiryDate: LAPSED_EXPIRY, blockchain: {} });
+    await expect(
+      svc.getMetadata('sepolia', 'registry', 'fox.eth', 'https://meta.test'),
+    ).rejects.toBeInstanceOf(DomainExpiredError);
+  });
+
+  it('serves a name whose indexer expiry is ahead', async () => {
+    const svc = makeService('sepolia');
+    stubIndexerRow(svc, { expiryDate: String(FUTURE_EXPIRY), blockchain: {} });
     const meta = await svc.getMetadata('sepolia', 'registry', 'fox.eth', 'https://meta.test');
     expect(meta.name).toBe('fox.eth');
   });
 
-  it('baseline: checkExpiry itself does not 410 the same live-on-v2 name', async () => {
-    // regression: companion gate — checkExpiry must prefer the live v2 registration
-    // over the lapsed v1 registrar expiry for the same fox.eth state.
+  it('checkExpiry prefers a live v2 registration over a lapsed v1 registrar expiry', async () => {
+    // fox.eth on sepolia: REGISTERED on v2 until well in the future, expired on
+    // the v1 registrar.
     const svc = makeService('sepolia');
-    stubLapsedV1Row(svc, {
-      v2Consulted: false,
+    stubIndexerRow(svc, {
+      expiryDate: String(FUTURE_EXPIRY),
       blockchain: {
         isV2Configured: vi.fn().mockReturnValue(true),
-        getV2Registration: vi.fn().mockResolvedValue({ status: 2, expiry: V2_FUTURE_EXPIRY, owner: OWNER }),
-        getExpiry: vi.fn().mockResolvedValue(BigInt(LAPSED_V1_EXPIRY)),
+        getV2Registration: vi.fn().mockResolvedValue({ status: 2, expiry: BigInt(FUTURE_EXPIRY), owner: OWNER }),
+        getExpiry: vi.fn().mockResolvedValue(BigInt(LAPSED_EXPIRY)),
       },
     });
     await expect(svc.checkExpiry('fox.eth')).resolves.toBeUndefined();
-  });
-
-  it('v2Consulted=true (clean v2-index miss) → the lapsed v1 expiry IS authoritative → 410', async () => {
-    // regression: the fail-open rule must not swallow genuine expiries — a clean
-    // v2-index miss means the name is provably not on v2, so no chain call is needed.
-    const svc = makeService('sepolia');
-    const getV2Registration = vi.fn();
-    stubLapsedV1Row(svc, {
-      v2Consulted: true,
-      blockchain: {
-        isV2Configured: vi.fn().mockReturnValue(true),
-        getV2Registration,
-        isUnmigratedName: vi.fn().mockResolvedValue(true),
-      },
-    });
-    await expect(
-      svc.getMetadata('sepolia', 'registry', 'fox.eth', 'https://meta.test'),
-    ).rejects.toBeInstanceOf(DomainExpiredError);
-    expect(getV2Registration).not.toHaveBeenCalled(); // clean miss needs no corroboration
-  });
-
-  it('on-chain corroboration says NOT registered on v2 (status 0) → 410 stands', async () => {
-    // regression: fail-open must be limited to unreadable-v2 — a readable "not on
-    // v2" verdict keeps the v1 registrar authoritative.
-    const svc = makeService('sepolia');
-    stubLapsedV1Row(svc, {
-      v2Consulted: false,
-      blockchain: {
-        isV2Configured: vi.fn().mockReturnValue(true),
-        getV2Registration: vi.fn().mockResolvedValue({ status: 0, expiry: 0n, owner: ZERO }),
-        isUnmigratedName: vi.fn().mockResolvedValue(true),
-      },
-    });
-    await expect(
-      svc.getMetadata('sepolia', 'registry', 'fox.eth', 'https://meta.test'),
-    ).rejects.toBeInstanceOf(DomainExpiredError);
-  });
-
-  it('v2 unreadable during corroboration → fails open (no 410, metadata served)', async () => {
-    // regression: a zigens outage + RPC outage must not convert every
-    // migrated-with-lapsed-v1 name into cacheable 410s.
-    const svc = makeService('sepolia');
-    stubLapsedV1Row(svc, {
-      v2Consulted: false,
-      blockchain: {
-        isV2Configured: vi.fn().mockReturnValue(true),
-        getV2Registration: vi.fn().mockRejectedValue(new UpstreamError('v2 registration read failed')),
-        isUnmigratedName: vi.fn().mockResolvedValue(false),
-      },
-    });
-    const meta = await svc.getMetadata('sepolia', 'registry', 'fox.eth', 'https://meta.test');
-    expect(meta.name).toBe('fox.eth');
-  });
-
-  it('v2 not configured (mainnet) → the v1 registrar is genuinely authoritative → 410', async () => {
-    // regression: fail-open applies only where v2 is deployed; on mainnet the
-    // lapsed v1 expiry must still 410, with no v2 chain call attempted.
-    const svc = makeService('mainnet');
-    const getV2Registration = vi.fn();
-    stubLapsedV1Row(svc, {
-      v2Consulted: false,
-      blockchain: {
-        isV2Configured: vi.fn().mockReturnValue(false),
-        getV2Registration,
-        isUnmigratedName: vi.fn().mockResolvedValue(true),
-      },
-    });
-    await expect(
-      svc.getMetadata('mainnet', 'registry', 'fox.eth', 'https://meta.test'),
-    ).rejects.toBeInstanceOf(DomainExpiredError);
-    expect(getV2Registration).not.toHaveBeenCalled();
   });
 });
 
@@ -220,9 +141,8 @@ const env = {
   SVG_CACHE: makeKv(),
   ASSET_BUCKET: { get: async () => null, put: async () => {}, delete: async () => {} },
   DB: undefined,
-  ENSNODE_MAINNET_URL: 'https://ensnode-v1.test/subgraph',
-  ENSNODE_SEPOLIA_V2_URL: 'https://zigens.test/graphql',
-  ENSNODE_SEPOLIA_V1_URL: 'https://ensnode-sepolia-v1.test/subgraph',
+  BIGNAME_MAINNET_URL: 'https://api.bigname.test',
+  BIGNAME_SEPOLIA_URL: 'https://sepolia.api.bigname.test',
   MAINNET_RPC_URL: 'https://rpc-mainnet.test',
   SEPOLIA_RPC_URL: 'https://rpc-sepolia.test',
   RATE_LIMIT_DISABLED: 'true',

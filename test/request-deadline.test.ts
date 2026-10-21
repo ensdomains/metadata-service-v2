@@ -46,8 +46,8 @@ const env = {
 const NODE = `0x${'ab'.repeat(32)}`;
 const OWNER = '0x1111111111111111111111111111111111111111';
 
-const INDEXER = 'https://indexer.example/graphql';
-const INDEXER_FALLBACK = 'https://indexer-fallback.example/graphql';
+const INDEXER = 'https://indexer.example';
+const FOX = `${INDEXER}/v1/names/fox.eth`;
 
 type Handler = (init: RequestInit | undefined) => Promise<Response>;
 
@@ -169,7 +169,7 @@ const offchainLookup: Handler = async (init) => {
   return Response.json({ jsonrpc: '2.0', id, error: { code: 3, message: 'execution reverted', data } });
 };
 
-const graphqlDomain: Handler = async () => Response.json({ data: { domain: { id: 'fox.eth', name: 'fox.eth' } } });
+const bignameName: Handler = async () => Response.json({ data: { name: 'fox.eth', status: 'active', authority: 'ens_v2' } });
 
 // Advance fake time in small steps until `promise` settles (or `maxMs` pass).
 async function settle<T>(promise: Promise<T>, maxMs: number) {
@@ -628,41 +628,45 @@ describe('which RPC reads mark an endpoint', () => {
 });
 
 describe('indexer requests under the request deadline', () => {
-  it('cuts a hung primary attempt to the time left and starts no retry or fallback after it', async () => {
-    const net = stubFetch({ [INDEXER]: hang, [INDEXER_FALLBACK]: hang });
-    const indexer = new IndexerService({ primaryEndpoint: INDEXER, fallbackEndpoint: INDEXER_FALLBACK, apiVersion: 'v2' });
+  it('cuts a hung attempt to the time left and starts no retry after it', async () => {
+    const net = stubFetch({ [FOX]: hang });
+    const indexer = new IndexerService({ endpoint: INDEXER, chainId: 11155111 });
 
     // 1.5s left, under the 2s per-attempt timeout.
     const out = await settle(inRequest(1_500, () => indexer.getDomain('fox.eth')), 60_000);
 
     expectDeadlineError(out.error);
     expect(out.elapsed).toBeLessThanOrEqual(1_550);
-    expect(net.count(INDEXER)).toBe(1);
-    expect(net.count(INDEXER_FALLBACK)).toBe(0);
+    expect(net.count(FOX)).toBe(1);
   });
 
-  it('falls back from a hung primary while time is left, bounding the fallback by the deadline', async () => {
-    const net = stubFetch({ [INDEXER]: hang, [INDEXER_FALLBACK]: after(1_800, graphqlDomain) });
-    const indexer = new IndexerService({ primaryEndpoint: INDEXER, fallbackEndpoint: INDEXER_FALLBACK, apiVersion: 'v2' });
+  it('retries hung attempts while time is left, bounding the last one by the deadline', async () => {
+    // Two hung attempts, then one that answers after 1.8s.
+    const thirdAnswers = () => {
+      let calls = 0;
+      return (init: RequestInit | undefined) => (++calls < 3 ? hang(init) : after(1_800, bignameName)(init));
+    };
+    const net = stubFetch({ [FOX]: thirdAnswers() });
+    const indexer = new IndexerService({ endpoint: INDEXER, chainId: 11155111 });
 
-    // Plenty of time: two 2s primary attempts, then the fallback answers.
+    // Plenty of time: two 2s attempts time out, then the third answers.
     const ok = await settle(inRequest(DEADLINE_MS, () => indexer.getDomain('fox.eth')), 60_000);
     expect(ok.error).toBeUndefined();
-    expect(ok.value).toMatchObject({ domain: { name: 'fox.eth' }, usedFallback: true });
+    expect(ok.value).toMatchObject({ domain: { name: 'fox.eth' } });
     expect(ok.elapsed).toBeGreaterThanOrEqual(5_800);
     expect(ok.elapsed).toBeLessThanOrEqual(5_850);
-    expect(net.count(INDEXER)).toBe(2);
+    expect(net.count(FOX)).toBe(3);
 
-    // 5.5s left: the fallback gets 1.5s, less than it needs to answer.
+    // 5.5s left: the third attempt gets 1.5s, less than it needs to answer.
+    stubFetch({ [FOX]: thirdAnswers() });
     const cut = await settle(inRequest(5_500, () => indexer.getDomain('fox.eth')), 60_000);
     expectDeadlineError(cut.error);
     expect(cut.elapsed).toBeLessThanOrEqual(5_550);
-    expect(net.count(INDEXER_FALLBACK)).toBe(2);
   });
 
   it('does not trip the indexer circuit-breaker when the deadline, not the indexer, ends the query', async () => {
-    const net = stubFetch({ [INDEXER]: hang });
-    const indexer = new IndexerService({ primaryEndpoint: INDEXER, apiVersion: 'v2' });
+    const net = stubFetch({ [FOX]: hang });
+    const indexer = new IndexerService({ endpoint: INDEXER, chainId: 11155111 });
     const resolver = { resolveName: vi.fn(async () => { throw new UpstreamError('RPC down'); }) } as any;
     const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, indexer, {} as any, resolver);
 
@@ -671,13 +675,14 @@ describe('indexer requests under the request deadline', () => {
 
     expect(out.error).toBeInstanceOf(UpstreamError);
     expect(out.elapsed).toBeLessThanOrEqual(1_550);
-    expect(net.count(INDEXER)).toBe(1);
+    expect(net.count(FOX)).toBe(1);
     expect(svc.getStatus().indexerV2.healthy).toBe(true);
 
     // A failure of the indexer's own still trips it.
-    stubFetch({ [INDEXER]: status(500) });
+    stubFetch({ [FOX]: status(500) });
     const failed = await settle(inRequest(DEADLINE_MS, () => svc.getDomainMetadata('fox.eth')), 60_000);
     expect(failed.error).toBeInstanceOf(UpstreamError);
     expect(svc.getStatus().indexerV2.healthy).toBe(false);
   });
 });
+

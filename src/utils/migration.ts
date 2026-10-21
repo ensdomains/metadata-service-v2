@@ -8,18 +8,15 @@
 //   unmigrated  Name still lives on ENS v1 (the legacy registry). Not present in
 //               the v2 registry. Volatile-ish → short cache TTL.
 //
-//   migrated    Name moved from v1 → v2. Present in v2 with the indexer's
-//               `migrated` flag set. Stable → long cache TTL.
+//   migrated    Name moved from v1 → v2. Stable → long cache TTL.
 //
 //   native      Name was *born on v2* — registered directly via the v2 registry,
-//               never existed on v1. Present in v2 with the indexer's `migrated`
-//               flag clear. Stable → long cache TTL.
+//               never existed on v1. Stable → long cache TTL.
 //
-// `migrated` vs `native` is the distinction the indexer deliberately exposes:
-// zigens (the ENS v2 indexer) stores `migrated: bool` per name and emits a
-// dedicated `NameMigrated` event "distinct from `name_registered` so consumers
-// can filter on 'migration' specifically (vs first-time mint)"
-// (zigens src/types/models.zig).
+// `migrated` vs `native` comes from the indexer: bigname serves `migrated_at`
+// on an ENSv2 name with an activated ENSv1→ENSv2 migration. Its absence is not
+// proof of a first-time mint (bigname does not serve it yet for every migrated
+// name), so an ENSv2 name without it reads `migrated`, never `native`.
 //
 // RESERVED → `unmigrated`:
 //   The v2 registry has three on-chain states (IPermissionedRegistry.Status):
@@ -55,9 +52,9 @@ export interface MigrationSignals {
   isReserved?: boolean;
   /**
    * Provenance: the v2 name was registered directly on v2 (first-time mint via
-   * ETHRegistrar), never migrated from v1. Derived from the indexer's `migrated`
-   * flag being clear (zigens `migrated == false`, set from the registration
-   * sender). Only meaningful together with `isOnV2` and a non-reserved entry.
+   * ETHRegistrar), never migrated from v1. Set only when the indexer proves it
+   * (`isMigrated === false`). Only meaningful together with `isOnV2` and a
+   * non-reserved entry.
    */
   bornOnV2?: boolean;
 }
@@ -91,25 +88,25 @@ export function isOnV2(status: MigrationStatus): boolean {
   return status === MIGRATION_STATUS.MIGRATED || status === MIGRATION_STATUS.NATIVE;
 }
 
-/** The subset of a v2-indexer (zigens) domain record that drives classification. */
+/** The subset of an indexer (bigname) domain record that drives classification. */
 export interface V2IndexerRecord {
   isMigrated?: boolean;
   owner?: { id?: string };
   ownerId?: string;
   /**
-   * zigens exposes per-row provenance: "v1" = legacy ENS row, "v2" = ENSv2 row.
-   * The indexer's schema is designed to serve BOTH, so "present in the v2 index"
-   * must not be conflated with "on v2" — assert the protocol when it's present.
+   * Registry generation that owns the name: "v1" (ENSv1) or "v2" (ENSv2). The
+   * indexer serves BOTH, so "present in the index" must not be conflated with
+   * "on v2" — assert the protocol when it's present.
    */
   protocol?: string;
 }
 
 /**
- * Classify a domain record served by the **v2 indexer** (zigens). Single source
- * of truth shared by MetadataService and SyncService so they cannot drift:
+ * Classify a domain record served by the indexer (bigname). Single source of
+ * truth shared by MetadataService and SyncService so they cannot drift:
  *  - `protocol: "v1"` row → the name is a legacy row in the index → `unmigrated`
  *  - RESERVED placeholder (owner == address(0)) → `unmigrated` (still v1-authoritative)
- *  - otherwise on v2; `isMigrated` distinguishes `migrated` from `native` (born on v2)
+ *  - otherwise on v2: `native` only when `isMigrated` is false, else `migrated`
  */
 export function classifyV2IndexerRecord(record: V2IndexerRecord): MigrationStatus {
   if (record.protocol === 'v1') {

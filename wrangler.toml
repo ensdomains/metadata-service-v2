@@ -93,9 +93,8 @@ simple = { limit = 60, period = 60 }
 
 # Environment variables
 [vars]
-ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
-ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
-ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
+BIGNAME_MAINNET_URL = "https://api.bigname.sh"
+BIGNAME_SEPOLIA_URL = "https://sepolia.api.bigname.sh"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
@@ -130,9 +129,8 @@ crons = ["17 4 * * *"]
 # ---------------------------------------------------------------------------
 
 [env.stage.vars]
-ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
-ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
-ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
+BIGNAME_MAINNET_URL = "https://api.bigname.sh"
+BIGNAME_SEPOLIA_URL = "https://sepolia.api.bigname.sh"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"
@@ -202,9 +200,8 @@ crons = ["17 4 * * *"]
 # PR Previews of the stage Worker. Not inherited from stage either: same vars,
 # bound to stage's resources (cache data only, so sharing them is safe).
 [env.stage.previews.vars]
-ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
-ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
-ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
+BIGNAME_MAINNET_URL = "https://api.bigname.sh"
+BIGNAME_SEPOLIA_URL = "https://sepolia.api.bigname.sh"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
 MAINNET_FALLBACK_RPC_2 = "https://cloudflare-eth.com"
 MAINNET_FALLBACK_RPC_3 = "https://eth.drpc.org"

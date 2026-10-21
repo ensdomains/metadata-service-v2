@@ -18,17 +18,16 @@ function makeD1() {
   } as any;
 }
 
-function makeIndexer(apiVersion: 'v1' | 'v2', status: Record<string, unknown> | null) {
+function makeIndexer(status: Record<string, unknown> | null) {
   return {
-    apiVersion,
-    getMigrationStatus: vi.fn().mockResolvedValue({ status, usedFallback: false }),
+    getMigrationStatus: vi.fn().mockResolvedValue({ status }),
   } as any;
 }
 
 describe('SyncService.syncMigrationStatus — real status in D1', () => {
-  it('stores native for a v2-dialect record born on v2', async () => {
+  it('stores native for an ENSv2 record born on v2', async () => {
     const d1 = makeD1();
-    const sync = new SyncService(d1, makeIndexer('v2', {
+    const sync = new SyncService(d1, makeIndexer({
       name: 'fox.eth', isMigrated: false, owner: { id: OWNER }, protocol: 'v2', expiryDate: '1853706120',
     }), DEFAULT_SYNC_CONFIG);
 
@@ -40,9 +39,9 @@ describe('SyncService.syncMigrationStatus — real status in D1', () => {
     });
   });
 
-  it('stores migrated for a v2-dialect record migrated from v1', async () => {
+  it('stores migrated for an ENSv2 record migrated from v1', async () => {
     const d1 = makeD1();
-    const sync = new SyncService(d1, makeIndexer('v2', {
+    const sync = new SyncService(d1, makeIndexer({
       name: 'moved.eth', isMigrated: true, owner: { id: OWNER }, protocol: 'v2',
     }), DEFAULT_SYNC_CONFIG);
 
@@ -53,7 +52,7 @@ describe('SyncService.syncMigrationStatus — real status in D1', () => {
 
   it('stores unmigrated for a RESERVED pre-seed (owner 0x0)', async () => {
     const d1 = makeD1();
-    const sync = new SyncService(d1, makeIndexer('v2', {
+    const sync = new SyncService(d1, makeIndexer({
       name: 'vitalik.eth', isMigrated: false, owner: { id: ZERO }, protocol: 'v2',
     }), DEFAULT_SYNC_CONFIG);
 
@@ -62,10 +61,10 @@ describe('SyncService.syncMigrationStatus — real status in D1', () => {
     expect(d1.storeMigrationStatus.mock.calls[0][1]).toBe(MIGRATION_STATUS.UNMIGRATED);
   });
 
-  it('stores unmigrated for v1-dialect records (v1 isMigrated ≠ v2 migration)', async () => {
+  it('stores unmigrated for an ENSv1 record', async () => {
     const d1 = makeD1();
-    const sync = new SyncService(d1, makeIndexer('v1', {
-      name: 'old.eth', isMigrated: true /* 2019 registrar migration flag */, owner: { id: OWNER },
+    const sync = new SyncService(d1, makeIndexer({
+      name: 'old.eth', isMigrated: false, owner: { id: OWNER }, protocol: 'v1',
     }), DEFAULT_SYNC_CONFIG);
 
     await sync.syncMigrationStatus('old.eth');

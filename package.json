@@ -29,8 +29,6 @@
     "@resvg/resvg-wasm": "^2.6.2",
     "adaptive-layout-composer": "^1.0.1",
     "bidi-js": "^1.0.3",
-    "graphql": "^16.11.0",
-    "graphql-request": "^7.2.0",
     "harfbuzzjs": "https://github.com/mdtanrikulu/harfbuzzjs/archive/48f2da5ebd3912c9b60188bf39a863e0099e9328.tar.gz",
     "hono": "^4.13.8",
     "rasterize-wasm": "https://github.com/mdtanrikulu/rasterize-wasm/archive/41af61c820800d6b835c66d0cbd151a92e5c111c.tar.gz",

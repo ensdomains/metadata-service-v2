@@ -79,17 +79,19 @@ function indexer(down: boolean) {
   } as any;
 }
 
-const v1Hit = () => ({
-  getDomain: vi.fn(async () => ({ domain: { name: 'fox.eth' } })),
-  getMigrationStatus: vi.fn(),
-  getHierarchy: vi.fn(),
+// The chain tier, which answers whenever the indexer is skipped or down.
+const chainHit = () => ({
+  resolveName: vi.fn(async (name: string) => ({
+    name,
+    resolver: { owner: '0x7bc153b2a4c8a2f3428bd0da77a901b81c6dd809', resolver: '0x3df10566a3f1b90dd692b49ec6f3653f5bce6cff' },
+    migrationStatus: 'unmigrated',
+  })),
 } as any);
 
 // One isolate's FallbackService, sharing breaker state through `kv`.
 function isolate(kv: MemoryKv, v2: any, config: FallbackConfig = DEFAULT_FALLBACK_CONFIG) {
-  const resolver = { resolveName: vi.fn() } as any;
   const shared = new SharedBreakerState(kv as any, KEY, config.indexerV2.healthCheckIntervalMs);
-  return new FallbackService(config, v2, {} as any, resolver, v1Hit(), shared);
+  return new FallbackService(config, v2, {} as any, chainHit(), shared);
 }
 
 // Makes an isolate whose indexer is down share a trip ending at T0 + cooldown:
@@ -123,7 +125,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const bV2 = indexer(false);
     const b = isolate(kv, bV2);
 
-    expect((await shareTrip(a)).source).toBe('indexerV1');
+    expect((await shareTrip(a)).source).toBe('blockchain');
     // The trip is written once, as the time it ends, to the key of each 10 s
     // slice it covers; each key outlives its slice and KV's minimum TTL.
     const slice = (i: number) => sliceKey(T0 + i * SHARED_BREAKER_SLICE_MS);
@@ -140,7 +142,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     expect(kv.put.mock.calls).toEqual(tripWrites(T0 + 60_000));
 
     const res = await b.getDomainMetadata('fox.eth');
-    expect(res.source).toBe('indexerV1');
+    expect(res.source).toBe('blockchain');
     expect(res.v2Consulted).toBe(false);
     expect(bV2.getDomain).not.toHaveBeenCalled();
     expect(b.getStatus().indexerV2.healthy).toBe(false);
@@ -160,9 +162,9 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const bV2 = indexer(false);
     const b = isolate(kv, bV2);
 
-    expect((await a.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect((await a.getDomainMetadata('fox.eth')).source).toBe('blockchain');
     // The isolate's own breaker trips for the cooldown, as before.
-    expect((await a.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect((await a.getDomainMetadata('fox.eth')).source).toBe('blockchain');
     expect(aV2.getDomain).toHaveBeenCalledTimes(1);
     expect(a.getStatus().indexerV2.healthy).toBe(false);
 
@@ -243,7 +245,7 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
 
     await b.getDomainMetadata('fox.eth'); // adopts the trip, until T0 + 60 s + 5 s
     vi.setSystemTime(T0 + 60_000 + SHARED_TRIP_JITTER_MS / 2 - 1);
-    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('blockchain');
     expect(bV2.getDomain).not.toHaveBeenCalled();
 
     vi.setSystemTime(T0 + 60_000 + SHARED_TRIP_JITTER_MS / 2);
@@ -279,9 +281,9 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     // The next slice's key is new to b, so b reads the trip and skips the
     // indexer for the rest of it, 50 s before the cooldown ends.
     vi.setSystemTime(T0 + SHARED_BREAKER_SLICE_MS + 1_000);
-    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('blockchain');
     vi.setSystemTime(T0 + 61_999);
-    expect((await b.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect((await b.getDomainMetadata('fox.eth')).source).toBe('blockchain');
     expect(bV2.getDomain).toHaveBeenCalledTimes(2);
 
     vi.setSystemTime(T0 + 62_000);
@@ -398,9 +400,9 @@ describe('FallbackService — indexer breaker shared across isolates', () => {
     const aV2 = indexer(true);
     const a = isolate(kv, aV2);
 
-    expect((await shareTrip(a)).source).toBe('indexerV1');
+    expect((await shareTrip(a)).source).toBe('blockchain');
     expect(kv.put).toHaveBeenCalledTimes(tripWrites(T0 + 60_000).length); // tried, and all failed
-    expect((await a.getDomainMetadata('fox.eth')).source).toBe('indexerV1');
+    expect((await a.getDomainMetadata('fox.eth')).source).toBe('blockchain');
     expect(aV2.getDomain).toHaveBeenCalledTimes(2);
   });
 
@@ -425,7 +427,7 @@ describe('MetadataService — breaker state wiring', () => {
   const service = (kv: MemoryKv, network: 'mainnet' | 'sepolia') => {
     const svc = new MetadataService(
       {
-        indexerV2Endpoint: 'https://indexer.test/graphql',
+        indexerV2Endpoint: 'https://sepolia.api.bigname.test',
         network,
         fallbackToBlockchain: false,
         internalCacheEnabled: false,

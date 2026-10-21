@@ -1,6 +1,6 @@
 import { namehash } from "@ensdomains/ensjs/utils";
 import { ens_normalize as normalize } from "@adraffy/ens-normalize";
-import { keccak256, numberToHex, pad, toHex } from "viem";
+import { hexToBytes, keccak256, numberToHex, pad, toHex } from "viem";
 import { packetToBytes, labelhash } from "viem/ens";
 
 // Type declaration for Intl.Segmenter
@@ -109,7 +109,7 @@ export function tokenIdToHex(tokenId: string): `0x${string}` {
 
 // Canonical form of a v2 ETHRegistry tokenId: the labelhash with its low 32
 // bits (the token-version counter) zeroed. Any version of a token maps to the
-// same canonicalId, which is what the zigens `canonicalId` field stores.
+// same canonicalId.
 export function canonicalTokenId(tokenId: string): `0x${string}` {
   const hex = tokenIdToHex(tokenId).toLowerCase();
   return `${hex.slice(0, -8)}00000000` as `0x${string}`;
@@ -207,6 +207,28 @@ export function canonicalizeName(name: string): string {
  */
 export function dnsEncodeName(name: string): `0x${string}` {
   return toHex(packetToBytes(name));
+}
+
+/**
+ * Decode a DNS wire-format name (dnsEncodeName's output) back to dotted form.
+ * Null for an empty or malformed encoding. Labels are decoded as UTF-8, as
+ * written, so the result is not normalized.
+ */
+export function dnsDecodeName(encoded: `0x${string}`): string | null {
+  const bytes = hexToBytes(encoded);
+  const labels: string[] = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    const length = bytes[offset];
+    if (length === 0) {
+      return offset === bytes.length - 1 && labels.length > 0 ? labels.join('.') : null;
+    }
+    const end = offset + 1 + length;
+    if (end > bytes.length) return null;
+    labels.push(new TextDecoder().decode(bytes.slice(offset + 1, end)));
+    offset = end;
+  }
+  return null;
 }
 
 // Validate ENS name format

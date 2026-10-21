@@ -61,9 +61,8 @@ export interface Env {
   RATE_LIMITER_IMAGE?: RateLimit;
 
   // Environment Variables
-  ENSNODE_MAINNET_URL: string;
-  ENSNODE_SEPOLIA_V2_URL: string;
-  ENSNODE_SEPOLIA_V1_URL?: string;
+  BIGNAME_MAINNET_URL: string;
+  BIGNAME_SEPOLIA_URL: string;
   MAINNET_RPC_URL: string;
   SEPOLIA_RPC_URL: string;
   MAINNET_FALLBACK_RPC_1?: string;
@@ -217,8 +216,8 @@ function getRpcUrl(env: Env, network: NetworkName): string {
   return env[NETWORKS[network].rpcUrlEnvKey];
 }
 
-function getIndexerV2Url(env: Env, network: NetworkName): string {
-  return env[NETWORKS[network].indexerV2UrlEnvKey];
+function getBignameUrl(env: Env, network: NetworkName): string {
+  return env[NETWORKS[network].bignameUrlEnvKey];
 }
 
 // Optional duration override in seconds → ms. Unset/invalid → undefined, so the
@@ -273,12 +272,7 @@ function getServices(env: Env, network: NetworkName): FullServices {
 
   const metadataService = new MetadataService(
     {
-      indexerV2Endpoint: getIndexerV2Url(env, network),
-      indexerV2ApiVersion: NETWORKS[network].indexerV2ApiVersion,
-      // Optional v1 ENSNode subgraph fallback (sepolia: v1 names absent from zigens).
-      indexerV1Endpoint: NETWORKS[network].indexerV1UrlEnvKey
-        ? env[NETWORKS[network].indexerV1UrlEnvKey!]
-        : undefined,
+      indexerV2Endpoint: getBignameUrl(env, network),
       network,
       fallbackToBlockchain: true,
       internalCacheEnabled: true,
@@ -744,13 +738,12 @@ app.get(
 // POST /batch-metadata limits (WEB-1552). Workers Paid allows 10,000
 // subrequests per invocation (fetch and KV count). One distinct name costs,
 // counted from the code with each call answering on its first attempt:
-//  - indexers down (sepolia): KV get + write-back 2, checkExpiry 2 RPC reads,
-//    zigens 2 and v1 subgraph 2 (primary + one retry each), blockchain tier 6
-//    (v2 getState; v1 owner, resolver, isWrapped owner, NameWrapper.getData,
-//    nameExpires), v2 registry discovery (2 reads per lookup) 4 while not
-//    cached = 18;
+//  - indexer down (sepolia): KV get + write-back 2, checkExpiry 2 RPC reads,
+//    bigname 3 (one request, three attempts), blockchain tier 6 (v2 getState;
+//    v1 owner, resolver, isWrapped owner, NameWrapper.getData, nameExpires),
+//    v2 registry discovery (2 reads per lookup) 4 while not cached = 17;
 //  - indexer up and the name's D1 row stale: the D1 sync adds 3 indexer
-//    queries = 21;
+//    requests = 20;
 //  - worst case, a subname of a v2 name with its own subregistry that no
 //    indexer covers: the owner's contracts can make the Universal Resolver
 //    revert on every RPC client, and the hierarchical resolver then reads 2
@@ -934,9 +927,8 @@ app.post("/batch-metadata", async (c) => {
 // Health check with detailed status
 app.get("/health", async (c) => {
   try {
-    // Probe BOTH indexers: the mainnet ENSNode subgraph AND the sepolia zigens
-    // (v2) indexer — the latter backs the entire v2 path and would otherwise go
-    // unmonitored. Blockchain health (both RPCs) is the same from either service.
+    // Probe the bigname host of BOTH networks: each backs its network's names.
+    // Blockchain health (both RPCs) is the same from either service.
     const [mainnetHealth, sepoliaHealth] = await Promise.race([
       Promise.all([
         getServices(c.env, 'mainnet').metadataService.healthCheck(),
@@ -945,7 +937,7 @@ app.get("/health", async (c) => {
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Health check timeout')), 15000)),
     ]);
 
-    // Indexer dependency = worst of the two indexers (a zigens outage must surface).
+    // Indexer dependency = worst of the two hosts (an outage of either must surface).
     const indexerStatus = worstStatus(mainnetHealth.indexerV2, sepoliaHealth.indexerV2);
     const mainnetRpc = mainnetHealth.blockchain.mainnet;
     const sepoliaRpc = mainnetHealth.blockchain.sepolia;
@@ -1198,12 +1190,12 @@ const handleWebhook = async (c: AppContext) => {
           // cannot be derived from the payload (v1 contracts share addresses
           // across chains, and a v2-dialect indexer like zigens emits v1 events
           // for legacy activity on ITS chain too). So: v2 events target the
-          // networks whose indexer speaks v2 (config-derived — mainnet joins
+          // networks with ENSv2 deployed (config-derived — mainnet joins
           // automatically when it flips), while v1 events could concern ANY
           // network; the per-network existence gate below cheaply skips chains
           // where the name doesn't resolve, so wrong-chain warming is a no-op.
           const targetNetworks = payload.protocol === 'v2'
-            ? SUPPORTED_NETWORKS.filter((n) => NETWORKS[n].indexerV2ApiVersion === 'v2')
+            ? SUPPORTED_NETWORKS.filter((n) => NETWORKS[n].hasEnsV2)
             : SUPPORTED_NETWORKS;
 
           // Purge L0 edge cache for every URL shape that could hold this name:

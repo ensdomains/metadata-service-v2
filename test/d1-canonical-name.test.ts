@@ -155,7 +155,7 @@ describe.skipIf(!DatabaseSync)('D1 migration_status rows written before canonica
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { d1 } = withOldRow();
     const svc = new MetadataService(
-      { indexerV2Endpoint: 'https://zigens.test/graphql', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: false },
+      { indexerV2Endpoint: 'https://sepolia.api.bigname.test', network: 'sepolia', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: false },
       { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
       { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
     );

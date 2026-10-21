@@ -41,8 +41,7 @@ describe('MetadataService throws the typed InvalidNameError (not a plain Error)'
   function makeService(): MetadataService {
     return new MetadataService(
       {
-        indexerV2Endpoint: 'https://zigens.test/graphql',
-        indexerV2ApiVersion: 'v1',
+        indexerV2Endpoint: 'https://sepolia.api.bigname.test',
         network: 'mainnet',
         fallbackToBlockchain: true,
         internalCacheEnabled: false,
@@ -102,7 +101,7 @@ describe('names the lookups cannot hash are rejected with 400', () => {
 
   it.each(UNRESOLVABLE)('the service rejects %s itself too (token-id and batch paths reach it by name)', async (raw) => {
     const svc = new MetadataService(
-      { indexerV2Endpoint: 'https://zigens.test/graphql', network: 'mainnet', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: false },
+      { indexerV2Endpoint: 'https://sepolia.api.bigname.test', network: 'mainnet', fallbackToBlockchain: true, internalCacheEnabled: false, d1Enabled: false },
       { get: vi.fn().mockResolvedValue(null), put: vi.fn(), delete: vi.fn(), list: vi.fn() } as unknown as KVNamespace,
       { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RPC_URL: 'https://sepolia.test.rpc' },
     );

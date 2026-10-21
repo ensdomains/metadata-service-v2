@@ -139,8 +139,21 @@ function rowCount(db: SqliteDb, table: string, network?: string): number {
   return Number((row as { n: number }).n);
 }
 
-// A zigens (v2 dialect) domain row for a subname: subnames skip the 2LD expiry
-// gate, so a metadata request touches nothing but the indexer.
+// A bigname ENSv2 name row: subnames skip the 2LD expiry gate, so a metadata
+// request touches nothing but the indexer.
+function bignameRow(name: string) {
+  return {
+    name,
+    status: 'active',
+    authority: 'ens_v2',
+    owner: OWNER,
+    expires_at: String(Math.floor(Date.now() / 1000) + 365 * 86400),
+    created_at: '1700000000',
+    resolver: { chain_id: 11155111, address: ZERO },
+  };
+}
+
+// The same row in the service's domain shape.
 function v2Domain(name: string): IndexerDomain {
   const label = name.split('.')[0];
   return {
@@ -162,8 +175,7 @@ const BLOCKCHAIN_ENV = { MAINNET_RPC_URL: 'https://mainnet.test.rpc', SEPOLIA_RP
 function makeService(db: D1Database | undefined, config: Partial<MetadataServiceConfig> = {}): MetadataService {
   return new MetadataService(
     {
-      indexerV2Endpoint: 'https://zigens.test/graphql',
-      indexerV2ApiVersion: 'v2',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network: 'sepolia',
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
@@ -212,9 +224,8 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
     SVG_CACHE: createMockKV(),
     ASSET_BUCKET: createMockR2(),
     DB: undefined,
-    ENSNODE_MAINNET_URL: 'https://api.ensnode.test/graphql',
-    ENSNODE_SEPOLIA_V2_URL: 'https://zigens.test/graphql',
-    ENSNODE_SEPOLIA_V1_URL: 'https://v1subgraph.test/graphql',
+    BIGNAME_MAINNET_URL: 'https://api.bigname.test',
+    BIGNAME_SEPOLIA_URL: 'https://sepolia.api.bigname.test',
     MAINNET_RPC_URL: 'https://mainnet.test.rpc',
     SEPOLIA_RPC_URL: 'https://sepolia.test.rpc',
     RATE_LIMIT_DISABLED: 'true',
@@ -230,19 +241,23 @@ async function loadApp() {
   return (await import('../src/index')).default;
 }
 
-// Answers the indexer's GraphQL queries: GetDomain returns a v2 row for the
-// requested name, everything else is a clean miss. Records each operation.
+// Answers bigname: a name detail is an ENSv2 row for the requested name, and
+// every lookup input is not found. Records each request as GetDomain (a name
+// detail) or Lookup.
 function stubIndexer() {
   const ops: string[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
-    if (!String(url).startsWith('https://zigens.test/')) throw new TypeError(`unexpected fetch ${url}`);
-    const body = JSON.parse(String(init?.body ?? '{}')) as { query: string; variables?: { name?: string } };
-    const op = /query (\w+)/.exec(body.query)?.[1] ?? 'unknown';
-    ops.push(op);
-    const data = op === 'GetDomain' && body.variables?.name
-      ? { domain: v2Domain(body.variables.name) }
-      : { domain: null };
-    return new Response(JSON.stringify({ data }), { headers: { 'Content-Type': 'application/json' } });
+    const { origin, pathname } = new URL(String(url));
+    if (origin !== 'https://sepolia.api.bigname.test') throw new TypeError(`unexpected fetch ${url}`);
+    const json = (data: unknown) => new Response(JSON.stringify({ data }), { headers: { 'Content-Type': 'application/json' } });
+    if (pathname === '/v1/lookup') {
+      ops.push('Lookup');
+      const { inputs } = JSON.parse(String(init?.body)) as { inputs: Array<{ name: string }> };
+      return json(inputs.map((input) => ({ status: 'not_found', kind: 'name', input })));
+    }
+    ops.push('GetDomain');
+    const name = decodeURIComponent(pathname.replace('/v1/names/', ''));
+    return json(bignameRow(name));
   }));
   return ops;
 }
@@ -347,17 +362,18 @@ describe.skipIf(!hasSqlite)('metadata request → D1 sync runs after the respons
     expect(rowCount(sqlite, 'domains', 'sepolia')).toBe(1);
   });
 
-  it('a name served from the secondary v1 subgraph is not synced (no re-query of the primary)', async () => {
-    // syncDomain only ever stored what the primary indexer returns; for an
-    // indexerV1 hit the primary just missed, so querying it again was waste.
+  it('a name served from the chain tier is not synced (no re-query of the indexer)', async () => {
+    // syncDomain only stores what the indexer returns; for a chain-tier answer
+    // the indexer just missed, so querying it again would be waste.
     const { d1 } = makeSqliteD1(openSqlite());
     const svc = makeService(d1);
     (svc as unknown as { fallback: { getDomainMetadata: unknown } }).fallback = {
       getDomainMetadata: vi.fn().mockResolvedValue({
-        data: v2Domain('old.eth'), source: 'indexerV1', usedFallback: true, v2Consulted: true, retries: 1,
+        data: { ...v2Domain('old.eth'), chainMigrationStatus: 'unmigrated' },
+        source: 'blockchain', usedFallback: true, v2Consulted: true, retries: 1,
       }),
     };
-    const getDomain = vi.spyOn(svc.indexerV2, 'getDomain').mockResolvedValue({ domain: null, usedFallback: false });
+    const getDomain = vi.spyOn(svc.indexerV2, 'getDomain').mockResolvedValue({ domain: null });
     const { ctx, drain } = makeCtx();
 
     await svc.getMetadata('sepolia', 'registry', 'old.eth', 'https://meta.test', ctx);
@@ -372,13 +388,13 @@ describe.skipIf(!hasSqlite)('metadata request → D1 sync runs after the respons
       getDomain: vi.fn().mockResolvedValue(null),
       storeDomain: vi.fn(),
       getMigrationStatus: vi.fn().mockResolvedValue(null),
+      storeMigrationStatus: vi.fn(),
       updateSyncStatus: vi.fn(),
     };
     const indexer = {
-      apiVersion: 'v2',
-      getDomain: vi.fn().mockResolvedValue({ domain: v2Domain('sub.fox.eth'), usedFallback: false }),
-      getMigrationStatus: vi.fn().mockResolvedValue({ status: null, usedFallback: false }),
-      getHierarchy: vi.fn().mockResolvedValue({ hierarchy: null, usedFallback: false }),
+      getDomain: vi.fn().mockResolvedValue({ domain: v2Domain('sub.fox.eth') }),
+      getMigrationStatus: vi.fn().mockResolvedValue({ status: null }),
+      getHierarchy: vi.fn().mockResolvedValue({ hierarchy: null }),
     };
     const sync = new SyncService(d1 as never, indexer as never, DEFAULT_SYNC_CONFIG);
 
@@ -389,6 +405,8 @@ describe.skipIf(!hasSqlite)('metadata request → D1 sync runs after the respons
     await sync.syncDomain('other.fox.eth', false, fetched);
     expect(indexer.getDomain).toHaveBeenCalledTimes(1); // not queried again
     expect(d1.storeDomain).toHaveBeenLastCalledWith(fetched, 'ensnode');
+    // Its migration status comes from the same row.
+    expect(indexer.getMigrationStatus).not.toHaveBeenCalled();
   });
 });
 
@@ -542,7 +560,7 @@ describe.skipIf(!hasSqlite)('D1 reads treat rows older than the read max age as 
       getDomainMetadata: vi.fn().mockRejectedValue(new UpstreamError('all sources down')),
     });
 
-    const svc = makeService(makeSqliteD1(sqlite).d1, { network: 'mainnet', indexerV2ApiVersion: 'v1' });
+    const svc = makeService(makeSqliteD1(sqlite).d1, { network: 'mainnet' });
     (svc as unknown as { fallback: unknown }).fallback = outage();
     await expect(svc.getMetadata('mainnet', 'registry', 'stale.eth', 'https://meta.test'))
       .rejects.toBeInstanceOf(UpstreamError);
@@ -551,7 +569,7 @@ describe.skipIf(!hasSqlite)('D1 reads treat rows older than the read max age as 
 
     // d1ReadMaxAgeMs reaches the D1 tier.
     const strict = makeService(makeSqliteD1(sqlite).d1, {
-      network: 'mainnet', indexerV2ApiVersion: 'v1', d1ReadMaxAgeMs: DAY / 2,
+      network: 'mainnet', d1ReadMaxAgeMs: DAY / 2,
     });
     (strict as unknown as { fallback: unknown }).fallback = outage();
     await expect(strict.getMetadata('mainnet', 'registry', 'fresh.eth', 'https://meta.test'))

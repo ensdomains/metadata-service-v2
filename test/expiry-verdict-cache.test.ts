@@ -32,8 +32,7 @@ type Chain = Record<string, ReturnType<typeof vi.fn>>;
 function makeService(network: 'mainnet' | 'sepolia', blockchain: Chain): MetadataService {
   const svc = new MetadataService(
     {
-      indexerV2Endpoint: 'https://zigens.test/graphql',
-      indexerV2ApiVersion: network === 'sepolia' ? 'v2' : 'v1',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network,
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
@@ -276,9 +275,8 @@ const env = {
     list: async () => ({ objects: [], truncated: false }),
   },
   DB: undefined,
-  ENSNODE_MAINNET_URL: 'https://ensnode-v1.test/subgraph',
-  ENSNODE_SEPOLIA_V2_URL: 'https://zigens.test/graphql',
-  ENSNODE_SEPOLIA_V1_URL: 'https://ensnode-sepolia-v1.test/subgraph',
+  BIGNAME_MAINNET_URL: 'https://api.bigname.test',
+  BIGNAME_SEPOLIA_URL: 'https://sepolia.api.bigname.test',
   MAINNET_RPC_URL: 'https://rpc-mainnet.test',
   SEPOLIA_RPC_URL: 'https://rpc-sepolia.test',
   WEBHOOK_ALLOW_UNAUTHENTICATED: 'true', // signature checks are covered by webhook.test.ts

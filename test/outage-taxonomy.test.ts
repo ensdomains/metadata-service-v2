@@ -25,9 +25,7 @@ function makeKV() {
 function makeSepoliaMetadataService(): MetadataService {
   return new MetadataService(
     {
-      indexerV2Endpoint: 'https://zigens.test/graphql',
-      indexerV2ApiVersion: 'v2',
-      indexerV1Endpoint: 'https://ensnode-v1.test/subgraph',
+      indexerV2Endpoint: 'https://sepolia.api.bigname.test',
       network: 'sepolia',
       fallbackToBlockchain: true,
       internalCacheEnabled: false,
@@ -130,27 +128,25 @@ describe('getRegistryHierarchy blockchain tier outage taxonomy', () => {
   function makeFallbackService(
     indexerError: () => Error,
     resolveName: ReturnType<typeof vi.fn>,
-  ): { svc: FallbackService; v2: { getHierarchy: ReturnType<typeof vi.fn> }; v1: { getHierarchy: ReturnType<typeof vi.fn> } } {
+  ): { svc: FallbackService; v2: { getHierarchy: ReturnType<typeof vi.fn> } } {
     const v2 = makeIndexerFailingWith(indexerError);
-    const v1 = makeIndexerFailingWith(indexerError);
     const resolver = { resolveName } as never;
     const blockchain = {} as never; // not touched by getRegistryHierarchy
-    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, blockchain, resolver, v1);
-    return { svc, v2, v1 };
+    const svc = new FallbackService(DEFAULT_FALLBACK_CONFIG, v2, blockchain, resolver);
+    return { svc, v2 };
   }
 
-  it('total outage (both indexers + all RPCs down) throws UpstreamError, never an all-zero hierarchy', async () => {
+  it('total outage (the indexer + all RPCs down) throws UpstreamError, never an all-zero hierarchy', async () => {
     // regression: resolve failures fabricated zero-owner placeholder levels → cacheable 200 of made-up data
     const resolveName = vi.fn(async () => {
       throw new UpstreamError('All RPC clients failed for mainnet');
     });
-    const { svc, v2, v1 } = makeFallbackService(() => new UpstreamError('indexer unreachable'), resolveName);
+    const { svc, v2 } = makeFallbackService(() => new UpstreamError('indexer unreachable'), resolveName);
 
     await expect(svc.getRegistryHierarchy('foo.eth')).rejects.toBeInstanceOf(UpstreamError);
 
     // Sanity: every tier really was attempted and failed upstream.
     expect(v2.getHierarchy).toHaveBeenCalled();
-    expect(v1.getHierarchy).toHaveBeenCalled();
     expect(resolveName).toHaveBeenCalled();
   });
 
@@ -253,82 +249,40 @@ describe('getResolverHierarchical RPC-failure error contract', () => {
 // ---------------------------------------------------------------------------
 // resolveTokenId (src/services/metadata.ts)
 // ---------------------------------------------------------------------------
-describe('resolveTokenId under a primary (v2) indexer outage', () => {
+describe('resolveTokenId under an indexer outage', () => {
   // tokenId = labelhash("nick") as decimal — a plain v1 BaseRegistrar token
   const NICK_TOKEN_ID =
     '79233663829379634837589865448569342784712482819484549289560981379859480642508';
 
-  function makeService() {
+  it('BaseRegistrar tokenId: surfaces the outage as UpstreamError, not a cacheable 404', async () => {
     const service = makeSepoliaMetadataService();
+    const outage = new UpstreamError('bigname request failed: fetch failed');
+    vi.spyOn(service.indexerV2, 'getEthDomainByLabelhash').mockRejectedValue(outage);
 
-    // Simulate a zigens outage: the primary (v2) indexer's namehash lookup fails
-    // with an UpstreamError, exactly as IndexerService.executeQuery throws when
-    // the endpoint is down/times out.
-    const v2Spy = vi
-      .fn()
-      .mockRejectedValue(new UpstreamError('ensnode request failed: fetch failed (zigens down)'));
-    (service.indexerV2 as unknown as { getDomainByNamehash: unknown }).getDomainByNamehash = v2Spy;
-
-    // The healthy v1 ENSNode subgraph CAN answer this namehash lookup.
-    const v1Spy = vi
-      .fn()
-      .mockResolvedValue({ domain: { name: 'nick.eth', labelName: 'nick' }, usedFallback: false });
-    const indexerV1 = (service as unknown as { indexerV1?: { getDomainByNamehash: unknown } }).indexerV1;
-    if (!indexerV1) throw new Error('indexerV1 was not constructed — config wiring wrong');
-    indexerV1.getDomainByNamehash = v1Spy;
-
-    return { service, v2Spy, v1Spy };
-  }
-
-  it('BaseRegistrar tokenId: falls through to the healthy v1 subgraph and resolves', async () => {
-    // regression: the primary UpstreamError aborted resolution before the v1 tier was consulted (503 instead of the answer)
-    const { service, v2Spy, v1Spy } = makeService();
-
-    const res = await service.resolveTokenId('sepolia', CONTRACTS.sepolia.registrar, NICK_TOKEN_ID);
-
-    expect(res.name).toBe('nick.eth');
-    expect(res.registryType).toBe('registry');
-    expect(v2Spy).toHaveBeenCalledTimes(1);
-    expect(v1Spy).toHaveBeenCalledTimes(1);
+    await expect(service.resolveTokenId('sepolia', CONTRACTS.sepolia.registrar, NICK_TOKEN_ID))
+      .rejects.toBe(outage);
   });
 
-  it('NameWrapper tokenId: same fall-through to v1', async () => {
-    // regression: NameWrapper (namehash-form) lookups aborted on the same primary outage
-    const { service, v1Spy } = makeService();
-    v1Spy.mockResolvedValue({ domain: { name: 'vitalik.eth' }, usedFallback: false });
+  it('NameWrapper tokenId: reads the name from the NameWrapper, without the indexer', async () => {
+    const service = makeSepoliaMetadataService();
+    const indexerSpy = vi.spyOn(service.indexerV2, 'getEthDomainByLabelhash');
+    const wrapperSpy = vi.spyOn(service.blockchain, 'getWrappedName').mockResolvedValue('vitalik.eth');
     const namehashDecimal =
       '28830309785498705498605967065639339498816498484392297776506587544614029665578';
 
     const res = await service.resolveTokenId('sepolia', CONTRACTS.sepolia.nameWrapper, namehashDecimal);
 
-    expect(res.name).toBe('vitalik.eth');
-    expect(res.registryType).toBe('namewrapper');
-    expect(v1Spy).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ name: 'vitalik.eth', registryType: 'namewrapper' });
+    expect(wrapperSpy).toHaveBeenCalledWith('sepolia', `0x${BigInt(namehashDecimal).toString(16).padStart(64, '0')}`);
+    expect(indexerSpy).not.toHaveBeenCalled();
   });
 
-  it('v1 miss after a v2 outage surfaces the ORIGINAL UpstreamError, not a cacheable 404', async () => {
-    // regression companion: a v1 miss proves nothing while the v2 index was never consulted
-    const { service, v1Spy } = makeService();
-    v1Spy.mockResolvedValue({ domain: null, usedFallback: false });
+  it('control: a clean miss is a 404', async () => {
+    const service = makeSepoliaMetadataService();
+    vi.spyOn(service.indexerV2, 'getEthDomainByLabelhash').mockResolvedValue({ domain: null });
 
-    let thrown: unknown;
-    try {
-      await service.resolveTokenId('sepolia', CONTRACTS.sepolia.registrar, NICK_TOKEN_ID);
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(UpstreamError);
-    expect((thrown as Error).message).toContain('zigens down'); // the original outage error, verbatim
-    expect(thrown).not.toBeInstanceOf(NotFoundError);
-  });
-
-  it('control: a clean miss on v2 also falls through to v1 (non-outage path unchanged)', async () => {
-    const { service, v2Spy, v1Spy } = makeService();
-    v2Spy.mockResolvedValue({ domain: null, usedFallback: false });
-
-    const res = await service.resolveTokenId('sepolia', CONTRACTS.sepolia.registrar, NICK_TOKEN_ID);
-    expect(res.name).toBe('nick.eth');
-    expect(v1Spy).toHaveBeenCalledTimes(1);
+    await expect(service.resolveTokenId('sepolia', CONTRACTS.sepolia.registrar, NICK_TOKEN_ID))
+      .rejects.toBeInstanceOf(NotFoundError);
   });
 });
 
@@ -371,13 +325,13 @@ describe('ResolverService error-taxonomy passthrough', () => {
 // ---------------------------------------------------------------------------
 describe('resolveStatusForImage strict mode (webhook persistence guard)', () => {
   function makeDegradedCorroborationService(): MetadataService {
-    // indexerV1-sourced record with v2Consulted=false → statusFromSource must
-    // corroborate on-chain; the chain read fails (RPCs exhausted).
+    // A blockchain-sourced record without its precomputed status → statusFromSource
+    // must corroborate on-chain; the chain read fails (RPCs exhausted).
     const svc = makeSepoliaMetadataService();
     (svc as unknown as { fallback: unknown }).fallback = {
       getDomainMetadata: vi.fn().mockResolvedValue({
         data: { name: 'fox.eth', ownerId: OWNER, owner: { id: OWNER } },
-        source: 'indexerV1',
+        source: 'blockchain',
         usedFallback: true,
         fallthroughs: 1,
         v2Consulted: false,

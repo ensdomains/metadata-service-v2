@@ -26,7 +26,7 @@ Next-generation ENS metadata service built on Cloudflare Workers for ENS v1 and 
 - **ENS v1 & v2 Support**: Native v2 names and legacy v1 names on Ethereum
 - **High Performance**: Cloudflare Workers edge computing with global distribution
 - **Smart Caching**: Edge + KV + R2 caching; the KV and R2 tiers use migration-aware, stale-while-revalidate TTLs, while the per-colo edge tier is a flat 300s cap
-- **Fallback Resilience**: For name lookups, direct chain queries when the indexers are unavailable *or* simply don't know the name, then a stale D1 row as a last resort (the `contract/tokenId` reverse lookup is indexer-only)
+- **Fallback Resilience**: For name lookups, direct chain queries when the indexer is unavailable *or* simply doesn't know the name, then a stale D1 row as a last resort (the `contract/tokenId` reverse lookup is indexer-only)
 - **SVG Generation**: Canvas-free SVG card generation, with in-Worker PNG rasterization via resvg/HarfBuzz WASM
 
 ## Example
@@ -67,7 +67,7 @@ curl https://ens-metadata.ens-cf.workers.dev/mainnet/avatar/ethereum.eth        
 <details>
 <summary><b>Route details</b></summary>
 
-- **`GET /{network}/{registryType}/{identifier}`**: NFT metadata. `registryType` = `registry` | `namewrapper`, or a contract address: the v1 BaseRegistrar, the v1 NameWrapper, or, where v2 is deployed, any v2 registry the indexer knows (the ETHRegistry, and the registries under names); any other address is a `404` (on a v2 network, a `503` while the indexer is down). `identifier` = ENS name, or that contract's token id (decimal or `0x` hex; on this route it may end in `.json`, as a v2 token URI can). A v2 token id is looked up in its own registry only, since the same id is in every registry with that label, and is served under the name that registry hangs under, never under another name that points its subregistry at it. An unreachable token (orphaned by a subregistry repoint, an unregistered label or an expired ancestor) and the root registry's top-level names are a `404`. The `contract/tokenId` → name step queries the indexers only (plus the cached on-chain discovery of the live v2 registries)
+- **`GET /{network}/{registryType}/{identifier}`**: NFT metadata. `registryType` = `registry` | `namewrapper`, or a contract address: the v1 BaseRegistrar, the v1 NameWrapper, or, where v2 is deployed, any v2 registry the indexer knows (the ETHRegistry, and the registries under names); any other address is a `404` (on a v2 network, a `503` while the indexer is down). `identifier` = ENS name, or that contract's token id (decimal or `0x` hex; on this route it may end in `.json`, as a v2 token URI can). A v2 token id is looked up in its own registry only, since the same id is in every registry with that label, and is served under the name that registry hangs under, never under another name that points its subregistry at it. An unreachable token (orphaned by a subregistry repoint, an unregistered label or an expired ancestor) and the root registry's top-level names are a `404`. The `contract/tokenId` → name step reads the indexer for BaseRegistrar and v2 registry tokens (a registry's labels are scanned, up to 1,000, since bigname has no token id filter; the ETHRegistry has more, so its native token ids are a `404` until it does) and the NameWrapper's own `names(node)` for NameWrapper tokens
 - **`GET /{network}/{registryType}/{identifier}/image`**: NFT card image (SVG). Optional `?w=&h=` (both required, 100–2000 px) and `?status=` (`unmigrated` | `migrated` | `native`; overrides the rendered status — badge, colours and cache TTL — but never the existence check)
 - **`GET /{network}/{registryType}/{identifier}/rasterize`**: NFT card image rasterized to PNG. Same query params; `?w=`/`?h=` are ignored unless both are within 100–2000
 - **`GET /{network}/avatar/{name}`**: Avatar image bytes (the `avatar` text record)
@@ -120,7 +120,7 @@ flowchart LR
   kvm --> idx
   render --> idx
   subgraph sources [Name data, per network]
-    idx[Indexer<br/>ENSNode · zigens] -- down or no record --> chain[On-chain<br/>viem]
+    idx[Indexer<br/>bigname] -- down or no record --> chain[On-chain<br/>viem]
     chain -- unreachable --> d1[(Stale D1 row)]
   end
 ```
@@ -128,9 +128,8 @@ flowchart LR
 - **Runtime**: Cloudflare Workers + Hono
 - **Storage**: KV (metadata + SVG cache), R2 (fonts, L2 SVG cache, cached avatars), D1 (migration statuses + last-resort data tier), plus the per-colo Cloudflare edge cache (capped at 300s because the webhook cannot purge it globally)
 - **Data Sources** (tiered, per network):
-  - mainnet: ENSNode subgraph (v1 queries) → on-chain via viem → stale D1
-  - sepolia: zigens ENS v2 indexer (primary) → ENSNode sepolia subgraph (v1 secondary) → on-chain via viem (live v2 registry discovery through the UniversalResolver proxy) → stale D1
-  - The chain tier runs both when an indexer is down (upstream error) and when it has no record of the name (clean miss). A circuit breaker guards the **primary indexer tier only** (mainnet: the ENSNode subgraph; sepolia: zigens) — only an upstream error trips it (a miss never does), it stays open for 60s per isolate, and the sepolia secondary v1 subgraph and the on-chain tier have no breaker.
+  - both networks: bigname (ENSv1 and ENSv2 names, `api.bigname.sh` / `sepolia.api.bigname.sh`) → on-chain via viem (on sepolia, live v2 registry discovery through the UniversalResolver proxy) → stale D1
+  - The chain tier runs both when the indexer is down (upstream error) and when it has no record of the name (clean miss). A bigname `stale` answer, a timeout or a server error is retried (three attempts); `conflict` and other client errors are not. A circuit breaker guards the **indexer tier only** — only an upstream error trips it (a miss never does), it stays open for 60s per isolate, and the on-chain tier has no breaker.
 - **Networks**: Ethereum mainnet (ENS v1; v2 contracts are placeholders until v2 deploys there) + Sepolia testnet (ENS v1 + v2)
 
 ## Development
@@ -265,15 +264,14 @@ cases, but any key that also appears in `.dev.vars` or `.env` overrides the `[va
 keep only secrets and deliberate local overrides in those files.
 
 **Required** (not validated at startup: a missing RPC URL silently falls back to viem's built-in
-public RPC for that chain, and a missing indexer URL makes every indexer query fail and drop to
+public RPC for that chain, and a missing indexer URL makes every indexer request fail and drop to
 the on-chain tier):
 - `MAINNET_RPC_URL`: Primary Ethereum mainnet RPC endpoint (production: `wrangler secret put`)
 - `SEPOLIA_RPC_URL`: Primary Sepolia testnet RPC endpoint (production: `wrangler secret put`)
-- `ENSNODE_MAINNET_URL`: ENSNode subgraph endpoint for mainnet (v1 queries)
-- `ENSNODE_SEPOLIA_V2_URL`: zigens ENS v2 indexer endpoint for sepolia (primary)
+- `BIGNAME_MAINNET_URL`: bigname API for mainnet (`https://api.bigname.sh`)
+- `BIGNAME_SEPOLIA_URL`: bigname API for sepolia (`https://sepolia.api.bigname.sh`)
 
 **Optional:**
-- `ENSNODE_SEPOLIA_V1_URL`: ENSNode sepolia subgraph (v1 secondary indexer for v1-only names)
 - `MAINNET_FALLBACK_RPC_1..3`: fallback RPC endpoints (if none is set, mainnet uses built-in public RPCs; setting any one replaces that built-in list entirely)
 - `SEPOLIA_FALLBACK_RPC_1..2`: fallback RPC endpoints — sepolia has **no** built-in defaults, so without these every sepolia on-chain read depends on the single `SEPOLIA_RPC_URL`
 - `MAX_AVATAR_BYTES`: cap on fetched avatar size in bytes (default 25 MB)
