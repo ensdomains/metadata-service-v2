@@ -185,8 +185,8 @@ importers:
         specifier: ^2.6.2
         version: 2.6.2
       adaptive-layout-composer:
-        specifier: https://github.com/ensdomains/adaptive-layout-composer/archive/3688c765f77bf80a7ac85b1086cb55c86c0f6dea.tar.gz
-        version: https://github.com/ensdomains/adaptive-layout-composer/archive/3688c765f77bf80a7ac85b1086cb55c86c0f6dea.tar.gz
+        specifier: https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz
+        version: https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz
       bidi-js:
         specifier: ^1.0.3
         version: 1.0.3
@@ -1224,8 +1224,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/3688c765f77bf80a7ac85b1086cb55c86c0f6dea.tar.gz:
-    resolution: {integrity: sha512-Ff1CuX1U3JJw6h4H77i7CdV+qk/g4kTABR2Z1ECONjCo/L74nSKdxeXyiIQqr0bgcs1/M+j9fGqUkPjHaCIP/w==, tarball: https://github.com/ensdomains/adaptive-layout-composer/archive/3688c765f77bf80a7ac85b1086cb55c86c0f6dea.tar.gz}
+  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz:
+    resolution: {integrity: sha512-1ePa1HLVI8b0bP1HlNqSPKqHPh01L66Lg15P7vB/mQwqVjCiaJA/635JSK3iosv6/hcEyO0dmyWp5oIimyqxaw==, tarball: https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz}
     version: 1.1.0
     engines: {node: '>=18'}
 
@@ -3275,7 +3275,7 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/3688c765f77bf80a7ac85b1086cb55c86c0f6dea.tar.gz:
+  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz:
     dependencies:
       opentype.js: 1.3.4
 

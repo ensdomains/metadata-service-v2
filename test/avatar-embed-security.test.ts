@@ -101,6 +101,6 @@ describe('card cache version', () => {
     await cache.getImage('Nick.eth', { name: 'Nick.eth' }, ctx);
     const key = (kv.get as Mock).mock.calls[0][0] as string;
     expect(key.startsWith('svg:nick.eth:')).toBe(true); // webhook invalidation prefix
-    expect(key.endsWith(':v4')).toBe(true);
+    expect(key.endsWith(':v6')).toBe(true);
   });
 });
