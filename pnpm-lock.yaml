@@ -185,8 +185,8 @@ importers:
         specifier: ^2.6.2
         version: 2.6.2
       adaptive-layout-composer:
-        specifier: https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz
-        version: https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz
+        specifier: https://github.com/ensdomains/adaptive-layout-composer/archive/6e85e0bbc113a7e0880afbd23b7fff8f477f401b.tar.gz
+        version: https://github.com/ensdomains/adaptive-layout-composer/archive/6e85e0bbc113a7e0880afbd23b7fff8f477f401b.tar.gz
       bidi-js:
         specifier: ^1.0.3
         version: 1.0.3
@@ -203,8 +203,8 @@ importers:
         specifier: ^4.13.8
         version: 4.13.8
       rasterize-wasm:
-        specifier: https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz
-        version: https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz
+        specifier: https://github.com/ensdomains/rasterize-wasm/archive/ee6c572be3aeedc87694d8613a0c95f63337fbbb.tar.gz
+        version: https://github.com/ensdomains/rasterize-wasm/archive/ee6c572be3aeedc87694d8613a0c95f63337fbbb.tar.gz
       tiny-brotli-dec-wasm:
         specifier: ^1.0.1
         version: 1.0.1
@@ -1224,8 +1224,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz:
-    resolution: {integrity: sha512-1ePa1HLVI8b0bP1HlNqSPKqHPh01L66Lg15P7vB/mQwqVjCiaJA/635JSK3iosv6/hcEyO0dmyWp5oIimyqxaw==, tarball: https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz}
+  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/6e85e0bbc113a7e0880afbd23b7fff8f477f401b.tar.gz:
+    resolution: {integrity: sha512-eYj5eicyqecvEjJCHknndq9emL7MkhF8TNU7dVJuGnN6nLkcZAmVmeyN/s9uvcSgKquymJbEaw6P62lSvqvgnw==, tarball: https://github.com/ensdomains/adaptive-layout-composer/archive/6e85e0bbc113a7e0880afbd23b7fff8f477f401b.tar.gz}
     version: 1.1.0
     engines: {node: '>=18'}
 
@@ -2063,8 +2063,8 @@ packages:
   queue-microtask@1.2.3:
     resolution: {integrity: sha512-NuaNSa6flKT5JaSYQzJok04JzTL1CA6aGhv5rfLW3PgqA+M2ChpZQnAC8h8i4ZFkBS8X5RqkDBHA7r4hej3K9A==}
 
-  rasterize-wasm@https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz:
-    resolution: {integrity: sha512-hBJPAfnFEkr58RrnQu5Le1t/Jx8p22vGPGaZnWyun4a2Y0+4tPpYCxb3qflMMxDYm873er5SZDgs5+iklLOyYg==, tarball: https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz}
+  rasterize-wasm@https://github.com/ensdomains/rasterize-wasm/archive/ee6c572be3aeedc87694d8613a0c95f63337fbbb.tar.gz:
+    resolution: {integrity: sha512-Xgv6QSqTfSUIZe96uIpM/RFT62BQBPTFRyEkPN14zDEAYAG/Ug8RaOVemMjgJ/ncqL14ELX/vfo5ZJqhpflQoA==, tarball: https://github.com/ensdomains/rasterize-wasm/archive/ee6c572be3aeedc87694d8613a0c95f63337fbbb.tar.gz}
     version: 1.1.0
 
   reflect.getprototypeof@1.0.10:
@@ -3275,7 +3275,7 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/99f0d483ee70897f344591be3154cfa9aec118f8.tar.gz:
+  adaptive-layout-composer@https://github.com/ensdomains/adaptive-layout-composer/archive/6e85e0bbc113a7e0880afbd23b7fff8f477f401b.tar.gz:
     dependencies:
       opentype.js: 1.3.4
 
@@ -4254,7 +4254,7 @@ snapshots:
 
   queue-microtask@1.2.3: {}
 
-  rasterize-wasm@https://github.com/ensdomains/rasterize-wasm/archive/e6eae0cfcc0f4601d0ce5bccbe75d1014a828c74.tar.gz:
+  rasterize-wasm@https://github.com/ensdomains/rasterize-wasm/archive/ee6c572be3aeedc87694d8613a0c95f63337fbbb.tar.gz:
     dependencies:
       '@resvg/resvg-wasm': 2.6.2
       bidi-js: 1.0.3
