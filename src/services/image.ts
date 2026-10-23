@@ -8,7 +8,7 @@ import { getCharacterSet, isNormalized, maskedName } from "../utils/ens";
 import { isOnV2 } from "../utils/migration";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
-import type { Rasterizer } from "./rasterize";
+import type { getRasterizer } from "./rasterize";
 import { isSafeImageType } from "./media-safety";
 import { rasterDimensions } from "./raster-dimensions";
 
@@ -178,9 +178,9 @@ export class ImageGenerationService {
   private readonly defaultSize = { width: 518, height: 518 };
   private avatarService?: AvatarService;
   // The isolate's rasterizer (getRasterizer in rasterize.ts), for measuring names.
-  private rasterizer?: (bucket: R2Bucket) => Promise<Rasterizer>;
+  private rasterizer?: typeof getRasterizer;
 
-  constructor(avatarService?: AvatarService, rasterizer?: (bucket: R2Bucket) => Promise<Rasterizer>) {
+  constructor(avatarService?: AvatarService, rasterizer?: typeof getRasterizer) {
     this.avatarService = avatarService;
     this.rasterizer = rasterizer;
   }
@@ -189,6 +189,7 @@ export class ImageGenerationService {
   async generateDomainImage(
     options: ImageGenerationOptions,
     bucket?: R2Bucket,
+    ctx?: Pick<ExecutionContext, 'waitUntil'>,
   ): Promise<GeneratedImage> {
     const { name, migrationStatus = "unmigrated", size = this.defaultSize } = options;
 
@@ -232,7 +233,7 @@ export class ImageGenerationService {
       const result = !isNormalized(name)
         ? await this.invalidNameCard(name, options.registryType ?? 'registry', size, satoshi?.base64)
         : isOnV2(migrationStatus)
-        ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket, cardTheme(options.themeRecord))
+        ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket, cardTheme(options.themeRecord), ctx)
         : await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64);
 
       return {
@@ -295,6 +296,7 @@ export class ImageGenerationService {
     satoshi: { buffer: ArrayBuffer; base64: string } | undefined,
     bucket: R2Bucket | undefined,
     theme: CardTheme,
+    ctx: Pick<ExecutionContext, 'waitUntil'> | undefined,
   ): Promise<Uint8Array> {
     const display = displayName(name);
     const options = {
@@ -310,7 +312,7 @@ export class ImageGenerationService {
     };
     if (!satoshi || !bucket || !this.rasterizer || BUILT_IN_MEASURE_RE.test(display)) return createDynamicSVGImage(options);
     try {
-      const rasterizer = await this.rasterizer(bucket);
+      const rasterizer = await this.rasterizer(bucket, ctx);
       return await createDynamicSVGImage({
         ...options,
         // The same buffer every time: the rasterizer parses each primary font once.

@@ -3,7 +3,7 @@ import type { IndexerService, IndexerDomain, IndexerMigrationStatus } from './in
 import type { SharedBreakerState } from './breaker-state';
 import { type BlockchainService, CONTRACTS } from './blockchain';
 import type { ResolverService, NameData } from './resolver';
-import { namehash, validateEnsName, isEmptyAddress } from '../utils/ens';
+import { namehash, canonicalizeName, validateEnsName, isEmptyAddress } from '../utils/ens';
 import { type NetworkName } from '../types';
 import { NotFoundError, RequestDeadlineError, UpstreamError, InvalidNameError } from './errors';
 
@@ -284,7 +284,7 @@ export class FallbackService {
           }
           return {
             id: namehash(name),
-            name: nameData.name,
+            name: canonicalizeName(nameData.name),
             labelName: name.split('.')[0],
             labelhash: namehash(name.split('.')[0]),
             parentId: namehash(name.split('.').slice(1).join('.')),

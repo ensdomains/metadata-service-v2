@@ -9,11 +9,16 @@ import { brotliDecompressSync } from 'node:zlib';
 // Those names are measured with the rasterizer, which draws the PNG.
 
 import { ImageGenerationService } from '../src/services/image';
+import { ImageCacheService } from '../src/services/image-cache';
 import type { Rasterizer } from '../src/services/rasterize';
+import type { AvatarService } from '../src/services/avatar';
+import { StorageManager } from '../src/utils/storage';
+import { createMockKV, createMockR2 } from './mocks/hono-env';
 
-const state = { rasterizer: null as unknown as Rasterizer, fail: false, calls: 0 };
-const getRasterizer = async () => {
+const state = { rasterizer: null as unknown as Rasterizer, fail: false, calls: 0, ctx: undefined as unknown };
+const getRasterizer = async (_bucket: R2Bucket, ctx?: Pick<ExecutionContext, 'waitUntil'>) => {
   state.calls++;
+  state.ctx = ctx;
   if (state.fail) throw new Error('Font not found in R2');
   return state.rasterizer;
 };
@@ -39,6 +44,7 @@ beforeAll(async () => {
 beforeEach(() => {
   state.fail = false;
   state.calls = 0;
+  state.ctx = undefined;
 });
 
 const svc = new ImageGenerationService(undefined, getRasterizer);
@@ -64,6 +70,14 @@ describe('ENS v2 card label', () => {
   it('keeps the v1 card off the rasterizer', async () => {
     await card('مرحبا.eth', 'unmigrated');
     expect(state.calls).toBe(0);
+  });
+
+  it("starts the rasterizer under the request's waitUntil", async () => {
+    const avatarService = { getAvatarImage: vi.fn().mockResolvedValue(null), getTextRecord: vi.fn().mockResolvedValue(null) } as unknown as AvatarService;
+    const cache = new ImageCacheService(createMockKV(), new StorageManager(createMockR2()), new ImageGenerationService(avatarService, getRasterizer), avatarService, 'mainnet', bucket);
+    const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
+    await cache.getImage('مرحبا.eth', { name: 'مرحبا.eth', migrationStatus: 'migrated' }, ctx);
+    expect(state.ctx).toBe(ctx);
   });
 
   it('falls back to the built-in measurement when the rasterizer cannot start', async () => {

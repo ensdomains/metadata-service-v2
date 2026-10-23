@@ -1,5 +1,6 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
 import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type NetworkName } from '../types';
+import { namehash as namehashAsGiven } from 'viem/ens';
 import { canonicalizeName, isNormalized } from '../utils/ens';
 import { isOnV2 } from '../utils/migration';
 import type { StorageManager } from '../utils/storage';
@@ -49,8 +50,12 @@ const CARD_CACHE_VERSION = 'v6';
 
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
-  // prefix (`svg:${name}:`) still matches across both networks.
-  return `svg:${canonicalizeName(name)}:${network}:${params.registryType}:${params.migrationStatus}:${params.width}:${params.height}:${CARD_CACHE_VERSION}`;
+  // prefix (`svg:${name}:`) still matches across both networks. A name given in
+  // another form draws its own (invalid-name) card, so it also keys on its namehash
+  // as given.
+  const canonical = canonicalizeName(name);
+  const asGiven = name === canonical ? '' : `:${namehashAsGiven(name)}`;
+  return `svg:${canonical}:${network}:${params.registryType}:${params.migrationStatus}:${params.width}:${params.height}${asGiven}:${CARD_CACHE_VERSION}`;
 }
 
 export class ImageCacheService {
@@ -110,7 +115,7 @@ export class ImageCacheService {
         // Stale — return immediately, revalidate in background
         console.log(`[image-cache] L1 STALE ${name} (${Date.now() - start}ms, age ${Math.round(ageSeconds)}s > softTtl ${entry.softTtl}s) → revalidating`);
         executionCtx.waitUntil(
-          this.revalidate(name, options, cacheKey, params, ttlConfig).catch((err) =>
+          this.revalidate(name, options, cacheKey, params, ttlConfig, executionCtx).catch((err) =>
             console.error(`[image-cache] background revalidate failed for ${name}:`, err),
           ),
         );
@@ -138,7 +143,7 @@ export class ImageCacheService {
     }
 
     // --- L3: Origin (generate from scratch) ---
-    const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options);
+    const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options, executionCtx);
     console.log(`[image-cache] L3 MISS ${name} (${Date.now() - start}ms)${avatarFailed ? ' [avatar failed — skipping cache]' : ' → writing back to L1+L2'}`);
 
     // Only cache if avatar didn't fail — avoid persisting SVGs without background
@@ -192,6 +197,7 @@ export class ImageCacheService {
   private async generateFromOrigin(
     name: string,
     options: ImageGenerationOptions,
+    ctx: ExecutionContext,
   ): Promise<{ svg: string; avatarHash: string; avatarFailed: boolean }> {
     let avatarBase64: string | undefined = options.avatarBase64;
     let avatarMimeType: string | undefined = options.avatarMimeType;
@@ -275,7 +281,7 @@ export class ImageCacheService {
       themeRecord: theme.record,
     };
 
-    const image = await this.imageService.generateDomainImage(genOptions, this.bucket);
+    const image = await this.imageService.generateDomainImage(genOptions, this.bucket, ctx);
     const svg = typeof image.svg === 'string' ? image.svg : String(image.svg);
 
     return { svg, avatarHash, avatarFailed: avatarFailed || theme.failed };
@@ -288,8 +294,9 @@ export class ImageCacheService {
     cacheKey: string,
     params: ImageCacheParams,
     ttlConfig: TtlConfig,
+    ctx: ExecutionContext,
   ): Promise<void> {
-    const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options);
+    const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options, ctx);
     if (avatarFailed) {
       console.warn(`[image-cache] revalidate skipped for ${name}: avatar fetch failed`);
       return;
