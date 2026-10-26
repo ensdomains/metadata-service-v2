@@ -15,7 +15,9 @@ import {
   isEmptyAddress,
   isEmptyHash,
   isNormalized,
-  getSegmentLength
+  getSegmentLength,
+  isResolvableEnsName,
+  MAX_ENS_NAME_LENGTH,
 } from '../src/utils/ens';
 
 describe('ENS Utilities', () => {
@@ -149,6 +151,27 @@ describe('ENS Utilities', () => {
     it('canonicalizeName lowercases + NFC-normalizes for case-insensitive keys', () => {
       expect(canonicalizeName('Vitalik.ETH')).toBe('vitalik.eth');
       expect(canonicalizeName('FOO.eth')).toBe(canonicalizeName('foo.eth'));
+    });
+
+    it('canonicalizeName applies ENSIP-15 to each label (SEC-NAME-001)', () => {
+      expect(canonicalizeName('ＡＬＩＣＥ.eth')).toBe('alice.eth');
+      expect(canonicalizeName('al\u200Bice.eth')).toBe('alice.eth');
+      expect(canonicalizeName('❤️.eth')).toBe('❤.eth');
+      expect(canonicalizeName('o.eth')).not.toBe(canonicalizeName('0.eth'));
+    });
+
+    it('canonicalizeName never throws: a label ENSIP-15 rejects falls back to NFC + lower', () => {
+      const encoded = `[${'AB'.repeat(32)}]`;
+      expect(canonicalizeName(`${encoded}.ETH`)).toBe(`${encoded.toLowerCase()}.eth`);
+      expect(canonicalizeName('A:B.eth')).toBe('a:b.eth');
+    });
+
+    it('isResolvableEnsName applies the length cap to the canonical form', () => {
+      // 'ⅷ' (1 code unit) canonicalizes to 'viii' (4): within the cap as given, over it once mapped.
+      const lengthening = `${'ⅷ'.repeat(63)}.${'ⅷ'.repeat(63)}.eth`;
+      expect(lengthening.length).toBeLessThanOrEqual(MAX_ENS_NAME_LENGTH);
+      expect(canonicalizeName(lengthening).length).toBeGreaterThan(MAX_ENS_NAME_LENGTH);
+      expect(isResolvableEnsName(lengthening)).toBe(false);
     });
 
     it('dnsEncodeName produces DNS wire format (UniversalResolver findResolver input)', () => {

@@ -63,6 +63,7 @@ vi.mock("../src/utils/ens", () => ({
       name.endsWith(".eth")
     );
   },
+  canonicalizeName: (name: string) => name.toLowerCase(),
 }));
 
 // Mock GraphQL client — the real code calls request({ document, variables, signal })

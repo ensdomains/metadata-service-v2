@@ -68,6 +68,17 @@ describe('POST /batch-metadata limits', () => {
     expect(body).toMatchObject({ total: 5, successful: 5, failed: 0 });
   });
 
+  it('resolves ENSIP-15-equivalent spellings once, under the canonical name (SEC-NAME-001)', async () => {
+    const names = ['nick.eth', 'ｎｉｃｋ.eth', 'ni\u200Bck.eth', '❤️.eth', '❤.eth'];
+    const res = await batch({ names });
+    expect(res.status).toBe(200);
+    const body = await res.json() as BatchBody;
+
+    expect(getMetadata.mock.calls.map((call) => call[2]).sort()).toEqual(['nick.eth', '❤.eth'].sort());
+    expect(checkExpiry).toHaveBeenCalledTimes(2);
+    expect(body.results.map((r) => r.name)).toEqual(names);
+  });
+
   it('answers invalid names without resolving them', async () => {
     const names = ['nick.eth', 'nodot', 'a..eth', '', `${'a'.repeat(300)}.eth`];
     const res = await batch({ names });

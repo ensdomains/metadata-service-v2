@@ -1,6 +1,8 @@
 // Simplified KV cache management for internal ensnode response caching
 // External API response caching is handled by Cloudflare native caching
 
+import { canonicalizeName } from '../utils/ens';
+
 export interface CacheOptions {
   ttl?: number;
   namespace?: string;
@@ -221,12 +223,13 @@ export class CacheService {
   }
 }
 
-// Cache key generators for internal operations
+// Cache key generators for internal operations. Names are keyed by their
+// canonical (ENSIP-15) identity, so equivalent spellings share one entry.
 export const CacheKeys = {
-  domain: (name: string, network: string) => `ensnode:${network}:domain:${name.toLowerCase()}`,
-  domains: (names: string[], network: string) => `ensnode:${network}:batch:${names.map(n => n.toLowerCase()).sort().join(",")}`,
-  migrationStatus: (name: string, network: string) => `ensnode:${network}:migration:${name.toLowerCase()}`,
-  hierarchy: (name: string, network: string) => `ensnode:${network}:hierarchy:${name.toLowerCase()}`,
+  domain: (name: string, network: string) => `ensnode:${network}:domain:${canonicalizeName(name)}`,
+  domains: (names: string[], network: string) => `ensnode:${network}:batch:${[...new Set(names.map(canonicalizeName))].sort().join(",")}`,
+  migrationStatus: (name: string, network: string) => `ensnode:${network}:migration:${canonicalizeName(name)}`,
+  hierarchy: (name: string, network: string) => `ensnode:${network}:hierarchy:${canonicalizeName(name)}`,
   health: (network: string) => `ensnode:${network}:health:status`,
 };
 

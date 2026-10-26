@@ -189,14 +189,25 @@ export const MAX_ENS_NAME_LENGTH = 255;
 export const MAX_NAME_LABELS = 32;
 
 /**
- * Canonical form for cache keys, indexer queries, and invalidation matching.
- * ENS labels are case-insensitive (the namehash lowercases ASCII), so two
- * requests differing only in case MUST map to the same cache entry. NFC + lower
- * is a safe canonicalization that never throws (unlike full ENSIP-15 normalize,
- * which we still surface separately via `isNormalized`).
+ * Canonical form for service calls, cache keys, indexer queries, and
+ * invalidation matching. Spellings that ENSIP-15 treats as one name (case,
+ * full-width forms, ignored characters such as U+200B, emoji variation
+ * selectors) MUST map to one identity, or a purge under one spelling leaves
+ * another's entry stale (SEC-NAME-001). Each label is ENSIP-15 normalized; a
+ * label the normalizer rejects (an encoded labelhash `[…]`, or a disallowed
+ * character that isResolvableEnsName turns away) falls back to NFC + lower, so
+ * this never throws.
  */
 export function canonicalizeName(name: string): string {
-  return name.normalize("NFC").toLowerCase();
+  return name.split(".").map(canonicalizeLabel).join(".");
+}
+
+function canonicalizeLabel(label: string): string {
+  try {
+    return normalize(label);
+  } catch {
+    return label.normalize("NFC").toLowerCase();
+  }
 }
 
 /**
@@ -252,8 +263,12 @@ export function validateEnsName(name: string): boolean {
  */
 export function isResolvableEnsName(name: string): boolean {
   if (!validateEnsName(name)) return false;
+  // Canonicalizing can lengthen a name (ENSIP-15 maps 'ⅷ' to 'viii'), and the
+  // canonical form is what keys the caches, so it must pass the caps too.
+  const canonical = canonicalizeName(name);
+  if (!validateEnsName(canonical)) return false;
   try {
-    namehash(canonicalizeName(name));
+    namehash(canonical);
     return true;
   } catch {
     return false;
