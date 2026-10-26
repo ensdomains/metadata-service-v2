@@ -158,8 +158,8 @@ describe('getMetadata: lapsed indexerV1 expiryDate only 410s when authoritative'
     expect(meta.name).toBe('fox.eth');
   });
 
-  it('v2 not configured (mainnet) → the v1 registrar is genuinely authoritative → 410', async () => {
-    // regression: fail-open applies only where v2 is deployed; on mainnet the
+  it('v2 not configured → the v1 registrar is genuinely authoritative → 410', async () => {
+    // regression: fail-open applies only where v2 is deployed; elsewhere the
     // lapsed v1 expiry must still 410, with no v2 chain call attempted.
     const svc = makeService('mainnet');
     const getV2Registration = vi.fn();

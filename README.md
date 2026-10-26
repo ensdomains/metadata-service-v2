@@ -132,7 +132,7 @@ flowchart LR
   - mainnet: ENSNode subgraph (v1 queries) → on-chain via viem → stale D1
   - sepolia: zigens ENS v2 indexer (primary) → ENSNode sepolia subgraph (v1 secondary) → on-chain via viem (live v2 registry discovery through the UniversalResolver proxy) → stale D1
   - The chain tier runs both when an indexer is down (upstream error) and when it has no record of the name (clean miss). A circuit breaker guards the **primary indexer tier only** (mainnet: the ENSNode subgraph; sepolia: zigens) — only an upstream error trips it (a miss never does), it stays open for 60s per isolate, and the sepolia secondary v1 subgraph and the on-chain tier have no breaker.
-- **Networks**: Ethereum mainnet (ENS v1; v2 contracts are placeholders until v2 deploys there) + Sepolia testnet (ENS v1 + v2)
+- **Networks**: Ethereum mainnet (ENS v1 + v2; v2 registries from config until the UniversalResolver serves v2) + Sepolia testnet (ENS v1 + v2)
 
 ## Development
 

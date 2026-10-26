@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { encodeAbiParameters, encodeErrorResult, parseAbi, toFunctionSelector } from 'viem';
-import { BlockchainService } from '../src/services/blockchain';
+import { BlockchainService, ENS_V2_CONTRACTS } from '../src/services/blockchain';
 import { ResolverService } from '../src/services/resolver';
 import { namehash } from '../src/utils/ens';
 
@@ -40,6 +40,12 @@ function stubNetwork() {
     const body = JSON.parse(String(init?.body));
     const answer = (req: { id: number; params: [{ to: string; data: string }] }) => {
       const { to, data } = req.params[0];
+      // The UR proxy serves v2 (root → .eth registry), and the name is a v1
+      // name: AVAILABLE (all-zero state) in the v2 .eth registry.
+      const v2 = ENS_V2_CONTRACTS.mainnet;
+      if (to.toLowerCase() === v2.universalResolver.toLowerCase()) return { jsonrpc: '2.0', id: req.id, result: encodeAbiParameters([{ type: 'address' }], [v2.rootRegistry as `0x${string}`]) };
+      if (to.toLowerCase() === v2.rootRegistry) return { jsonrpc: '2.0', id: req.id, result: encodeAbiParameters([{ type: 'address' }], [v2.ethRegistry as `0x${string}`]) };
+      if (to.toLowerCase() === v2.ethRegistry) return { jsonrpc: '2.0', id: req.id, result: `0x${'00'.repeat(160)}` };
       const fn = SELECTORS[data.slice(0, 10)] ?? data.slice(0, 10);
       rpcCalls.push(fn);
       // The owner's resolver answers every record read with an OffchainLookup

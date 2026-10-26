@@ -296,6 +296,21 @@ function isTransportFailure(error: unknown): boolean {
   return transport;
 }
 
+/** True when the contract itself answered with a revert (or no data). */
+function isRevert(error: unknown): boolean {
+  for (let e: unknown = error, depth = 0; e instanceof Error && depth < 16; e = e.cause, depth++) {
+    if (
+      e instanceof ContractFunctionRevertedError ||
+      e instanceof ContractFunctionZeroDataError ||
+      e instanceof ExecutionRevertedError ||
+      e instanceof RawContractError
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export class BlockchainService {
   private clients: Map<NetworkName, PublicClient> = new Map();
   private fallbackClients: Map<NetworkName, PublicClient[]> = new Map();
@@ -526,12 +541,14 @@ export class BlockchainService {
   // address is the UpgradableUniversalResolverProxy vanity anchor. Discover the
   // live root/eth registries through it (UR.ROOT_REGISTRY() →
   // root.getSubregistry('eth')), cache per isolate with a TTL, and fall back to
-  // the last-known configured addresses when discovery fails.
-  private v2RegistryCache: Map<NetworkName, { root: `0x${string}`; eth: `0x${string}`; fetchedAt: number }> = new Map();
+  // the last-known configured addresses when discovery fails. `urServesV2`
+  // records whether the proxy answered ROOT_REGISTRY(): until its upgrade it
+  // runs the v1 UR, whose findResolver would silently walk only the v1 registry.
+  private v2RegistryCache: Map<NetworkName, { root: `0x${string}`; eth: `0x${string}`; fetchedAt: number; urServesV2: boolean }> = new Map();
   private static readonly V2_REGISTRY_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-  /** Whether ENS v2 is configured (deployed) on this network. Mainnet keeps
-   *  placeholder strings until v2 ships there, which disables every v2 path. */
+  /** Whether ENS v2 is configured (deployed) on this network. A network with
+   *  only placeholder strings has every v2 path disabled. */
   isV2Configured(network: NetworkName): boolean {
     return ENS_V2_CONTRACTS[network].universalResolver.startsWith('0x')
       || ENS_V2_CONTRACTS[network].ethRegistry.startsWith('0x');
@@ -557,13 +574,33 @@ export class BlockchainService {
             abi: UNIVERSAL_RESOLVER_V2_ABI,
             client,
           });
-          const root = await ur.read.ROOT_REGISTRY() as `0x${string}`;
+          // A revert is the proxy's answer, not an endpoint failure: it doesn't
+          // serve v2 (yet). Returned rather than thrown so the fallbacks don't
+          // ask again and a later endpoint's error can't hide it.
+          let root: `0x${string}`;
+          try {
+            root = await ur.read.ROOT_REGISTRY() as `0x${string}`;
+          } catch (error) {
+            if (isRevert(error)) return null;
+            throw error;
+          }
           const rootRegistry = getContract({ address: root, abi: REGISTRY_V2_ABI, client });
           const eth = await rootRegistry.read.getSubregistry(['eth']) as `0x${string}`;
           return { root, eth };
         }, { markEndpointFailures: true });
-        if (!isEmptyAddress(result.eth)) {
-          this.v2RegistryCache.set(network, { ...result, fetchedAt: Date.now() });
+        if (result === null) {
+          // Cache that for the TTL so every read doesn't re-probe, and keep the
+          // registries from the last discovery or config.
+          const known = cached ?? (v2.rootRegistry.startsWith('0x') && v2.ethRegistry.startsWith('0x')
+            ? { root: v2.rootRegistry as `0x${string}`, eth: v2.ethRegistry as `0x${string}` }
+            : null);
+          if (known) {
+            console.warn(`[v2] UR ${v2.universalResolver} does not serve v2 on ${network} (ROOT_REGISTRY reverts) — using configured registries`);
+            this.v2RegistryCache.set(network, { root: known.root, eth: known.eth, fetchedAt: Date.now(), urServesV2: false });
+            return { root: known.root, eth: known.eth };
+          }
+        } else if (!isEmptyAddress(result.eth)) {
+          this.v2RegistryCache.set(network, { ...result, fetchedAt: Date.now(), urServesV2: true });
           const known = v2.ethRegistry.toLowerCase();
           if (result.eth.toLowerCase() !== known) {
             console.warn(`[v2] live eth registry ${result.eth} differs from configured ${v2.ethRegistry} on ${network} — using live (update config/networks.ts)`);
@@ -592,6 +629,15 @@ export class BlockchainService {
     return null;
   }
 
+  /** The configured UR proxy, once it has answered ROOT_REGISTRY() (it serves
+   *  v2); null otherwise, so callers walk the v2 registries themselves. */
+  private async getV2UniversalResolver(network: NetworkName): Promise<`0x${string}` | null> {
+    await this.getV2Registries(network);
+    return this.v2RegistryCache.get(network)?.urServesV2
+      ? ENS_V2_CONTRACTS[network].universalResolver as `0x${string}`
+      : null;
+  }
+
   // Check ENS v2 migration status via ETHRegistry.getStatus()
   // (IPermissionedRegistry.Status: AVAILABLE=0, RESERVED=1, REGISTERED=2).
   // AVAILABLE and RESERVED both count as unmigrated — RESERVED is a pre-seeded
@@ -607,7 +653,7 @@ export class BlockchainService {
   // function silently coercing an outage to `unmigrated`.
   async isUnmigratedName(network: NetworkName, name: string): Promise<boolean> {
     const registries = await this.getV2Registries(network);
-    // v2 not deployed on this network (mainnet placeholders) → everything is v1.
+    // v2 not deployed on this network (placeholders) → everything is v1.
     if (!registries) return true;
 
     // labelhash is case-sensitive but ENS names are not: hash the canonical label,
@@ -686,10 +732,10 @@ export class BlockchainService {
       // Subname: the 2LD's registry entry doesn't own it — resolve the actual
       // owner through the UR's name-level walk. The walk runs through
       // subregistries the name chooses, so it never marks an endpoint.
-      const ur = ENS_V2_CONTRACTS[network].universalResolver;
-      if (ur.startsWith('0x')) {
+      const ur = await this.getV2UniversalResolver(network);
+      if (ur) {
         const { result } = await this.executeWithFallback(network, async (client) => {
-          const urContract = getContract({ address: ur as `0x${string}`, abi: UNIVERSAL_RESOLVER_V2_ABI, client });
+          const urContract = getContract({ address: ur, abi: UNIVERSAL_RESOLVER_V2_ABI, client });
           return await urContract.read.findOwner([dnsEncodeName(canonicalizeName(name))]) as string;
         });
         owner = result;
@@ -731,10 +777,10 @@ export class BlockchainService {
     // Case 2: On v2 — prefer the UniversalResolver proxy's findResolver() (single
     // canonical on-chain traversal, wildcard-aware); otherwise fall back to the
     // manual registry walk from the live root registry.
-    const ur = ENS_V2_CONTRACTS[network].universalResolver;
-    if (ur.startsWith('0x')) {
+    const ur = await this.getV2UniversalResolver(network);
+    if (ur) {
       try {
-        return await this.findResolverViaUniversalResolver(network, ur as `0x${string}`, name);
+        return await this.findResolverViaUniversalResolver(network, ur, name);
       } catch (error) {
         console.warn(`UniversalResolver findResolver failed for ${name}, falling back to traversal:`, error);
       }
@@ -770,7 +816,7 @@ export class BlockchainService {
   // an endpoint.
   async getResolverHierarchical(network: NetworkName, name: string): Promise<string> {
     const registries = await this.getV2Registries(network);
-    // v2 not configured on this network (e.g. mainnet placeholders) — nothing to walk.
+    // v2 not configured on this network (placeholders) — nothing to walk.
     if (!registries) return '0x0000000000000000000000000000000000000000';
 
     const labels = name.split('.').reverse(); // ['eth', 'bar', 'foo']

@@ -475,10 +475,14 @@ export class AvatarService {
 
     // Native-v2 names live in the v2 registry, which viem's stock universal
     // resolver doesn't traverse — so their avatar/header records resolve to null.
-    // When a v2 universal resolver is configured (e.g. Sepolia), route record
-    // lookups through it. `{ strict: false }` accepts lowercase config addresses;
-    // an unset/placeholder value falls back to viem's default resolver.
-    const v2UR = isAddress(universalResolver ?? '', { strict: false }) ? universalResolver : undefined;
+    // When a v2 universal resolver other than viem's default is configured, route
+    // record lookups through it. `{ strict: false }` accepts lowercase config
+    // addresses; an unset/placeholder value, or viem's own default (the vanity
+    // proxy, on mainnet and Sepolia), uses the default resolver alone instead of
+    // looking every miss up twice through the same contract.
+    const v2UR = isAddress(universalResolver ?? '', { strict: false })
+      && universalResolver!.toLowerCase() !== chain.contracts?.ensUniversalResolver?.address.toLowerCase()
+      ? universalResolver : undefined;
     // Never let a record resolve to this service itself (anti-recursion). The
     // library's own fetcher is replaced so its record/metadata/HEAD requests go
     // through the same guard, timeout and size cap as the media fetch; the

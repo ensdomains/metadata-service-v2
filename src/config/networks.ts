@@ -29,7 +29,7 @@ export interface V1Contracts {
   resolver: string;
 }
 
-// ENS v2 contracts. Mainnet values are placeholder strings until v2 deploys there
+// ENS v2 contracts. Contracts not yet deployed on a network are placeholder strings
 // (the `!startsWith('0x')` guard in blockchain.ts relies on them not being addresses).
 export interface V2Contracts {
   rootRegistry: string;
@@ -85,13 +85,24 @@ export const NETWORKS = {
       // the current PublicResolver. Only a last-resort fallback default.
       resolver: '0xF29100983E058B709F3D539b0c765937B804AC15',
     },
-    // ENS v2 — not yet deployed on mainnet; placeholder strings (not addresses).
+    // ENS v2 — ensdomains/contracts-v2 deployments/mainnet/addresses.md
+    // (deployed 2026-10-18; v2_deployment_block 26105294); root.getSubregistry('eth')
+    // verified on-chain 2026-10-19. Placeholder strings (not addresses) mark
+    // what isn't live yet.
     v2: {
-      rootRegistry: 'ROOT_REGISTRY_ADDRESS',
-      ethRegistry: 'ETH_REGISTRY_ADDRESS',
-      migrationContract: 'MIGRATION_CONTROLLER_ADDRESS',
-      resolver: 'ENSV2_RESOLVER_ADDRESS',
-      universalResolver: 'UNIVERSAL_RESOLVER_V2_ADDRESS',
+      rootRegistry: '0x2553c09be6447beffdb86fa622ad41fb8f77a91e',  // RootRegistry
+      ethRegistry: '0xf60aba43e1f7f3dab1186ff03b561401c9df85e2',   // ETHRegistry
+      // Siblings (no runtime consumer): MigrationHelper 0x0b92006fa187b4c98d0a7dfc9d3b918b6d243485,
+      // UnlockedMigrationController 0xab821ca676cf2e0790fa273526a165cfa86aeb64.
+      migrationContract: '0xc46bf3b6c7ebcffd4ecfc3b012a1726a2463694d', // LockedMigrationController
+      // v2 resolvers are per-owner (no single canonical); last-resort fallback only.
+      resolver: '0x66f9f566ff2f26309c1bd9134388478a801da3e1', // PublicResolverV2
+      // The vanity proxy still points at the v1 UR until the DAO proposal's last
+      // call upgrades it to the ManagedUniversalResolverProxy
+      // 0xcffd2ae680cd110d28739a70922636b5937b022b. Until then ROOT_REGISTRY()
+      // reverts, so BlockchainService uses the registries above and walks them
+      // itself; it switches to the proxy on its own once the probe answers.
+      universalResolver: '0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe',
       legacyRegistry: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e',
       legacyNameWrapper: '0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401',
       legacyResolver: '0xF29100983E058B709F3D539b0c765937B804AC15',

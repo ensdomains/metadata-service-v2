@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { decodeFunctionData, encodeFunctionResult, parseAbi, toFunctionSelector, type AbiFunction } from 'viem';
-import { BlockchainService, CONTRACTS, ENS_REGISTRY_ABI, NAME_WRAPPER_ABI } from '../src/services/blockchain';
+import { BlockchainService, CONTRACTS, ENS_REGISTRY_ABI, ENS_V2_CONTRACTS, NAME_WRAPPER_ABI } from '../src/services/blockchain';
 import { ResolverService } from '../src/services/resolver';
 import { namehash } from '../src/utils/ens';
 
@@ -39,6 +39,8 @@ describe('NameWrapper getData', () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const { id, params: [{ to, data }] } = JSON.parse(String(init?.body));
       const reply = (result: `0x${string}`) => Response.json({ jsonrpc: '2.0', id, result });
+      // A v1 name: AVAILABLE (all-zero state) in the v2 .eth registry.
+      if (to.toLowerCase() === ENS_V2_CONTRACTS.mainnet.ethRegistry) return reply(`0x${'00'.repeat(160)}`);
       if (to.toLowerCase() === CONTRACTS.mainnet.registry.toLowerCase()) {
         const { functionName } = decodeFunctionData({ abi: ENS_REGISTRY_ABI, data });
         answered.push(functionName);

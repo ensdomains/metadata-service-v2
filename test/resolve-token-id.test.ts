@@ -19,7 +19,7 @@ vi.mock('../src/services/blockchain', async (importOriginal) => {
       getOwner: vi.fn(),
       getResolver: vi.fn(),
       healthCheck: vi.fn(),
-      // v2 wiring: not configured in this suite (mainnet-style placeholders)
+      // v2 wiring: not configured in this suite (placeholder contracts)
       isV2Configured: vi.fn().mockReturnValue(false),
       getV2Registries: vi.fn().mockResolvedValue(null),
       getV2Registration: vi.fn().mockResolvedValue(null),
