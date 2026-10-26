@@ -15,7 +15,7 @@ import {
 import { securityHeaders } from "./middleware/security-headers";
 import { mediaView } from "./middleware/media-view";
 import { MetadataService, DomainExpiredError } from "./services/metadata";
-import { canonicalizeName, validateEnsName, isResolvableEnsName } from "./utils/ens";
+import { canonicalizeName, isResolvableEnsName } from "./utils/ens";
 import { WebhookService, type EnsNameEvent } from "./services/webhook";
 import { CacheService } from "./services/cache";
 import { runD1Retention } from "./services/d1";
@@ -871,8 +871,9 @@ app.post("/batch-metadata", async (c) => {
     // resolved once, in its canonical form (the metadata cache key's), and every
     // entry for it shares the result while echoing the name as given.
     const names: string[] = body.names;
-    // Validated as given and as resolved: lowercasing can lengthen a name.
-    const isValid = (name: string) => validateEnsName(name) && validateEnsName(canonicalizeName(name));
+    // Same boundary as the single-name routes: ENSIP-15-invalid names, and names
+    // over the caps as given or canonicalized, are answered without lookup work.
+    const isValid = isResolvableEnsName;
     const distinct = [...new Set(names.filter(isValid).map(canonicalizeName))];
 
     type Outcome = { metadata: MetadataResponse } | { error?: string };
@@ -1198,7 +1199,7 @@ const handleWebhook = async (c: AppContext) => {
           // column and warmed cache keys must never carry a raw-case variant.
           const name = payload?.name ? canonicalizeName(payload.name) : undefined;
           // An ignored event (a name this service never serves) has nothing to warm.
-          if (!name || !validateEnsName(name)) return;
+          if (!name || !isResolvableEnsName(name)) return;
 
           // The event carries ENS protocol (v1/v2), not chain — and the chain
           // cannot be derived from the payload (v1 contracts share addresses
