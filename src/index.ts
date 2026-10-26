@@ -549,6 +549,14 @@ async function handleMetadata(
 // Shared image handler — used by both v1 (tokenId) and v2 (name) routes.
 // The L0 edge-cache short-circuit happens in the route BEFORE checkExpiry, so by
 // the time we're here it's a confirmed edge miss and we only need to generate+store.
+// An image dimension (`?w=` / `?h=`) as the API documents it: the whole value a
+// decimal integer, or NaN, which validateOptions rejects. parseInt alone reads
+// any numeric prefix, so `100a`, `300.0`, ` 300` and `+300` were accepted and
+// rendered and cached a card for a value outside the contract (W8-ROUTES-002).
+function parseDimension(value: string): number {
+  return /^[0-9]+$/.test(value) ? parseInt(value, 10) : NaN;
+}
+
 async function handleImage(c: AppContext, network: NetworkName, name: string, registryType: 'registry' | 'namewrapper') {
   const { imageService, imageCacheService } = getImageServices(c.env, network);
 
@@ -560,7 +568,7 @@ async function handleImage(c: AppContext, network: NetworkName, name: string, re
 
   const options: ImageGenerationOptions = { name, registryType };
   if (width && height) {
-    options.size = { width: parseInt(width, 10), height: parseInt(height, 10) };
+    options.size = { width: parseDimension(width), height: parseDimension(height) };
   }
 
   const validation = imageService.validateOptions(options);
