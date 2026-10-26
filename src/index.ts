@@ -39,6 +39,7 @@ import type {
   MetadataResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
+import { CONTRACTS } from "./services/blockchain";
 import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
@@ -735,6 +736,32 @@ app.get(
       edgeCachePut(c, res);
       return res;
     } catch (error) {
+      // W3-ROUTES-009: a non-definitive NotFoundError from checkExpiry means
+      // the primary source was skipped or unavailable — the hierarchy remains
+      // total and the response must be a degraded placeholder, never a 404.
+      if (error instanceof NotFoundError && !error.definitive) {
+        const parts = name.split('.');
+        // Zero owner, but the network's default resolver — the same last-resort
+        // address generateBasicHierarchy publishes. A zero resolver would be a
+        // false "no resolver" fact on this cached 200.
+        const defaultResolver =
+          CONTRACTS[network as NetworkName]?.resolver ??
+          '0x0000000000000000000000000000000000000000';
+        const placeholderHierarchy = {
+          name,
+          hierarchy: parts.map((_part, i) => ({
+            name: parts.slice(parts.length - 1 - i).join('.'),
+            owner: '0x0000000000000000000000000000000000000000',
+            resolver: defaultResolver,
+            level: i + 1,
+          })),
+        };
+        const errorCacheHeaders = CachePresets.error();
+        Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
+        const res = c.json(placeholderHierarchy);
+        edgeCachePut(c, res, 30);
+        return res;
+      }
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
         const errorCacheHeaders = CachePresets.error();
         Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
