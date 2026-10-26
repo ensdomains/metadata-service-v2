@@ -60,10 +60,12 @@ describe('FallbackService — v2 → v1 → blockchain chain', () => {
 
   it('falls through to blockchain when both indexers miss', async () => {
     const { svc, resolver } = makeService({ v2: null, v1: null });
-    const res = await svc.getDomainMetadata('nowhere.eth');
+    const res = await svc.getDomainMetadata('NoWhere.eth');
     expect(res.source).toBe('blockchain');
     expect(res.usedFallback).toBe(true);
     expect(resolver.resolveName).toHaveBeenCalledTimes(1);
+    // As the indexers name it: the metadata cache keys on the canonical name.
+    expect((res.data as any).name).toBe('nowhere.eth');
   });
 
   it('skips the v1 tier entirely when no v1 indexer is configured', async () => {

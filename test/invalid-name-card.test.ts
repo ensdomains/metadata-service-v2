@@ -62,6 +62,18 @@ describe("the card of a name that isn't normalized", () => {
     expect(keys[0]).not.toBe(keys[1]);
     expect(keys.every((k) => k.startsWith('svg:ab_c.eth:'))).toBe(true); // webhook invalidation prefix
   });
+
+  it('is never served for the normalized name it differs from in case', async () => {
+    const store = new Map<string, string>();
+    const kv = { ...createMockKV(), get: async (k: string) => store.get(k) ?? null, put: async (k: string, v: string) => void store.set(k, v) } as unknown as KVNamespace;
+    const avatarService = { getAvatarImage: vi.fn().mockResolvedValue(null), getTextRecord: vi.fn() } as unknown as AvatarService;
+    const cache = new ImageCacheService(kv, new StorageManager(createMockR2()), new ImageGenerationService(avatarService), avatarService, 'mainnet');
+    const writes: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => writes.push(p), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
+    expect((await cache.getImage('AB-C.eth', { name: 'AB-C.eth' }, ctx)).svg).toContain('url(#invalidName)');
+    await Promise.all(writes);
+    expect((await cache.getImage('ab-c.eth', { name: 'ab-c.eth' }, ctx)).svg).not.toContain('url(#invalidName)');
+  });
 });
 
 describe("the metadata of a name that isn't normalized", () => {

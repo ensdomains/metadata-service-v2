@@ -257,7 +257,7 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
     universalResolverV2,
     parseIpfsGateway(env.IPFS_GATEWAY),
   );
-  const imageService = new ImageGenerationService(avatarService, (bucket) => getRasterizer(bucket));
+  const imageService = new ImageGenerationService(avatarService, (bucket, ctx) => getRasterizer(bucket, ctx));
   const storageManager = new StorageManager(env.ASSET_BUCKET);
   const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService, network, env.ASSET_BUCKET);
   const services = { avatarService, imageService, imageCacheService };
