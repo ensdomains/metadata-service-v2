@@ -4,7 +4,7 @@ import { generateIdenticon } from "@ensdomains/etherloom";
 import { ens_beautify } from "@adraffy/ens-normalize";
 import type { MigrationStatus } from "../types";
 import { namehash } from "viem/ens";
-import { getCharacterSet } from "../utils/ens";
+import { canonicalizeName, getCharacterSet } from "../utils/ens";
 import { isOnV2 } from "../utils/migration";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
@@ -29,16 +29,19 @@ const DATA_HREF_RE = /<[^<>]*\bhref\s*=\s*["']\s*data:/gi;
 // Names on ENS v2 (migrated or native) get the ENS v2 card; v1 names keep the
 // v1 card. The v2 card's no-avatar background, as in its design: the name's etherloom
 // weave on the card colour, under a 50% veil of it. The weave and its colour
-// (one of the etherloom demo's identicon colours) come from the namehash alone,
-// so they stay with the name across transfers. It is drawn in the composer's
-// 550-unit design space, scaled like the rest of the card; the weave's own
-// canvas is rounded up to whole cells, and the nested <svg> crops it.
+// (one of the etherloom demo's identicon colours) come from the namehash of the
+// canonical name alone, so they stay with the name across transfers and every
+// spelling of it (the card cache is keyed by the canonical name, and viem's
+// namehash does not normalize). canonicalizeName never throws, so names that
+// don't normalize still get a weave. It is drawn in the composer's 550-unit
+// design space, scaled like the rest of the card; the weave's own canvas is
+// rounded up to whole cells, and the nested <svg> crops it.
 const CARD_COLOR = "#F6FBFD";
 const DESIGN_SIZE = 550;
 const WEAVE_COLORS = ["#f03090", "#e8455f", "#ff9800", "#f5b400", "#2e9e5b", "#009688", "#3366cc", "#6c63ff", "#9c27b0", "#1f2937"];
 
 export function weaveBackground(name: string, width: number, height: number): string {
-  const node = namehash(name);
+  const node = namehash(canonicalizeName(name));
   const color = WEAVE_COLORS[Number(BigInt(node) % BigInt(WEAVE_COLORS.length))];
   const k = Math.min(width, height) / DESIGN_SIZE;
   const w = +(width / k).toFixed(3);
@@ -119,6 +122,10 @@ export interface ImageGenerationOptions {
 export interface GeneratedImage {
   svg: string;
   contentType: string;
+  // True when the name's label was meant to be measured with the rasterizer but
+  // it failed, so the card fell back to the built-in measurement and its label
+  // may not fit the name. Such a card must not be cached for long.
+  measureFailed: boolean;
   size: {
     width: number;
     height: number;
@@ -179,14 +186,15 @@ export class ImageGenerationService {
         await initializeFont(satoshi.buffer);
       }
 
-      const result = isOnV2(migrationStatus)
+      const { svg, measureFailed } = isOnV2(migrationStatus)
         ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket)
-        : await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64);
+        : { svg: await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64), measureFailed: false };
 
       return {
-        svg: new TextDecoder().decode(result),
+        svg: new TextDecoder().decode(svg),
         contentType: "image/svg+xml",
         size,
+        measureFailed,
       };
     } catch (error) {
       throw new Error(`Failed to generate image for ${name}: ${error}`);
@@ -235,14 +243,15 @@ export class ImageGenerationService {
 
   // The ENS v2 card. A name the composer can't measure exactly by itself is
   // measured with the rasterizer, so its label fits the name in the PNG. If
-  // the rasterizer can't start, the card uses the built-in measurement.
+  // the rasterizer can't start, the card uses the built-in measurement and is
+  // reported as measureFailed.
   private async v2Card(
     name: string,
     size: { width: number; height: number },
     backgroundImageUrl: string | null,
     satoshi: { buffer: ArrayBuffer; base64: string } | undefined,
     bucket: R2Bucket | undefined,
-  ): Promise<Uint8Array> {
+  ): Promise<{ svg: Uint8Array; measureFailed: boolean }> {
     const display = displayName(name);
     const options = {
       layout: 'ens-v2' as const,
@@ -254,22 +263,25 @@ export class ImageGenerationService {
       backgroundImageUrl,
       backgroundMarkup: backgroundImageUrl ? null : weaveBackground(name, size.width, size.height),
     };
-    if (!satoshi || !bucket || !this.rasterizer || BUILT_IN_MEASURE_RE.test(display)) return createDynamicSVGImage(options);
+    if (!satoshi || !bucket || !this.rasterizer || BUILT_IN_MEASURE_RE.test(display)) {
+      return { svg: await createDynamicSVGImage(options), measureFailed: false };
+    }
     try {
       const rasterizer = await this.rasterizer(bucket);
-      return await createDynamicSVGImage({
+      const svg = await createDynamicSVGImage({
         ...options,
         // The same buffer every time: the rasterizer parses each primary font once.
         measureText: (t, fontSize, o) => rasterizer.measureText(t, fontSize, { ...o, primaryFont: satoshi.buffer }),
       });
+      return { svg, measureFailed: false };
     } catch (error) {
       console.warn(`[image] measuring ${name} with the rasterizer failed, using the built-in measurement:`, error);
-      return createDynamicSVGImage(options);
+      return { svg: await createDynamicSVGImage(options), measureFailed: true };
     }
   }
 
-  // The v1 card (names not on ENS v2), unchanged: the name over the avatar or
-  // a colour by character set. No badge or indicator.
+  // The v1 card (names not on ENS v2): the name over the avatar or a colour by
+  // character set, as before, without the character-set indicator.
   private v1Card(
     name: string,
     text: string,

@@ -301,6 +301,22 @@ describe('ImageCacheService', () => {
     });
   });
 
+  describe('Label measurement failure (measureFailed)', () => {
+    it('does not cache a card whose label fell back to the built-in measurement', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      vi.spyOn(imageService, 'generateDomainImage').mockResolvedValue({
+        svg: '<svg>degraded</svg>', contentType: 'image/svg+xml', size: { width: 518, height: 518 }, measureFailed: true,
+      });
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      // The route then skips the edge cache and sends a short Cache-Control.
+      expect(result.avatarFailed).toBe(true);
+      expect(executionCtx.waitUntil).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Stale revalidation with avatar failure', () => {
     it('should skip revalidation write-back when avatar fetch fails during background refresh', async () => {
       // Serve stale entry

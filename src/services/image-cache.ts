@@ -20,9 +20,10 @@ export interface ImageCacheResult {
   contentType: string;
   cacheStatus: CacheStatus;
   ttlConfig: TtlConfig;
-  // True when the card was rendered without its avatar because the avatar
-  // lookup failed (not because the name has none). Such a card is not written
-  // to KV/R2, and routes must not cache it for long either.
+  // True when the card is degraded: rendered without its avatar because the
+  // avatar lookup failed (not because the name has none), or with its label
+  // measured without the rasterizer because it failed to start. Such a card is
+  // not written to KV/R2, and routes must not cache it for long either.
   avatarFailed: boolean;
 }
 
@@ -36,7 +37,8 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // Build a deterministic cache key from name + network + image params.
 // `name` stays first so the per-name invalidation prefix (`svg:${name}:`) still
 // matches across both networks. `network` prevents mainnet/sepolia collisions —
-// the same name renders differently per network (avatar).
+// the same name renders differently per network (avatar, and the migration
+// status that picks the card).
 // Bump when cards rendered by older code must never be served again. v2: cards
 // rendered before the avatar type allowlist could carry markup injected through
 // the avatar's MIME type (WEB-1549). v3: the ENS v2 card design (no status
@@ -133,9 +135,9 @@ export class ImageCacheService {
 
     // --- L3: Origin (generate from scratch) ---
     const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options);
-    console.log(`[image-cache] L3 MISS ${name} (${Date.now() - start}ms)${avatarFailed ? ' [avatar failed — skipping cache]' : ' → writing back to L1+L2'}`);
+    console.log(`[image-cache] L3 MISS ${name} (${Date.now() - start}ms)${avatarFailed ? ' [degraded card — skipping cache]' : ' → writing back to L1+L2'}`);
 
-    // Only cache if avatar didn't fail — avoid persisting SVGs without background
+    // Only cache a card that isn't degraded (see ImageCacheResult.avatarFailed)
     if (!avatarFailed) {
       executionCtx.waitUntil(
         this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig).catch(
@@ -256,7 +258,8 @@ export class ImageCacheService {
     const image = await this.imageService.generateDomainImage(genOptions, this.bucket);
     const svg = typeof image.svg === 'string' ? image.svg : String(image.svg);
 
-    return { svg, avatarHash, avatarFailed };
+    // A label measured without the rasterizer is degraded like a missing avatar.
+    return { svg, avatarHash, avatarFailed: avatarFailed || image.measureFailed === true };
   }
 
   // Background revalidation: regenerate and write back
@@ -269,7 +272,7 @@ export class ImageCacheService {
   ): Promise<void> {
     const { svg, avatarHash, avatarFailed } = await this.generateFromOrigin(name, options);
     if (avatarFailed) {
-      console.warn(`[image-cache] revalidate skipped for ${name}: avatar fetch failed`);
+      console.warn(`[image-cache] revalidate skipped for ${name}: degraded card`);
       return;
     }
     await this.writeBackAll(cacheKey, svg, avatarHash, params.migrationStatus, ttlConfig);
