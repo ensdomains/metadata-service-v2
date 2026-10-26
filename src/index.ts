@@ -400,7 +400,7 @@ app.get(
   async (c) => {
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
-    const name = c.req.param("name");
+    const name = canonicalizeName(c.req.param("name"));
     const { avatarService } = getImageServices(c.env, network);
 
     try {
@@ -442,7 +442,7 @@ app.get(
 
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
-    const name = c.req.param("name");
+    const name = canonicalizeName(c.req.param("name"));
     const { avatarService } = getImageServices(c.env, network);
 
     try {
@@ -479,7 +479,7 @@ app.get(
   async (c) => {
     // validateNetwork middleware guarantees a valid value; narrow the type.
     const network = c.req.param("network") as NetworkName;
-    const name = c.req.param("name");
+    const name = canonicalizeName(c.req.param("name"));
     const { avatarService } = getImageServices(c.env, network);
 
     try {
@@ -650,7 +650,7 @@ app.get(
 
       // v2 route: param2 is registryType
       if (param2 === 'registry' || param2 === 'namewrapper') {
-        return await handleMetadata(c, network, param2, param3);
+        return await handleMetadata(c, network, param2, canonicalizeName(param3));
       }
 
       return c.json({ error: "Invalid route. Second parameter must be 'registry', 'namewrapper', or a contract address", timestamp: new Date().toISOString() }, 400);
@@ -673,7 +673,7 @@ app.get(
     const edgeHit = await edgeCacheMatch(c);
     if (edgeHit) return edgeHit;
 
-    const { name } = c.req.param();
+    const name = canonicalizeName(c.req.param("name"));
     const network = c.req.query('network') || 'mainnet';
     if (network !== 'mainnet' && network !== 'sepolia') {
       return c.json({ error: "Invalid network. Must be 'mainnet' or 'sepolia'", timestamp: new Date().toISOString() }, 400);
@@ -711,7 +711,7 @@ app.get(
     const edgeHit = await edgeCacheMatch(c);
     if (edgeHit) return edgeHit;
 
-    const { name } = c.req.param();
+    const name = canonicalizeName(c.req.param("name"));
     const network = c.req.query('network') || 'mainnet';
     if (network !== 'mainnet' && network !== 'sepolia') {
       return c.json({ error: "Invalid network. Must be 'mainnet' or 'sepolia'", timestamp: new Date().toISOString() }, 400);
@@ -1034,7 +1034,7 @@ app.get(
         registryType = resolved.registryType;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
         // v2: param3 is the ENS name
-        name = param3;
+        name = canonicalizeName(param3);
         registryType = param2;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
@@ -1079,7 +1079,7 @@ app.get(
         name = resolved.name;
         registryType = resolved.registryType;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
-        name = param3;
+        name = canonicalizeName(param3);
         registryType = param2;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);

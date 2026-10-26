@@ -1,6 +1,6 @@
 import { Context, MiddlewareHandler } from 'hono';
 import type { AppEnv } from '../index';
-import { validateEnsName } from '../utils/ens';
+import { validateEnsName, canonicalizeName } from '../utils/ens';
 
 // Middlewares are typed as MiddlewareHandler<AppEnv>: `c.env` keeps the Env
 // binding types, and the path type is `string` rather than the `any` of a bare
@@ -32,7 +32,9 @@ export const validateEnsNameParam: MiddlewareHandler<AppEnv> = async (c, next) =
     }, 400);
   }
 
-  if (!validateEnsName(name)) {
+  // Validated as given and as canonicalized: the handler looks up and keys the
+  // canonical form, which ENSIP-15 mapping can lengthen.
+  if (!validateEnsName(name) || !validateEnsName(canonicalizeName(name))) {
     return c.json({
       error: "Invalid ENS name format",
       timestamp: new Date().toISOString()
