@@ -18,11 +18,11 @@
 //       contract_address, name|null, namehash|null, data, timestamp }
 import type { Context } from 'hono';
 import { CacheService, CacheKeys } from './cache';
-import { validateEnsName, canonicalizeName, MAX_ENS_NAME_LENGTH, MAX_NAME_LABELS } from '../utils/ens';
+import { validateEnsName, canonicalizeName, nameByteLength, MAX_ENS_NAME_LENGTH, MAX_NAME_LABELS } from '../utils/ens';
 
 // A name the service never serves because of its size, however well-formed.
 function isOverNameLimits(name: string): boolean {
-  return name.length > MAX_ENS_NAME_LENGTH || name.split('.').length > MAX_NAME_LABELS;
+  return nameByteLength(name) > MAX_ENS_NAME_LENGTH || name.split('.').length > MAX_NAME_LABELS;
 }
 import type { StorageManager } from '../utils/storage';
 import { readRequestBodyCapped } from '../utils/request-body';
@@ -125,7 +125,7 @@ export class WebhookService {
       // to invalidate: every route refuses such a name. Acknowledge it, so the
       // sender neither retries it nor takes this endpoint for a failing one.
       if (payload.name && isOverNameLimits(payload.name)) {
-        console.log(`[webhook] ${payload.event_type}: ignoring a name this service does not serve (${String(payload.name).length} chars)`);
+        console.log(`[webhook] ${payload.event_type}: ignoring a name this service does not serve (${nameByteLength(payload.name)} bytes)`);
         return c.json({
           status: 'ignored',
           processed: false,
