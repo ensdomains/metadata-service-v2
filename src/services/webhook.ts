@@ -25,6 +25,7 @@ function isOverNameLimits(name: string): boolean {
   return name.length > MAX_ENS_NAME_LENGTH || name.split('.').length > MAX_NAME_LABELS;
 }
 import type { StorageManager } from '../utils/storage';
+import { readRequestBodyCapped } from '../utils/request-body';
 import { SUPPORTED_NETWORKS } from '../config/networks';
 
 // Webhook payload: a flat ENS name-change event. (Wire shape originated with
@@ -97,7 +98,7 @@ export class WebhookService {
     try {
       // Read the raw body a single time — signature is computed over these exact
       // bytes, so we must not re-read or re-serialize. Size-capped as it is read.
-      const rawBody = await readBodyCapped(c.req.raw, MAX_WEBHOOK_BODY_BYTES);
+      const rawBody = await readRequestBodyCapped(c.req.raw, MAX_WEBHOOK_BODY_BYTES);
       if (rawBody === null) {
         return c.json({ error: 'Payload too large' }, 413);
       }
@@ -379,38 +380,6 @@ export class WebhookService {
     const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message) as BufferSource);
     return bytesToHex(new Uint8Array(signature));
   }
-}
-
-// Reads a request body as UTF-8 text, like Request.text(), or returns null once
-// it is known to be larger than maxBytes: at once when Content-Length says so,
-// otherwise (e.g. a chunked body, which has none) as soon as the bytes read
-// pass the cap. Either way the rest of the body is cancelled, not read.
-async function readBodyCapped(req: Request, maxBytes: number): Promise<string | null> {
-  if (Number(req.headers.get('Content-Length')) > maxBytes) {
-    req.body?.cancel().catch(() => {});
-    return null;
-  }
-  if (!req.body) return '';
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > maxBytes) {
-      reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
 }
 
 // --- crypto helpers ---

@@ -25,6 +25,7 @@ import { parseIpfsGateway } from "./services/ipfs-gateway";
 import { ImageCacheService, type ImageCacheResult } from "./services/image-cache";
 import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
+import { readRequestBodyCapped } from "./utils/request-body";
 import { withRequestBudget } from "./services/request-budget";
 import { withServingHost } from "./services/media-fetch";
 import { RasterizeService, getRasterizer } from "./services/rasterize";
@@ -762,6 +763,11 @@ app.get(
 // names it is the background sync of the last names that can hit that cap, not
 // a response.
 const DEFAULT_MAX_BATCH_NAMES = 100;
+// Largest /batch-metadata body accepted (413 above it), enforced while the body
+// is read and before it is parsed, independently of the name count: the count
+// can only be checked after the whole body has been buffered and parsed. 100
+// names average up to ~600 bytes each within it.
+const MAX_BATCH_BODY_BYTES = 64 * 1024;
 // Distinct names resolved at once: an invocation has 6 connections waiting for
 // response headers, and a request queued behind them runs down its timeout
 // before it is sent (a false indexer failure trips the circuit breaker).
@@ -817,8 +823,20 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 // Batch metadata endpoint
 app.post("/batch-metadata", async (c) => {
   try {
+    // Bounded before parsing: an over-limit body (declared or streamed) is a 413
+    // and the rest of it is never read.
+    const raw = await readRequestBodyCapped(c.req.raw, MAX_BATCH_BODY_BYTES);
+    if (raw === null) {
+      return c.json({ error: 'Payload too large' }, 413);
+    }
+
     // A body that is not JSON (or is JSON null) is a client error, not a 500.
-    const body = await c.req.json().catch(() => null);
+    let body;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
 
     if (!body?.names || !Array.isArray(body.names)) {
       const errorResponse: ErrorResponse = {
