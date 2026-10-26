@@ -18,10 +18,11 @@ export interface MetadataResponse {
   name: string;
   description: string;
   attributes: MetadataAttribute[];
-  url: string;
+  // null, and no background_image, for a name that isn't normalized (as v1).
+  url: string | null;
   last_request_date: number;
   version: number;
-  background_image: string;
+  background_image?: string;
   image: string;
   image_url: string;
 }

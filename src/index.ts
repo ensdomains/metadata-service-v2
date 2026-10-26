@@ -546,7 +546,7 @@ async function handleMetadata(
 // Shared image handler — used by both v1 (tokenId) and v2 (name) routes.
 // The L0 edge-cache short-circuit happens in the route BEFORE checkExpiry, so by
 // the time we're here it's a confirmed edge miss and we only need to generate+store.
-async function handleImage(c: AppContext, network: NetworkName, name: string) {
+async function handleImage(c: AppContext, network: NetworkName, name: string, registryType: 'registry' | 'namewrapper') {
   const { imageService, imageCacheService } = getImageServices(c.env, network);
 
   // Only honor `?status=` if it's a real MigrationStatus — otherwise an arbitrary
@@ -555,7 +555,7 @@ async function handleImage(c: AppContext, network: NetworkName, name: string) {
   const width = c.req.query('w');
   const height = c.req.query('h');
 
-  const options: ImageGenerationOptions = { name };
+  const options: ImageGenerationOptions = { name, registryType };
   if (width && height) {
     options.size = { width: parseInt(width, 10), height: parseInt(height, 10) };
   }
@@ -1020,6 +1020,7 @@ app.get(
       if (edgeHit) return withMediaSecurityHeaders(edgeHit);
 
       let name: string;
+      let registryType: 'registry' | 'namewrapper';
 
       if (isContractAddress(param2)) {
         // v1: resolve tokenId to name
@@ -1030,9 +1031,11 @@ app.get(
           param3,
         );
         name = resolved.name;
+        registryType = resolved.registryType;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
         // v2: param3 is the ENS name
         name = param3;
+        registryType = param2;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
       }
@@ -1042,7 +1045,7 @@ app.get(
       const { metadataService } = getServices(c.env, network);
       await metadataService.checkExpiry(name);   // → 410 if expired
 
-      return await handleImage(c, network, name);
+      return await handleImage(c, network, name, registryType);
     } catch (error) {
       return httpError(c, error, "Failed to generate image");
     }
@@ -1064,6 +1067,7 @@ app.get(
 
     try {
       let name: string;
+      let registryType: 'registry' | 'namewrapper';
 
       if (isContractAddress(param2)) {
         const { metadataService } = getServices(c.env, network);
@@ -1073,8 +1077,10 @@ app.get(
           param3,
         );
         name = resolved.name;
+        registryType = resolved.registryType;
       } else if (param2 === 'registry' || param2 === 'namewrapper') {
         name = param3;
+        registryType = param2;
       } else {
         return c.json({ error: "Invalid route", timestamp: new Date().toISOString() }, 400);
       }
@@ -1099,7 +1105,7 @@ app.get(
       const outputWidth = c.req.query('w') ? parseInt(c.req.query('w')!, 10) : null;
       const outputHeight = c.req.query('h') ? parseInt(c.req.query('h')!, 10) : null;
 
-      const options: ImageGenerationOptions = { name };
+      const options: ImageGenerationOptions = { name, registryType };
 
       // Non-square: pass actual dimensions so layout composer handles aspect ratio
       // Square: generate at default size, rewrite width/height (viewBox scaling handles it)

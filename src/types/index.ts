@@ -45,6 +45,7 @@ export interface SvgCacheEntry {
 
 // Parameters used to build image cache keys
 export interface ImageCacheParams {
+  registryType: 'registry' | 'namewrapper';
   migrationStatus: string;
   width: number;
   height: number;

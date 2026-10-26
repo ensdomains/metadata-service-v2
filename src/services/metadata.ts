@@ -27,6 +27,7 @@ import {
   getCharacterSet,
   getSegmentLength,
   isNormalized,
+  maskedName,
   constructEthNameHash,
   Version,
   tokenIdToHex,
@@ -986,12 +987,13 @@ export class MetadataService {
     network: NetworkName,
     registryType: 'registry' | 'namewrapper',
     baseUrl?: string,
-  ): { image: string; background: string } {
+  ): { image: string; background?: string } {
     const origin = baseUrl || this.getDefaultBaseUrl();
     const encoded = encodeURIComponent(name);
     return {
       image: `${origin}/${network}/${registryType}/${encoded}/image`,
-      background: `${origin}/${network}/avatar/${encoded}`,
+      // A name that isn't normalized gets no avatar (as v1).
+      background: isNormalized(name) ? `${origin}/${network}/avatar/${encoded}` : undefined,
     };
   }
 
@@ -1013,14 +1015,12 @@ export class MetadataService {
     const urls = this.selfUrls(domain.name, network, registryType, baseUrl);
 
     return {
-      is_normalized: isNormalized(domain.name),
-      name: domain.name,
-      description: this.generateDescription(domain.name),
+      ...this.shownName(domain.name, registryType),
       attributes: this.buildAttributes(domain, v2MigrationStatus),
-      url: `https://app.ens.domains/name/${domain.name}`,
+      url: isNormalized(domain.name) ? `https://app.ens.domains/name/${domain.name}` : null,
       last_request_date: Date.now(),
       version: this.metadataVersion(registryType, v2MigrationStatus),
-      background_image: urls.background,
+      ...(urls.background ? { background_image: urls.background } : {}),
       image: urls.image,
       image_url: urls.image,
     };
@@ -1044,14 +1044,12 @@ export class MetadataService {
     const urls = this.selfUrls(nameData.name, network, registryType, baseUrl);
 
     return {
-      is_normalized: isNormalized(nameData.name),
-      name: nameData.name,
-      description: this.generateDescription(nameData.name),
+      ...this.shownName(nameData.name, registryType),
       attributes: this.buildAttributesFromBlockchain(nameData, status),
-      url: `https://app.ens.domains/name/${nameData.name}`,
+      url: isNormalized(nameData.name) ? `https://app.ens.domains/name/${nameData.name}` : null,
       last_request_date: Date.now(),
       version: this.metadataVersion(registryType, status),
-      background_image: urls.background,
+      ...(urls.background ? { background_image: urls.background } : {}),
       image: urls.image,
       image_url: urls.image,
     };
@@ -1080,14 +1078,12 @@ export class MetadataService {
     const urls = this.selfUrls(record.name, network, registryType, baseUrl);
 
     return {
-      is_normalized: isNormalized(record.name),
-      name: record.name,
-      description: this.generateDescription(record.name),
+      ...this.shownName(record.name, registryType),
       attributes: this.buildAttributesFromD1Record(record, status),
-      url: `https://app.ens.domains/name/${record.name}`,
+      url: isNormalized(record.name) ? `https://app.ens.domains/name/${record.name}` : null,
       last_request_date: Date.now(),
       version: this.metadataVersion(registryType, status ?? MIGRATION_STATUS.UNMIGRATED),
-      background_image: urls.background,
+      ...(urls.background ? { background_image: urls.background } : {}),
       image: urls.image,
       image_url: urls.image,
     };
@@ -1283,6 +1279,20 @@ export class MetadataService {
   // Generate description text (v1-compatible)
   private generateDescription(name: string): string {
     return `${name}, an ENS name.`;
+  }
+
+  // The name as the metadata shows it. A name that isn't normalized is shown as
+  // v1 shows it: its token id, shortened, with a note naming the actual name.
+  private shownName(name: string, registryType: 'registry' | 'namewrapper') {
+    if (isNormalized(name)) {
+      return { is_normalized: true, name, description: this.generateDescription(name) };
+    }
+    const masked = maskedName(name, registryType);
+    return {
+      is_normalized: false,
+      name: masked,
+      description: `${this.generateDescription(masked)} (${name} is not in normalized form)`,
+    };
   }
 
   // Fallback base URL when request origin is not available

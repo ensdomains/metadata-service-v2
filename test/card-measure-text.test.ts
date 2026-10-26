@@ -65,11 +65,6 @@ describe('ENS v2 card label', () => {
     expect(state.calls).toBe(0);
   });
 
-  it('draws a name that does not normalize, as given, on its weave', async () => {
-    // Such names exist on-chain; the weave hashes them as canonicalizeName leaves them.
-    expect(await card('ab_c.eth')).toContain('>ab_c.eth</text>');
-  });
-
   it("hashes the canonical name for the weave, so every spelling gets the name's weave", () => {
     expect(weaveBackground('Nick.ETH', 518, 518)).toBe(weaveBackground('nick.eth', 518, 518));
   });

@@ -1,6 +1,7 @@
 // Tiered image cache: L1 KV → L2 R2 → L3 Origin with stale-while-revalidate
 import { MIGRATION_STATUS, type SvgCacheEntry, type ImageCacheParams, type NetworkName } from '../types';
-import { canonicalizeName } from '../utils/ens';
+import { canonicalizeName, isNormalized } from '../utils/ens';
+import { isOnV2 } from '../utils/migration';
 import type { StorageManager } from '../utils/storage';
 import { toSafeImage } from './media-safety';
 import type { ImageGenerationService, ImageGenerationOptions } from './image';
@@ -20,8 +21,8 @@ export interface ImageCacheResult {
   contentType: string;
   cacheStatus: CacheStatus;
   ttlConfig: TtlConfig;
-  // True when the card is degraded: rendered without its avatar because the
-  // avatar lookup failed (not because the name has none), or with its label
+  // True when the card is degraded: rendered without its avatar or its theme
+  // because that lookup failed (not because the name has none), or with its label
   // measured without the rasterizer because it failed to start. Such a card is
   // not written to KV/R2, and routes must not cache it for long either.
   avatarFailed: boolean;
@@ -42,13 +43,14 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // Bump when cards rendered by older code must never be served again. v2: cards
 // rendered before the avatar type allowlist could carry markup injected through
 // the avatar's MIME type (WEB-1549). v3: the ENS v2 card design (no status
-// badges, etherloom weave when there is no avatar).
-const CARD_CACHE_VERSION = 'v3';
+// badges, etherloom weave when there is no avatar). v4: the v2 card's theme
+// comes from the name's `theme` record.
+const CARD_CACHE_VERSION = 'v4';
 
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
   // prefix (`svg:${name}:`) still matches across both networks.
-  return `svg:${canonicalizeName(name)}:${network}:${params.migrationStatus}:${params.width}:${params.height}:${CARD_CACHE_VERSION}`;
+  return `svg:${canonicalizeName(name)}:${network}:${params.registryType}:${params.migrationStatus}:${params.width}:${params.height}:${CARD_CACHE_VERSION}`;
 }
 
 export class ImageCacheService {
@@ -81,6 +83,8 @@ export class ImageCacheService {
     executionCtx: ExecutionContext,
   ): Promise<ImageCacheResult> {
     const params: ImageCacheParams = {
+      // The card of a name that isn't normalized shows the route's token id.
+      registryType: options.registryType || 'registry',
       migrationStatus: options.migrationStatus || MIGRATION_STATUS.UNMIGRATED,
       width: options.size?.width || 518,
       height: options.size?.height || 518,
@@ -197,9 +201,23 @@ export class ImageCacheService {
     // Network-qualified avatar cache key: the same name resolves to different
     // avatars per network, so mainnet/sepolia must not share an R2 avatar entry.
     const avatarKey = `${canonicalizeName(name)}:${this.network}`;
+    // As in v1, a name that isn't normalized gets no avatar: don't look it up.
+    const wantsAvatar = isNormalized(name);
+
+    // Only the ENS v2 card is themed. Started now, read after the avatar.
+    const themeLookup: Promise<{ record: string | null; failed: boolean }> =
+      wantsAvatar && options.themeRecord === undefined && isOnV2(options.migrationStatus ?? MIGRATION_STATUS.UNMIGRATED)
+        ? this.avatarService.getTextRecord(name, 'theme').then(
+            (record) => ({ record, failed: false }),
+            (err) => {
+              console.warn(`[image-cache] theme record lookup failed for ${name}:`, err);
+              return { record: null, failed: true };
+            },
+          )
+        : Promise.resolve({ record: options.themeRecord ?? null, failed: false });
 
     // Try R2 avatar cache first
-    if (!avatarBase64) {
+    if (wantsAvatar && !avatarBase64) {
       try {
         const r2Avatar = await this.storage.getAvatar(avatarKey);
         // Re-classify the cached bytes instead of trusting the stored type:
@@ -218,7 +236,7 @@ export class ImageCacheService {
     }
 
     // If still no avatar, resolve via RPC (the expensive path)
-    if (!avatarBase64) {
+    if (wantsAvatar && !avatarBase64) {
       try {
         const avatar = await this.avatarService.getAvatarImage(name);
         if (avatar) {
@@ -248,18 +266,20 @@ export class ImageCacheService {
 
     // Generate SVG. The avatar was looked up above, so the image service must
     // not look it up again (a second lookup would double the wait on an outage).
+    const theme = await themeLookup;
     const genOptions: ImageGenerationOptions = {
       ...options,
       avatarBase64,
       avatarMimeType,
       skipAvatarLookup: true,
+      themeRecord: theme.record,
     };
 
     const image = await this.imageService.generateDomainImage(genOptions, this.bucket);
     const svg = typeof image.svg === 'string' ? image.svg : String(image.svg);
 
     // A label measured without the rasterizer is degraded like a missing avatar.
-    return { svg, avatarHash, avatarFailed: avatarFailed || image.measureFailed === true };
+    return { svg, avatarHash, avatarFailed: avatarFailed || theme.failed || image.measureFailed === true };
   }
 
   // Background revalidation: regenerate and write back

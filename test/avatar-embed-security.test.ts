@@ -72,7 +72,7 @@ describe('ImageCacheService re-classifies avatars cached in R2 before the fix', 
           }
         : null,
     );
-    const avatarService = { getAvatarImage: vi.fn().mockResolvedValue(null) } as unknown as AvatarService;
+    const avatarService = { getAvatarImage: vi.fn().mockResolvedValue(null), getTextRecord: vi.fn().mockResolvedValue(null) } as unknown as AvatarService;
     const cache = new ImageCacheService(createMockKV(), new StorageManager(r2), new ImageGenerationService(), avatarService, 'mainnet');
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
     return { cache, ctx, avatarService };
@@ -96,11 +96,11 @@ describe('ImageCacheService re-classifies avatars cached in R2 before the fix', 
 describe('card cache version', () => {
   it('keys cards by version so cards rendered before this fix are never served, and keeps the per-name prefix', async () => {
     const kv = createMockKV();
-    const cache = new ImageCacheService(kv, new StorageManager(createMockR2()), new ImageGenerationService(), { getAvatarImage: vi.fn().mockResolvedValue(null) } as unknown as AvatarService, 'mainnet');
+    const cache = new ImageCacheService(kv, new StorageManager(createMockR2()), new ImageGenerationService(), { getAvatarImage: vi.fn().mockResolvedValue(null), getTextRecord: vi.fn().mockResolvedValue(null) } as unknown as AvatarService, 'mainnet');
     const ctx = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
     await cache.getImage('Nick.eth', { name: 'Nick.eth' }, ctx);
     const key = (kv.get as Mock).mock.calls[0][0] as string;
     expect(key.startsWith('svg:nick.eth:')).toBe(true); // webhook invalidation prefix
-    expect(key.endsWith(':v3')).toBe(true);
+    expect(key.endsWith(':v4')).toBe(true);
   });
 });

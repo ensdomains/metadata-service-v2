@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ImageGenerationService, weaveBackground } from '../src/services/image';
+import { ImageGenerationService, cardTheme, weaveBackground } from '../src/services/image';
+import { isNormalized } from '../src/utils/ens';
 
 // Mock adaptive-layout-composer
 vi.mock('adaptive-layout-composer', () => ({
@@ -7,11 +8,15 @@ vi.mock('adaptive-layout-composer', () => ({
 }));
 
 // Mock ENS utilities
-vi.mock('../src/utils/ens', () => ({
+vi.mock('../src/utils/ens', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/ens')>();
+  return {
+  ...actual,
+  isNormalized: vi.fn(actual.isNormalized),
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
-  canonicalizeName: (n: string) => n.toLowerCase(),
-}));
+  };
+});
 
 describe('ImageGenerationService', () => {
   const imageService = new ImageGenerationService();
@@ -121,11 +126,11 @@ describe('ImageGenerationService', () => {
   });
 
   describe('card by migration status', () => {
-    async function composerOptions(migrationStatus: 'unmigrated' | 'migrated' | 'native', size?: { width: number; height: number }) {
+    async function composerOptions(migrationStatus: 'unmigrated' | 'migrated' | 'native', size?: { width: number; height: number }, themeRecord?: string | null) {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');
       const mockCreateSVG = vi.mocked(createDynamicSVGImage);
       mockCreateSVG.mockClear();
-      await imageService.generateDomainImage({ name: 'test.eth', migrationStatus, size });
+      await imageService.generateDomainImage({ name: 'test.eth', migrationStatus, size, themeRecord });
       return mockCreateSVG.mock.calls[0][0];
     }
 
@@ -146,19 +151,58 @@ describe('ImageGenerationService', () => {
       const opts = await composerOptions('migrated', { width: 800, height: 600 });
       expect(opts?.backgroundMarkup).toBe(weaveBackground('test.eth', 800, 600));
     });
+
+    it("colours the ENS v2 card with the theme its `theme` record names", async () => {
+      const garnet = cardTheme('#E72A96');
+      const opts = await composerOptions('native', undefined, '#E72A96');
+      expect(opts?.colors).toEqual({ accent: '#E72A96', label: garnet.card, logo: garnet.card, parent: garnet.weave });
+      expect(opts?.backgroundMarkup).toBe(weaveBackground('test.eth', 518, 518, garnet));
+      expect(opts?.backgroundMarkup).toContain(`fill="${garnet.card}" opacity="0.5"`);
+    });
+
+    it('draws the unthemed card when the name has no theme record', async () => {
+      const opts = await composerOptions('native');
+      expect(opts?.colors).toMatchObject({ accent: '#353535', label: '#FAF9F6', logo: '#FAF9F6' });
+    });
+
+    it("maps theme records as the manager app writes them, aliases included", () => {
+      const accent = (record?: string | null) => cardTheme(record).accent;
+      expect([accent('#0082BB'), accent('#0080BC')]).toEqual(['#0082BB', '#0082BB']);
+      expect(accent('#984D1B')).toBe('#984D1B');
+      expect([accent('#007C20'), accent('#007C23')]).toEqual(['#007C20', '#007C20']);
+      expect([accent('#E72A96'), accent('#ED2496')]).toEqual(['#E72A96', '#E72A96']);
+      expect(accent(' #e72a96 ')).toBe('#E72A96');
+      // Quartz has no card design yet; other values and no record are unthemed.
+      for (const record of ['#02293B', '#112233', 'pink', '', null, undefined]) {
+        expect(accent(record)).toBe('#353535');
+      }
+    });
   });
 
   describe('user-content safety (XSS)', () => {
-    it('escapes XML-special characters in the name before it enters the SVG', async () => {
+    it('never puts the text of a name that is not normalized into the SVG', async () => {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');
       const mockCreateSVG = vi.mocked(createDynamicSVGImage);
       mockCreateSVG.mockClear();
 
       await imageService.generateDomainImage({ name: 'evil</text><script>alert(1)</script>.eth' });
 
+      // Shown as its token id, shortened (as v1).
+      expect((mockCreateSVG.mock.calls[0][0] as { text: string }).text).toMatch(/^\[0x[0-9a-f]{4}\.\.\.[0-9a-f]{4}\]\.eth$/);
+    });
+
+    it('escapes XML-special characters in a name it draws (defense in depth)', async () => {
+      const { createDynamicSVGImage } = await import('adaptive-layout-composer');
+      const mockCreateSVG = vi.mocked(createDynamicSVGImage);
+      mockCreateSVG.mockClear();
+      vi.mocked(isNormalized).mockReturnValue(true); // as if it passed normalization
+
+      await imageService.generateDomainImage({ name: 'evil</text><script>alert(1)</script>.eth' });
+      const actual = await vi.importActual<typeof import('../src/utils/ens')>('../src/utils/ens');
+      vi.mocked(isNormalized).mockImplementation(actual.isNormalized);
+
       const passedText = (mockCreateSVG.mock.calls[0][0] as { text: string }).text;
       expect(passedText).not.toMatch(/[<>]/);            // no raw angle brackets reach the SVG markup
-      expect(passedText).not.toContain('<script>');
       expect(passedText).toContain('&lt;script&gt;');    // escaped form instead
     });
 
@@ -192,8 +236,8 @@ describe('ImageGenerationService', () => {
       expect(await textFor(name)).toBe(shown);
     });
 
-    it('draws a name ens_beautify rejects as given', async () => {
-      expect(await textFor('ab_c.eth')).toBe('ab_c.eth');
+    it('shows a name that is not normalized as its token id, shortened (as v1)', async () => {
+      expect(await textFor('ab_c.eth')).toBe('[0xf96b...0db8].eth'); // labelhash('ab_c')
     });
   });
 
