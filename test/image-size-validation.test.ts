@@ -7,6 +7,8 @@ import { createMockEnv } from './mocks/hono-env';
 // 518x518 key (NaN || 518), so one request replaced the default image for every
 // viewer of that name.
 
+const resolveStatusForImage = vi.fn(async () => 'unmigrated');
+
 const getImage = vi.fn(async () => ({
   svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
   contentType: 'image/svg+xml',
@@ -30,7 +32,7 @@ vi.mock('../src/services/metadata', async (importOriginal) => {
     ...orig,
     MetadataService: class {
       async checkExpiry() {}
-      async resolveStatusForImage() { return 'unmigrated'; }
+      resolveStatusForImage = resolveStatusForImage;
     },
   };
 });
@@ -63,6 +65,39 @@ describe('GET /:network/registry/:name/image with a non-numeric size', () => {
     const res = await req(`/mainnet/registry/nick.eth/image${query}`);
     expect(res.status).toBe(400);
     expect(getImage).not.toHaveBeenCalled();
+  });
+
+  // W8-ROUTES-002: parseInt reads a numeric prefix, so these used to render and
+  // cache a card. The whole value must be a decimal integer.
+  it.each([
+    '?w=100a&h=100',
+    '?w=100&h=100a',
+    '?w=300.0&h=300',
+    '?w=%20300&h=300',
+    '?w=%2B300&h=300',
+    '?w=300&h=0x12c',
+    '?w=3e2&h=300',
+  ])('%s → 400 before the status lookup, rendering or caching', async (query) => {
+    getImage.mockClear();
+    resolveStatusForImage.mockClear();
+    const res = await req(`/mainnet/registry/nick.eth/image${query}`);
+    expect(res.status).toBe(400);
+    expect(resolveStatusForImage).not.toHaveBeenCalled();
+    expect(getImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['?w=99&h=300', '?w=300&h=2001'])('%s → 400: the 100–2000 range still applies', async (query) => {
+    getImage.mockClear();
+    const res = await req(`/mainnet/registry/nick.eth/image${query}`);
+    expect(res.status).toBe(400);
+    expect(getImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['?w=100&h=100', '?w=2000&h=2000', '?w=0300&h=300'])('%s still renders', async (query) => {
+    getImage.mockClear();
+    const res = await req(`/mainnet/registry/nick.eth/image${query}`);
+    expect(res.status).toBe(200);
+    expect(getImage).toHaveBeenCalledTimes(1);
   });
 
   it('a valid size still renders', async () => {
