@@ -164,6 +164,8 @@ settings:
 
 overrides:
   harfbuzzjs: https://github.com/mdtanrikulu/harfbuzzjs/archive/48f2da5ebd3912c9b60188bf39a863e0099e9328.tar.gz
+  zod: ^4.6.6
+  undici: ^7.30.1
 
 importers:
 
@@ -174,10 +176,10 @@ importers:
         version: 1.11.1
       '@ensdomains/ens-avatar':
         specifier: 2.0.0-alpha.4
-        version: 2.0.0-alpha.4(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))
+        version: 2.0.0-alpha.4(viem@2.37.8(typescript@5.9.2))
       '@ensdomains/ensjs':
         specifier: ^3.7.0
-        version: 3.7.0(encoding@0.1.13)(typescript@5.9.2)(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))(zod@3.22.3)
+        version: 3.7.0(encoding@0.1.13)(typescript@5.9.2)(viem@2.37.8(typescript@5.9.2))
       '@resvg/resvg-wasm':
         specifier: ^2.6.2
         version: 2.6.2
@@ -207,7 +209,7 @@ importers:
         version: 1.0.1
       viem:
         specifier: ^2.21.19
-        version: 2.37.8(typescript@5.9.2)(zod@3.22.3)
+        version: 2.37.8(typescript@5.9.2)
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20241011.0
@@ -1189,7 +1191,7 @@ packages:
     resolution: {integrity: sha512-6Vh4HcRxNMLA0puzPjM5GBgT4aAcFGKZzSgAXvuZ27shJP6NEpielTuqbBmZILR5/xd0PizkBGy5hReKz9jl5A==}
     peerDependencies:
       typescript: '>=5.0.4'
-      zod: ^3.22.0 || ^4.0.0
+      zod: ^4.6.6
     peerDependenciesMeta:
       typescript:
         optional: true
@@ -1200,7 +1202,7 @@ packages:
     resolution: {integrity: sha512-Loe5/6tAgsBukY95eGaPSDmQHIjRZYQq8PB1MpsNccDIK8WiV+Uw6WzaIXipvaxTEL2yEB0OpEaQv3gs8pkS9Q==}
     peerDependencies:
       typescript: '>=5.0.4'
-      zod: ^3.22.0 || ^4.0.0
+      zod: ^4.6.6
     peerDependenciesMeta:
       typescript:
         optional: true
@@ -2331,8 +2333,8 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
-  undici@7.29.1:
-    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
+  undici@7.30.1:
+    resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
     engines: {node: '>=20.18.1'}
 
   unenv@2.0.0-rc.24:
@@ -2506,9 +2508,6 @@ packages:
   youch@4.1.0-beta.10:
     resolution: {integrity: sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ==}
 
-  zod@3.22.3:
-    resolution: {integrity: sha512-EjIevzuJRiRPbVH4mGc8nApb/lVLKVpmUhAaR5R5doKGfAnGJ6Gr3CViAVjP+4FWSxCsybeWQdcgCtbX+7oZug==}
-
 snapshots:
 
   '@adraffy/ens-normalize@1.10.1': {}
@@ -2593,30 +2592,30 @@ snapshots:
       dns-packet: 5.6.1
       typescript-logging: 1.0.1
 
-  '@ensdomains/ens-avatar@2.0.0-alpha.4(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))':
+  '@ensdomains/ens-avatar@2.0.0-alpha.4(viem@2.37.8(typescript@5.9.2))':
     dependencies:
       assert: 2.1.0
       htmlparser2: 10.1.0
       multiformats: 9.9.0
       postcss: 8.5.28
       sanitize-html: 2.17.2
-      undici: 7.29.1
+      undici: 7.30.1
     optionalDependencies:
-      viem: 2.37.8(typescript@5.9.2)(zod@3.22.3)
+      viem: 2.37.8(typescript@5.9.2)
 
-  '@ensdomains/ensjs@3.7.0(encoding@0.1.13)(typescript@5.9.2)(viem@2.37.8(typescript@5.9.2)(zod@3.22.3))(zod@3.22.3)':
+  '@ensdomains/ensjs@3.7.0(encoding@0.1.13)(typescript@5.9.2)(viem@2.37.8(typescript@5.9.2))':
     dependencies:
       '@adraffy/ens-normalize': 1.10.1
       '@ensdomains/address-encoder': 1.1.1
       '@ensdomains/content-hash': 3.1.0-rc.1
       '@ensdomains/dnsprovejs': 0.5.1
-      abitype: 1.1.1(typescript@5.9.2)(zod@3.22.3)
+      abitype: 1.1.1(typescript@5.9.2)
       dns-packet: 5.6.1
       graphql: 16.11.0
       graphql-request: 6.1.0(encoding@0.1.13)(graphql@16.11.0)
       pako: 2.1.0
       traverse: 0.6.11
-      viem: 2.37.8(typescript@5.9.2)(zod@3.22.3)
+      viem: 2.37.8(typescript@5.9.2)
     transitivePeerDependencies:
       - encoding
       - typescript
@@ -3249,15 +3248,13 @@ snapshots:
       loupe: 3.2.1
       tinyrainbow: 1.2.0
 
-  abitype@1.1.0(typescript@5.9.2)(zod@3.22.3):
+  abitype@1.1.0(typescript@5.9.2):
     optionalDependencies:
       typescript: 5.9.2
-      zod: 3.22.3
 
-  abitype@1.1.1(typescript@5.9.2)(zod@3.22.3):
+  abitype@1.1.1(typescript@5.9.2):
     optionalDependencies:
       typescript: 5.9.2
-      zod: 3.22.3
 
   acorn-jsx@5.3.2(acorn@8.15.0):
     dependencies:
@@ -4105,7 +4102,7 @@ snapshots:
     dependencies:
       '@cspotcode/source-map-support': 0.8.1
       sharp: 0.35.5(@types/node@22.18.6)
-      undici: 7.29.1
+      undici: 7.30.1
       workerd: 1.20261006.1
       ws: 8.21.0
       youch: 4.1.0-beta.10
@@ -4176,7 +4173,7 @@ snapshots:
       object-keys: 1.1.1
       safe-push-apply: 1.0.0
 
-  ox@0.9.6(typescript@5.9.2)(zod@3.22.3):
+  ox@0.9.6(typescript@5.9.2):
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
       '@noble/ciphers': 1.3.0
@@ -4184,7 +4181,7 @@ snapshots:
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.1.1(typescript@5.9.2)(zod@3.22.3)
+      abitype: 1.1.1(typescript@5.9.2)
       eventemitter3: 5.0.1
     optionalDependencies:
       typescript: 5.9.2
@@ -4624,7 +4621,7 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  undici@7.29.1: {}
+  undici@7.30.1: {}
 
   unenv@2.0.0-rc.24:
     dependencies:
@@ -4642,15 +4639,15 @@ snapshots:
       is-typed-array: 1.1.15
       which-typed-array: 1.1.19
 
-  viem@2.37.8(typescript@5.9.2)(zod@3.22.3):
+  viem@2.37.8(typescript@5.9.2):
     dependencies:
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.1.0(typescript@5.9.2)(zod@3.22.3)
+      abitype: 1.1.0(typescript@5.9.2)
       isows: 1.0.7(ws@8.18.3)
-      ox: 0.9.6(typescript@5.9.2)(zod@3.22.3)
+      ox: 0.9.6(typescript@5.9.2)
       ws: 8.18.3
     optionalDependencies:
       typescript: 5.9.2
@@ -4836,6 +4833,3 @@ snapshots:
       '@speed-highlight/core': 1.2.7
       cookie: 1.0.2
       youch-core: 0.3.3
-
-  zod@3.22.3:
-    optional: true
