@@ -7,6 +7,15 @@ overrides:
   # never runs the fork's `prepare: make` step (a git-hosted dependency would;
   # the fork already commits every built .wasm artifact the code imports).
   harfbuzzjs: https://github.com/mdtanrikulu/harfbuzzjs/archive/48f2da5ebd3912c9b60188bf39a863e0099e9328.tar.gz
+  # Security floors for transitive dependencies (`pnpm audit`). zod < 4.6.6
+  # can exhaust memory validating oversized constrained collections
+  # (GHSA-mrhx-c7xc-m3w5); it is only an optional peer of abitype (viem, ox,
+  # ensjs), which accepts ^3.22 || ^4, and with this floor pnpm no longer
+  # installs it at all. undici >= 7.18 < 7.30.1 (ens-avatar, miniflare) can
+  # be crashed by excessive content-encodings (GHSA-xjj6-f33q-929c). Drop each
+  # once its dependents resolve a patched version on their own.
+  zod: ^4.6.6
+  undici: ^7.30.1
 
 # pnpm 12 refuses git/URL dependencies that appear only in sub-dependencies.
 # rasterize-wasm's dependency on the harfbuzzjs fork is intentional (the same
