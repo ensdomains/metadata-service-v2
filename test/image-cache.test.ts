@@ -8,7 +8,7 @@ import { createMockKV, createMockR2 } from './mocks/hono-env';
 
 // Mock adaptive-layout-composer
 vi.mock('adaptive-layout-composer', () => ({
-  createDynamicSVGImage: vi.fn().mockResolvedValue('<svg>Mock SVG</svg>'),
+  createDynamicSVGImage: vi.fn().mockResolvedValue(new TextEncoder().encode('<svg>Mock SVG</svg>')),
 }));
 
 // Mock ENS utilities
@@ -298,6 +298,22 @@ describe('ImageCacheService', () => {
       // One lookup per render: a second one would double the wait on an outage.
       expect(avatarService.getAvatarImage).toHaveBeenCalledTimes(2);
       expect(avatarService.getAvatarBase64).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Label measurement failure (measureFailed)', () => {
+    it('does not cache a card whose label fell back to the built-in measurement', async () => {
+      (svgCacheKv.get as Mock).mockResolvedValue(null);
+      vi.mocked(r2Bucket.get).mockResolvedValue(null);
+      vi.spyOn(imageService, 'generateDomainImage').mockResolvedValue({
+        svg: '<svg>degraded</svg>', contentType: 'image/svg+xml', size: { width: 518, height: 518 }, measureFailed: true,
+      });
+
+      const result = await imageCacheService.getImage('nick.eth', defaultOptions, executionCtx);
+
+      // The route then skips the edge cache and sends a short Cache-Control.
+      expect(result.avatarFailed).toBe(true);
+      expect(executionCtx.waitUntil).not.toHaveBeenCalled();
     });
   });
 

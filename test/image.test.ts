@@ -1,15 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ImageGenerationService } from '../src/services/image';
+import { ImageGenerationService, weaveBackground } from '../src/services/image';
 
 // Mock adaptive-layout-composer
 vi.mock('adaptive-layout-composer', () => ({
-  createDynamicSVGImage: vi.fn().mockResolvedValue('<svg>Mock SVG</svg>'),
+  createDynamicSVGImage: vi.fn().mockResolvedValue(new TextEncoder().encode('<svg>Mock SVG</svg>')),
 }));
 
 // Mock ENS utilities
 vi.mock('../src/utils/ens', () => ({
   getCharacterSet: vi.fn().mockReturnValue('latin'),
   getSegmentLength: vi.fn().mockReturnValue({ type: 'short', length: 4 }),
+  canonicalizeName: (n: string) => n.toLowerCase(),
 }));
 
 describe('ImageGenerationService', () => {
@@ -119,28 +120,31 @@ describe('ImageGenerationService', () => {
     });
   });
 
-  describe('color schemes', () => {
-    it('should use different colors for different migration statuses', async () => {
+  describe('card by migration status', () => {
+    async function composerOptions(migrationStatus: 'unmigrated' | 'migrated' | 'native', size?: { width: number; height: number }) {
       const { createDynamicSVGImage } = await import('adaptive-layout-composer');
       const mockCreateSVG = vi.mocked(createDynamicSVGImage);
+      mockCreateSVG.mockClear();
+      await imageService.generateDomainImage({ name: 'test.eth', migrationStatus, size });
+      return mockCreateSVG.mock.calls[0][0];
+    }
 
-      // Test different migration statuses
-      for (const status of ['unmigrated', 'native', 'migrated']) {
-        mockCreateSVG.mockClear();
+    it('keeps the v1 card, with no badge or indicator, for a name not on ENS v2', async () => {
+      const opts = await composerOptions('unmigrated');
+      expect(opts).not.toHaveProperty('layout');
+      expect(opts).not.toHaveProperty('customElements');
+      expect(opts).toMatchObject({ text: 'test.eth', textColor: '#F9FAFB', backgroundColor: '#1F2937' });
+    });
 
-        await imageService.generateDomainImage({
-          name: 'test.eth',
-          migrationStatus: status as 'migrated' | 'native' | 'unmigrated',
-        });
+    it.each(['migrated', 'native'] as const)('draws the ENS v2 card, with no badge or indicator, for a %s name', async (status) => {
+      const opts = await composerOptions(status);
+      expect(opts).toMatchObject({ layout: 'ens-v2', text: 'test.eth', backgroundImageUrl: null });
+      expect(opts).not.toHaveProperty('customElements');
+    });
 
-        expect(mockCreateSVG).toHaveBeenCalledWith(
-          expect.objectContaining({
-            text: 'test.eth',
-            textColor: expect.any(String),
-            backgroundColor: expect.any(String),
-          })
-        );
-      }
+    it("draws an ENS v2 name's weave when it has no avatar", async () => {
+      const opts = await composerOptions('migrated', { width: 800, height: 600 });
+      expect(opts?.backgroundMarkup).toBe(weaveBackground('test.eth', 800, 600));
     });
   });
 

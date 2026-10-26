@@ -27,7 +27,7 @@ import { MetadataCacheService } from "./services/metadata-cache";
 import { StorageManager } from "./utils/storage";
 import { withRequestBudget } from "./services/request-budget";
 import { withServingHost } from "./services/media-fetch";
-import { RasterizeService } from "./services/rasterize";
+import { RasterizeService, getRasterizer } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
 import { CachePresets } from "./utils/cache-headers";
@@ -257,7 +257,7 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
     universalResolverV2,
     parseIpfsGateway(env.IPFS_GATEWAY),
   );
-  const imageService = new ImageGenerationService(avatarService);
+  const imageService = new ImageGenerationService(avatarService, (bucket) => getRasterizer(bucket));
   const storageManager = new StorageManager(env.ASSET_BUCKET);
   const imageCacheService = new ImageCacheService(env.SVG_CACHE, storageManager, imageService, avatarService, network, env.ASSET_BUCKET);
   const services = { avatarService, imageService, imageCacheService };

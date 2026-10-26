@@ -1,10 +1,14 @@
 // SVG-based NFT image generation service for ENS domains
 import { createDynamicSVGImage, initializeFont } from "adaptive-layout-composer";
+import { generateIdenticon } from "@ensdomains/etherloom";
 import { ens_beautify } from "@adraffy/ens-normalize";
-import { MIGRATION_STATUS, type MigrationStatus } from "../types";
-import { getCharacterSet } from "../utils/ens";
+import type { MigrationStatus } from "../types";
+import { namehash } from "viem/ens";
+import { canonicalizeName, getCharacterSet } from "../utils/ens";
+import { isOnV2 } from "../utils/migration";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
+import type { Rasterizer } from "./rasterize";
 import { isSafeImageType } from "./media-safety";
 import { rasterDimensions } from "./raster-dimensions";
 
@@ -18,8 +22,47 @@ const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 // as data:text/plain or data:;base64). XML attribute values are quoted, and a
 // match only counts inside a tag, so a name in the card's text cannot match,
 // and the pattern stays linear (one way to match any whitespace run).
-const AVATAR_ELEMENT_RE = /<image href="data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+/]*={0,2})" width="(\d+)" height="(\d+)"\/>/g;
+// The v1 card's element has no preserveAspectRatio; the ens-v2 layout's does.
+const AVATAR_ELEMENT_RE = /<image href="data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+/]*={0,2})" width="(\d+)" height="(\d+)"(?: preserveAspectRatio="xMidYMid slice")?\/>/g;
 const DATA_HREF_RE = /<[^<>]*\bhref\s*=\s*["']\s*data:/gi;
+
+// Names on ENS v2 (migrated or native) get the ENS v2 card; v1 names keep the
+// v1 card. The v2 card's no-avatar background, as in its design: the name's etherloom
+// weave on the card colour, under a 50% veil of it. The weave and its colour
+// (one of the etherloom demo's identicon colours) come from the namehash of the
+// canonical name alone, so they stay with the name across transfers and every
+// spelling of it (the card cache is keyed by the canonical name, and viem's
+// namehash does not normalize). canonicalizeName never throws, so names that
+// don't normalize still get a weave. It is drawn in the composer's 550-unit
+// design space, scaled like the rest of the card; the weave's own canvas is
+// rounded up to whole cells, and the nested <svg> crops it.
+const CARD_COLOR = "#F6FBFD";
+const DESIGN_SIZE = 550;
+const WEAVE_COLORS = ["#f03090", "#e8455f", "#ff9800", "#f5b400", "#2e9e5b", "#009688", "#3366cc", "#6c63ff", "#9c27b0", "#1f2937"];
+
+export function weaveBackground(name: string, width: number, height: number): string {
+  const node = namehash(canonicalizeName(name));
+  const color = WEAVE_COLORS[Number(BigInt(node) % BigInt(WEAVE_COLORS.length))];
+  const k = Math.min(width, height) / DESIGN_SIZE;
+  const w = +(width / k).toFixed(3);
+  const h = +(height / k).toFixed(3);
+  const weave = generateIdenticon({ namehash: node }, color, {
+    width: Math.ceil(w), height: Math.ceil(h), cellSize: 45, padding: 8, backgroundColor: CARD_COLOR,
+  });
+  const inner = weave.replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "");
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${w} ${h}">${inner}</svg>`
+    + `<rect width="${width}" height="${height}" fill="${CARD_COLOR}" opacity="0.5"/>`;
+}
+
+// Names the composer measures exactly by itself: Satoshi's Latin letters and
+// digits, and CJK (drawn 1 em wide). Any other name's label is measured with
+// the rasterizer, with the fonts the PNG is drawn in.
+const BUILT_IN_MEASURE_RE = /^[\p{Script=Latin}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}0-9._$-]*$/u;
+
+// The v1 card's background colour, by character set.
+function v1Background(characterSet: string): string {
+  return characterSet === "emoji" ? "#FF6B6B" : characterSet === "mixed" ? "#4ECDC4" : "#1F2937";
+}
 
 // Raster formats resvg decodes (this build has no WebP decoder), and the
 // largest raster avatar the Worker rasterizes. resvg allocates the whole
@@ -63,8 +106,8 @@ function escapeXmlText(s: string): string {
 
 export interface ImageGenerationOptions {
   name: string;
+  // Picks the card (ENS v2 names get the ENS v2 card), its cache key and TTL.
   migrationStatus?: MigrationStatus;
-  characterSet?: string;
   size?: {
     width: number;
     height: number;
@@ -79,6 +122,10 @@ export interface ImageGenerationOptions {
 export interface GeneratedImage {
   svg: string;
   contentType: string;
+  // True when the name's label was meant to be measured with the rasterizer but
+  // it failed, so the card fell back to the built-in measurement and its label
+  // may not fit the name. Such a card must not be cached for long.
+  measureFailed: boolean;
   size: {
     width: number;
     height: number;
@@ -88,9 +135,12 @@ export interface GeneratedImage {
 export class ImageGenerationService {
   private readonly defaultSize = { width: 518, height: 518 };
   private avatarService?: AvatarService;
+  // The isolate's rasterizer (getRasterizer in rasterize.ts), for measuring names.
+  private rasterizer?: (bucket: R2Bucket) => Promise<Rasterizer>;
 
-  constructor(avatarService?: AvatarService) {
+  constructor(avatarService?: AvatarService, rasterizer?: (bucket: R2Bucket) => Promise<Rasterizer>) {
     this.avatarService = avatarService;
+    this.rasterizer = rasterizer;
   }
 
   // Generate SVG image for ENS domain
@@ -98,11 +148,7 @@ export class ImageGenerationService {
     options: ImageGenerationOptions,
     bucket?: R2Bucket,
   ): Promise<GeneratedImage> {
-    const {
-      name,
-      migrationStatus = "unmigrated",
-      size = this.defaultSize,
-    } = options;
+    const { name, migrationStatus = "unmigrated", size = this.defaultSize } = options;
 
     let { avatarBase64, avatarMimeType } = options;
 
@@ -119,12 +165,6 @@ export class ImageGenerationService {
       }
     }
 
-    // Analyze domain characteristics
-    const characterSet = getCharacterSet(name);
-
-    // Choose colors based on migration status and characteristics
-    const colors = this.getColorScheme(migrationStatus, characterSet);
-
     try {
       // The avatar becomes `<image href="data:{type};base64,{payload}">`, and the
       // layout composer does not escape that attribute. Embed it only when the
@@ -140,52 +180,21 @@ export class ImageGenerationService {
         : null;
 
       // Load Satoshi font from R2 (memoized per isolate)
-      let satoshiFontBase64: string | undefined;
+      let satoshi: { buffer: ArrayBuffer; base64: string } | undefined;
       if (bucket) {
-        const satoshi = await getSatoshiFont(bucket);
+        satoshi = await getSatoshiFont(bucket);
         await initializeFont(satoshi.buffer);
-        satoshiFontBase64 = satoshi.base64;
       }
 
-      const result = await createDynamicSVGImage({
-        text: escapeXmlText(displayName(name)),
-        width: size.width,
-        height: size.height,
-        autoFontSize: true,
-        maxFontSize: Math.round(32 * size.width / 270),
-        fontFamily: 'Satoshi',
-        fontBase64: satoshiFontBase64,
-        textColor: colors.text,
-        backgroundColor: embedAvatar ? 'transparent' : colors.background,
-        backgroundImageUrl,
-        customElements: [
-          this.generateStatusBadge(migrationStatus, colors, size.width, characterSet !== "letter" && characterSet !== "digit" && characterSet !== "alphanumeric"),
-          this.generateCharacterSetIndicator(characterSet, colors, size.width),
-        ].filter(Boolean),
-        fitMode: 'natural',
-      });
-
-      // The result might be a string, Buffer, typed array, or an object with svg property
-      let svg: string;
-      if (typeof result === 'string') {
-        svg = result;
-      } else if (Buffer.isBuffer(result)) {
-        svg = result.toString('utf-8');
-      } else if (result && typeof result === 'object' && 'length' in result && typeof result[0] === 'number') {
-        // It's an array-like object with numeric values (Uint8Array or similar)
-        // Convert to Buffer first, then to string
-        const buffer = Buffer.from(result as any);
-        svg = buffer.toString('utf-8');
-      } else if (result && typeof result === 'object' && 'svg' in result) {
-        svg = String((result as any).svg);
-      } else {
-        svg = String(result);
-      }
+      const { svg, measureFailed } = isOnV2(migrationStatus)
+        ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket)
+        : { svg: await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64), measureFailed: false };
 
       return {
-        svg: typeof svg === 'string' ? svg : String(svg),
+        svg: new TextDecoder().decode(svg),
         contentType: "image/svg+xml",
         size,
+        measureFailed,
       };
     } catch (error) {
       throw new Error(`Failed to generate image for ${name}: ${error}`);
@@ -208,7 +217,6 @@ export class ImageGenerationService {
   // - a WebP avatar: resvg cannot decode it and would leave a transparent hole.
   // `name` and `migrationStatus` must be the ones the card was generated with.
   forRasterization(svg: string, name: string, migrationStatus: MigrationStatus = "unmigrated"): string {
-    const { background } = this.getColorScheme(migrationStatus, getCharacterSet(name));
     let kept = 0;
     const out = svg.replace(
       AVATAR_ELEMENT_RE,
@@ -220,7 +228,9 @@ export class ImageGenerationService {
           kept++;
           return element;
         }
-        return `<rect width="${width}" height="${height}" fill="${background}"/>`;
+        return isOnV2(migrationStatus)
+          ? weaveBackground(name, Number(width), Number(height))
+          : `<rect width="${width}" height="${height}" fill="${v1Background(getCharacterSet(name))}"/>`;
       },
     );
     // Every data: URI left must be an avatar vetted above; one in any other
@@ -231,106 +241,67 @@ export class ImageGenerationService {
     return out;
   }
 
-  // Get color scheme based on domain characteristics
-  private getColorScheme(
-    migrationStatus: MigrationStatus,
-    characterSet: string,
-  ) {
-    const schemes = {
-      migrated: {
-        background: "#4F46E5", // Indigo
-        text: "#FFFFFF",
-        accent: "#818CF8",
-        badge: "#10B981", // Green
-      },
-      native: {
-        background: "#7C3AED", // Purple — born on v2
-        text: "#FFFFFF",
-        accent: "#A78BFA",
-        badge: "#8B5CF6",
-      },
-      unmigrated: {
-        background: "#1F2937", // Gray
-        text: "#F9FAFB",
-        accent: "#6B7280",
-        badge: "#F59E0B", // Amber
-      },
+  // The ENS v2 card. A name the composer can't measure exactly by itself is
+  // measured with the rasterizer, so its label fits the name in the PNG. If
+  // the rasterizer can't start, the card uses the built-in measurement and is
+  // reported as measureFailed.
+  private async v2Card(
+    name: string,
+    size: { width: number; height: number },
+    backgroundImageUrl: string | null,
+    satoshi: { buffer: ArrayBuffer; base64: string } | undefined,
+    bucket: R2Bucket | undefined,
+  ): Promise<{ svg: Uint8Array; measureFailed: boolean }> {
+    const display = displayName(name);
+    const options = {
+      layout: 'ens-v2' as const,
+      text: escapeXmlText(display),
+      width: size.width,
+      height: size.height,
+      fontFamily: 'Satoshi',
+      fontBase64: satoshi?.base64,
+      backgroundImageUrl,
+      backgroundMarkup: backgroundImageUrl ? null : weaveBackground(name, size.width, size.height),
     };
-
-    let baseScheme = schemes[migrationStatus] || schemes.unmigrated;
-
-    // Modify colors based on character set
-    if (characterSet === "emoji") {
-      baseScheme = {
-        ...baseScheme,
-        background: "#FF6B6B", // Warm red for emoji domains
-        accent: "#FFE66D",
-      };
-    } else if (characterSet === "mixed") {
-      baseScheme = {
-        ...baseScheme,
-        background: "#4ECDC4", // Teal for mixed character domains
-        accent: "#95E1D3",
-      };
+    if (!satoshi || !bucket || !this.rasterizer || BUILT_IN_MEASURE_RE.test(display)) {
+      return { svg: await createDynamicSVGImage(options), measureFailed: false };
     }
-
-    return baseScheme;
+    try {
+      const rasterizer = await this.rasterizer(bucket);
+      const svg = await createDynamicSVGImage({
+        ...options,
+        // The same buffer every time: the rasterizer parses each primary font once.
+        measureText: (t, fontSize, o) => rasterizer.measureText(t, fontSize, { ...o, primaryFont: satoshi.buffer }),
+      });
+      return { svg, measureFailed: false };
+    } catch (error) {
+      console.warn(`[image] measuring ${name} with the rasterizer failed, using the built-in measurement:`, error);
+      return { svg: await createDynamicSVGImage(options), measureFailed: true };
+    }
   }
 
-  // Generate background element
-  // Generate migration status badge
-  private generateStatusBadge(status: MigrationStatus, colors: Record<string, string>, width: number = 518, hasCharIndicator: boolean = false) {
-    // No badge for legacy (v1) names. While mainnet v2 is undeployed every
-    // mainnet name resolves to 'unmigrated', so this also keeps the badge off
-    // there; 'migrated'/'native' get a badge.
-    if (status === MIGRATION_STATUS.UNMIGRATED) return '';
-
-    const badgeText = status.toUpperCase();
-    const badgeWidth = Math.max(60, badgeText.length * 8 + 20);
-    const rightOffset = hasCharIndicator ? 50 : 10;
-    const x = width - badgeWidth - rightOffset;
-    const y = 13; // vertically centered with 30px character indicator circle
-
-    return `
-      <g transform="translate(${x}, ${y})">
-        <rect width="${badgeWidth}" height="24" rx="12" fill="${colors.badge}" opacity="0.9" />
-        <text x="${badgeWidth / 2}" y="16"
-              text-anchor="middle"
-              font-family="Arial, sans-serif"
-              font-size="10"
-              font-weight="bold"
-              fill="white">
-          ${badgeText}
-        </text>
-      </g>
-    `;
-  }
-
-  // Generate character set indicator
-  private generateCharacterSetIndicator(characterSet: string, colors: Record<string, string>, width: number = 518) {
-    // No indicator for standard letter/digit/alphanumeric names
-    if (characterSet === "letter" || characterSet === "digit" || characterSet === "alphanumeric") return "";
-
-    const indicators: Record<string, string> = {
-      emoji: "🌍",
-      mixed: "※",
-    };
-
-    const indicator = indicators[characterSet] || "◆";
-    const x = width - 40;
-
-    return `
-      <g transform="translate(${x}, 10)">
-        <circle cx="15" cy="15" r="15" fill="${colors.accent}" opacity="0.8" />
-        <text x="15" y="20"
-              text-anchor="middle"
-              font-family="Arial, sans-serif"
-              font-size="16"
-              fill="${colors.text}">
-          ${indicator}
-        </text>
-      </g>
-    `;
+  // The v1 card (names not on ENS v2): the name over the avatar or a colour by
+  // character set, as before, without the character-set indicator.
+  private v1Card(
+    name: string,
+    text: string,
+    size: { width: number; height: number },
+    backgroundImageUrl: string | null,
+    fontBase64: string | undefined,
+  ): Promise<Uint8Array> {
+    return createDynamicSVGImage({
+      text,
+      width: size.width,
+      height: size.height,
+      autoFontSize: true,
+      maxFontSize: Math.round(32 * size.width / 270),
+      fontFamily: 'Satoshi',
+      fontBase64,
+      textColor: '#F9FAFB',
+      backgroundColor: backgroundImageUrl ? 'transparent' : v1Background(getCharacterSet(name)),
+      backgroundImageUrl,
+      fitMode: 'natural',
+    });
   }
 
   // Generate image URL for metadata
