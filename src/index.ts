@@ -344,7 +344,9 @@ app.use(
   "*",
   cors({
     origin: "*",
-    allowMethods: ["GET", "POST", "PUT", "DELETE"],
+    // Only the methods the route table implements (every route is GET or POST);
+    // no credentials, so the API stays publicly readable and nothing more.
+    allowMethods: ["GET", "POST"],
     allowHeaders: ["Content-Type", "Authorization"],
   }),
 );
