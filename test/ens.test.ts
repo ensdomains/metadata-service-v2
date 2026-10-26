@@ -18,6 +18,7 @@ import {
   getSegmentLength,
   isResolvableEnsName,
   MAX_ENS_NAME_LENGTH,
+  nameByteLength,
 } from '../src/utils/ens';
 
 describe('ENS Utilities', () => {
@@ -167,11 +168,21 @@ describe('ENS Utilities', () => {
     });
 
     it('isResolvableEnsName applies the length cap to the canonical form', () => {
-      // 'ⅷ' (1 code unit) canonicalizes to 'viii' (4): within the cap as given, over it once mapped.
-      const lengthening = `${'ⅷ'.repeat(63)}.${'ⅷ'.repeat(63)}.eth`;
-      expect(lengthening.length).toBeLessThanOrEqual(MAX_ENS_NAME_LENGTH);
-      expect(canonicalizeName(lengthening).length).toBeGreaterThan(MAX_ENS_NAME_LENGTH);
+      // 'ⅷ' (3 bytes) canonicalizes to 'viii' (4): within the cap as given, over it once mapped.
+      const lengthening = `${'ⅷ'.repeat(80)}.eth`;
+      expect(nameByteLength(lengthening)).toBeLessThanOrEqual(MAX_ENS_NAME_LENGTH);
+      expect(nameByteLength(canonicalizeName(lengthening))).toBeGreaterThan(MAX_ENS_NAME_LENGTH);
       expect(isResolvableEnsName(lengthening)).toBe(false);
+    });
+
+    it('caps names in UTF-8 bytes, so every name it accepts keys KV within 512 bytes (W8-CACHE-001)', () => {
+      // 84 three-byte characters + '.eth' is 256 bytes but only 88 characters.
+      expect(validateEnsName(`${'名'.repeat(83)}.eth`)).toBe(true);
+      expect(validateEnsName(`${'名'.repeat(84)}.eth`)).toBe(false);
+      // ENSIP-15 expands each 'क़' (3 bytes) to 'क' + nukta (6): the 518-byte hierarchy key from the audit.
+      expect(isResolvableEnsName(`${'\u0958'.repeat(80)}.eth`)).toBe(false);
+      expect(isResolvableEnsName(`${'\u0958'.repeat(41)}.eth`)).toBe(true);
+      expect(isResolvableEnsName(`${'\u0958'.repeat(42)}.eth`)).toBe(false);
     });
 
     it('dnsEncodeName produces DNS wire format (UniversalResolver findResolver input)', () => {

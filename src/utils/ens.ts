@@ -177,10 +177,20 @@ export function isEmptyHash(hash: string): boolean {
   return !hash || hash === EMPTY_HASH;
 }
 
-// Max accepted ENS name length. Caps cache-key size (KV keys are limited to 512
-// bytes; `meta:`/`svg:` prefixes + network/status leave room for ~255) and blocks
-// cache-flooding via arbitrarily long names.
+// Max accepted ENS name length, in UTF-8 bytes (nameByteLength), not characters:
+// a name keys the KV caches, whose keys are limited to 512 bytes, and the
+// longest prefix + suffix (the card cache's) takes ~120 of them. Counting
+// characters let a valid name of 159 CJK or 80 'क़' (which ENSIP-15 expands)
+// characters build a key KV rejects (W8-CACHE-001). Also blocks cache-flooding
+// via arbitrarily long names.
 export const MAX_ENS_NAME_LENGTH = 255;
+
+const utf8Encoder = new TextEncoder();
+
+// A name's length as MAX_ENS_NAME_LENGTH counts it: UTF-8 bytes.
+export function nameByteLength(name: string): number {
+  return utf8Encoder.encode(name).length;
+}
 
 // Max accepted number of labels in a name. Real names are a few levels deep, so
 // 32 is far above any legitimate use. Caps the per-label work of the name-taking
@@ -226,7 +236,7 @@ export function validateEnsName(name: string): boolean {
     return false;
   }
 
-  if (name.length > MAX_ENS_NAME_LENGTH) {
+  if (nameByteLength(name) > MAX_ENS_NAME_LENGTH) {
     return false;
   }
 
