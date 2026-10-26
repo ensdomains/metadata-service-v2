@@ -8,7 +8,7 @@ import { brotliDecompressSync } from 'node:zlib';
 // overflowed its label and Arabic, Hangul and emoji labels had empty space.
 // Those names are measured with the rasterizer, which draws the PNG.
 
-import { ImageGenerationService } from '../src/services/image';
+import { ImageGenerationService, weaveBackground } from '../src/services/image';
 import { ImageCacheService } from '../src/services/image-cache';
 import type { Rasterizer } from '../src/services/rasterize';
 import type { AvatarService } from '../src/services/avatar';
@@ -48,8 +48,10 @@ beforeEach(() => {
 });
 
 const svc = new ImageGenerationService(undefined, getRasterizer);
+const generate = (name: string, migrationStatus: 'migrated' | 'unmigrated' = 'migrated') =>
+  svc.generateDomainImage({ name, migrationStatus }, bucket);
 const card = async (name: string, migrationStatus: 'migrated' | 'unmigrated' = 'migrated') =>
-  (await svc.generateDomainImage({ name, migrationStatus }, bucket)).svg;
+  (await generate(name, migrationStatus)).svg;
 const label = (svg: string) => ({
   width: Number(/<rect x="74" y="420" width="([\d.]+)"/.exec(svg)![1]),
   fontSize: Number(/font-size="([\d.]+)px"/.exec(svg)![1]),
@@ -57,7 +59,9 @@ const label = (svg: string) => ({
 
 describe('ENS v2 card label', () => {
   it.each(['مرحبا.eth', 'नमस्ते.eth', '🦊🧙🏻‍♂.eth'])('fits %s exactly as the rasterizer draws it', async (name) => {
-    const { width, fontSize } = label(await card(name));
+    const image = await generate(name);
+    expect(image.measureFailed).toBe(false);
+    const { width, fontSize } = label(image.svg);
     expect(width - 34).toBeCloseTo(await measure(name.replace('🧙🏻‍♂', '🧙🏻‍♂️'), fontSize), 2);
     expect(state.calls).toBe(1);
   }, 60_000);
@@ -65,6 +69,10 @@ describe('ENS v2 card label', () => {
   it.each(['tanrikulu.eth', '_ens-dao1.eth', '日本語.eth'])('measures %s without starting the rasterizer', async (name) => {
     await card(name);
     expect(state.calls).toBe(0);
+  });
+
+  it("hashes the canonical name for the weave, so every spelling gets the name's weave", () => {
+    expect(weaveBackground('Nick.ETH', 518, 518)).toBe(weaveBackground('nick.eth', 518, 518));
   });
 
   it('keeps the v1 card off the rasterizer', async () => {
@@ -83,7 +91,10 @@ describe('ENS v2 card label', () => {
   it('falls back to the built-in measurement when the rasterizer cannot start', async () => {
     state.fail = true;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { width } = label(await card('مرحبا.eth'));
+    const image = await generate('مرحبا.eth');
+    // Reported, so the card cache keeps it out of KV/R2.
+    expect(image.measureFailed).toBe(true);
+    const { width } = label(image.svg);
     expect(width).toBeGreaterThan(34);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('built-in measurement'), expect.any(Error));
     warn.mockRestore();
