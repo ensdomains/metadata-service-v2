@@ -88,7 +88,7 @@ export const createMockEnv = () => ({
   DB: createMockD1(),
 
   // Environment Variables
-  ENSNODE_MAINNET_URL: "https://api.ensnode.test/graphql",
+  ENSNODE_MAINNET_V1_URL: "https://api.ensnode.test/graphql",
   ENSNODE_SEPOLIA_V2_URL: "https://api.sepolia.ensnode.test/graphql",
   MAINNET_RPC_URL: "https://mainnet.test.rpc",
   SEPOLIA_RPC_URL: "https://sepolia.test.rpc",

@@ -276,7 +276,7 @@ const env = {
     list: async () => ({ objects: [], truncated: false }),
   },
   DB: undefined,
-  ENSNODE_MAINNET_URL: 'https://ensnode-v1.test/subgraph',
+  ENSNODE_MAINNET_V1_URL: 'https://ensnode-v1.test/subgraph',
   ENSNODE_SEPOLIA_V2_URL: 'https://zigens.test/graphql',
   ENSNODE_SEPOLIA_V1_URL: 'https://ensnode-sepolia-v1.test/subgraph',
   MAINNET_RPC_URL: 'https://rpc-mainnet.test',

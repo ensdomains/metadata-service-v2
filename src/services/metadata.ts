@@ -109,8 +109,9 @@ export class MetadataService {
    * Whether the primary indexer speaks the v2 (zigens) dialect — i.e. whether
    * this network HAS an ENS v2 deployment with a v2 indexer. This is the
    * discriminator for v2 classification paths (NOT a hardcoded network name):
-   * when mainnet v2 ships, flipping `indexerV2ApiVersion` to 'v2' in
-   * config/networks.ts lights up the v2 paths here with no code change.
+   * when the mainnet v2 indexer ships, setting ENSNODE_MAINNET_V2_URL flips
+   * mainnet to 'v2' via resolveIndexerConfig (config/networks.ts) and lights up
+   * the v2 paths here with no code change.
    */
   private isV2Indexer: boolean;
   public indexerV2: IndexerService;

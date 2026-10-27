@@ -270,7 +270,7 @@ public RPC for that chain, and a missing indexer URL makes every indexer query f
 the on-chain tier):
 - `MAINNET_RPC_URL`: Primary Ethereum mainnet RPC endpoint (production: `wrangler secret put`)
 - `SEPOLIA_RPC_URL`: Primary Sepolia testnet RPC endpoint (production: `wrangler secret put`)
-- `ENSNODE_MAINNET_URL`: ENSNode subgraph endpoint for mainnet (v1 queries)
+- `ENSNODE_MAINNET_V1_URL`: ENSNode subgraph endpoint for mainnet (v1 queries)
 - `ENSNODE_SEPOLIA_V2_URL`: zigens ENS v2 indexer endpoint for sepolia (primary)
 
 **Optional:**

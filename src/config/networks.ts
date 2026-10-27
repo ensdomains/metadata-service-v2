@@ -12,8 +12,11 @@ import { mainnet, sepolia } from 'viem/chains';
 
 // Env-binding key names, kept as literal unions so `env[key]` stays type-safe.
 type RpcUrlEnvKey = 'MAINNET_RPC_URL' | 'SEPOLIA_RPC_URL';
-type IndexerV2UrlEnvKey = 'ENSNODE_MAINNET_URL' | 'ENSNODE_SEPOLIA_V2_URL';
-type IndexerV1UrlEnvKey = 'ENSNODE_SEPOLIA_V1_URL';
+type IndexerUrlEnvKey =
+  | 'ENSNODE_MAINNET_V1_URL'
+  | 'ENSNODE_MAINNET_V2_URL'
+  | 'ENSNODE_SEPOLIA_V2_URL'
+  | 'ENSNODE_SEPOLIA_V1_URL';
 type FallbackRpcEnvKey =
   | 'MAINNET_FALLBACK_RPC_1'
   | 'MAINNET_FALLBACK_RPC_2'
@@ -53,13 +56,23 @@ export interface NetworkDefinition {
   /** Primary indexer query dialect: mainnet → ENSNode subgraph (v1); sepolia → zigens (v2). */
   indexerV2ApiVersion: 'v1' | 'v2';
   rpcUrlEnvKey: RpcUrlEnvKey;
-  indexerV2UrlEnvKey: IndexerV2UrlEnvKey;
+  indexerV2UrlEnvKey: IndexerUrlEnvKey;
   /**
    * Optional secondary v1 indexer (ENSNode subgraph) for networks whose primary
    * indexer is v2-only (zigens has no v1 data). Resolution order is v2 → v1 →
    * on-chain, so v1-only names on a v2 network still resolve via the indexer.
    */
-  indexerV1UrlEnvKey?: IndexerV1UrlEnvKey;
+  indexerV1UrlEnvKey?: IndexerUrlEnvKey;
+  /**
+   * Launch-day upgrade switch for networks whose static config is still v1.
+   * When the env var named here is SET (non-blank), resolveIndexerConfig flips
+   * this network to the two-tier v2 shape at runtime: that URL becomes the
+   * primary indexer in the v2 (zigens) dialect, and the pre-upgrade primary
+   * (`indexerV2UrlEnvKey`, a v1 subgraph) demotes to the v1 secondary tier —
+   * mirroring sepolia. Unset ⇒ behavior is byte-identical to the static config,
+   * so the var can ship ahead of the indexer going live.
+   */
+  v2IndexerUpgradeEnvKey?: IndexerUrlEnvKey;
   fallbackRpcEnvKeys: readonly FallbackRpcEnvKey[];
   /** Used only when no fallback env vars are set. */
   defaultFallbackRpcs: readonly string[];
@@ -72,8 +85,13 @@ export const NETWORKS = {
     chain: mainnet,
     indexerV2ApiVersion: 'v1',
     rpcUrlEnvKey: 'MAINNET_RPC_URL',
-    indexerV2UrlEnvKey: 'ENSNODE_MAINNET_URL',
+    indexerV2UrlEnvKey: 'ENSNODE_MAINNET_V1_URL',
     indexerV1UrlEnvKey: undefined, // mainnet's primary indexer is already v1 (no v2 deployed)
+    // Mainnet v2 indexer launch = set ENSNODE_MAINNET_V2_URL (wrangler.toml [vars]):
+    // it becomes the v2-dialect primary and ENSNODE_MAINNET_V1_URL demotes to the v1
+    // secondary. On-chain v2 (native-tokenId route, corroboration) additionally
+    // needs the placeholder addresses in `v2` below replaced at contract launch.
+    v2IndexerUpgradeEnvKey: 'ENSNODE_MAINNET_V2_URL',
     fallbackRpcEnvKeys: ['MAINNET_FALLBACK_RPC_1', 'MAINNET_FALLBACK_RPC_2', 'MAINNET_FALLBACK_RPC_3'],
     defaultFallbackRpcs: ['https://ethereum.publicnode.com', 'https://rpc.ankr.com/eth', 'https://cloudflare-eth.com'],
     // ENS v1 — aligned to zigens src/contracts.zig mainnetAddresses.
@@ -149,4 +167,41 @@ export const SUPPORTED_NETWORKS = Object.keys(NETWORKS) as NetworkName[];
 /** Runtime guard / narrowing for untrusted input (path params, request bodies). */
 export function isNetworkName(value: unknown): value is NetworkName {
   return typeof value === 'string' && value in NETWORKS;
+}
+
+/** The env slice resolveIndexerConfig reads (the worker Env satisfies it structurally). */
+export type IndexerEnv = { [K in IndexerUrlEnvKey]?: string };
+
+export interface ResolvedIndexerConfig {
+  indexerV2Endpoint: string;
+  indexerV2ApiVersion: 'v1' | 'v2';
+  indexerV1Endpoint?: string;
+}
+
+/**
+ * Resolve a network's indexer wiring from the static definition + live env.
+ * Single source for BOTH service construction and the webhook's v2-event
+ * network targeting, so they can't drift. Normally a straight read of the
+ * definition; the exception is the launch-day upgrade (`v2IndexerUpgradeEnvKey`
+ * set and non-blank), which flips the network to v2-primary + v1-secondary —
+ * see the field's doc comment.
+ */
+export function resolveIndexerConfig(network: NetworkName, env: IndexerEnv): ResolvedIndexerConfig {
+  const def: NetworkDefinition = NETWORKS[network];
+  const upgradeUrl = def.v2IndexerUpgradeEnvKey ? env[def.v2IndexerUpgradeEnvKey]?.trim() : undefined;
+  if (upgradeUrl) {
+    return {
+      indexerV2Endpoint: upgradeUrl,
+      indexerV2ApiVersion: 'v2',
+      // The pre-upgrade primary (v1 subgraph) becomes the v1 secondary, unless
+      // the network already declared a dedicated one.
+      indexerV1Endpoint: def.indexerV1UrlEnvKey ? env[def.indexerV1UrlEnvKey] : env[def.indexerV2UrlEnvKey],
+    };
+  }
+  return {
+    // Required binding — typed optional only through the IndexerEnv slice.
+    indexerV2Endpoint: env[def.indexerV2UrlEnvKey] as string,
+    indexerV2ApiVersion: def.indexerV2ApiVersion,
+    indexerV1Endpoint: def.indexerV1UrlEnvKey ? env[def.indexerV1UrlEnvKey] : undefined,
+  };
 }
