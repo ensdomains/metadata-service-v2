@@ -93,7 +93,13 @@ simple = { limit = 60, period = 60 }
 
 # Environment variables
 [vars]
-ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_MAINNET_V1_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+# Mainnet v2 (zigens-dialect) indexer — leave UNSET until it launches. Setting it
+# flips mainnet to the two-tier v2 shape (this URL becomes the primary indexer,
+# ENSNODE_MAINNET_V1_URL demotes to the v1 secondary — see resolveIndexerConfig).
+# The native-tokenId route + on-chain corroboration additionally need real
+# NETWORKS.mainnet.v2 addresses in src/config/networks.ts at contract launch.
+ENSNODE_MAINNET_V2_URL = "https://mainnet-graphql.ens.dev/subgraph"
 ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
 ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
@@ -130,7 +136,8 @@ crons = ["17 4 * * *"]
 # ---------------------------------------------------------------------------
 
 [env.stage.vars]
-ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_MAINNET_V1_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_MAINNET_V2_URL = "https://mainnet-graphql.ens.dev/subgraph"
 ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
 ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"
@@ -202,7 +209,8 @@ crons = ["17 4 * * *"]
 # PR Previews of the stage Worker. Not inherited from stage either: same vars,
 # bound to stage's resources (cache data only, so sharing them is safe).
 [env.stage.previews.vars]
-ENSNODE_MAINNET_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_MAINNET_V1_URL = "https://ensnode-api-production.up.railway.app/subgraph"
+ENSNODE_MAINNET_V2_URL = "https://mainnet-graphql.ens.dev/subgraph"
 ENSNODE_SEPOLIA_V2_URL = "https://staging-graphql.ens.dev"
 ENSNODE_SEPOLIA_V1_URL = "https://v1-graphql.ens.dev/subgraph"
 MAINNET_FALLBACK_RPC_1 = "https://rpc.ankr.com/eth"

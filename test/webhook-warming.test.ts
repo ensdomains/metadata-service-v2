@@ -155,7 +155,7 @@ function makeEnv(overrides: Record<string, unknown> = {}) {
     SVG_CACHE: createMockKV(),
     ASSET_BUCKET: createMockR2(),
     DB: undefined,
-    ENSNODE_MAINNET_URL: 'https://api.ensnode.test/graphql',
+    ENSNODE_MAINNET_V1_URL: 'https://api.ensnode.test/graphql',
     ENSNODE_SEPOLIA_V2_URL: 'https://zigens.test/graphql',
     ENSNODE_SEPOLIA_V1_URL: 'https://v1subgraph.test/graphql',
     MAINNET_RPC_URL: 'https://mainnet.test.rpc',

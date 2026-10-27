@@ -39,6 +39,7 @@ import type {
   MetadataResponse,
 } from "./types/api";
 import { type MigrationStatus, type NetworkName, isNetworkName, isMigrationStatus, NETWORKS, SUPPORTED_NETWORKS } from "./types";
+import { resolveIndexerConfig } from "./config/networks";
 import { NotFoundError, UpstreamError, InvalidNameError, InvalidTokenIdError } from "./services/errors";
 import type { ImageGenerationOptions } from "./services/image";
 
@@ -62,7 +63,11 @@ export interface Env {
   RATE_LIMITER_IMAGE?: RateLimit;
 
   // Environment Variables
-  ENSNODE_MAINNET_URL: string;
+  ENSNODE_MAINNET_V1_URL: string;
+  /** Mainnet v2 (zigens-dialect) indexer. SET ⇒ mainnet flips to the two-tier
+   *  v2 shape: this URL becomes the primary and ENSNODE_MAINNET_V1_URL demotes to
+   *  the v1 secondary (see resolveIndexerConfig in config/networks.ts). */
+  ENSNODE_MAINNET_V2_URL?: string;
   ENSNODE_SEPOLIA_V2_URL: string;
   ENSNODE_SEPOLIA_V1_URL?: string;
   MAINNET_RPC_URL: string;
@@ -218,10 +223,6 @@ function getRpcUrl(env: Env, network: NetworkName): string {
   return env[NETWORKS[network].rpcUrlEnvKey];
 }
 
-function getIndexerV2Url(env: Env, network: NetworkName): string {
-  return env[NETWORKS[network].indexerV2UrlEnvKey];
-}
-
 // Optional duration override in seconds → ms. Unset/invalid → undefined, so the
 // service's default applies.
 // A duration env var in whole seconds, or undefined (the caller's default) when
@@ -274,12 +275,9 @@ function getServices(env: Env, network: NetworkName): FullServices {
 
   const metadataService = new MetadataService(
     {
-      indexerV2Endpoint: getIndexerV2Url(env, network),
-      indexerV2ApiVersion: NETWORKS[network].indexerV2ApiVersion,
-      // Optional v1 ENSNode subgraph fallback (sepolia: v1 names absent from zigens).
-      indexerV1Endpoint: NETWORKS[network].indexerV1UrlEnvKey
-        ? env[NETWORKS[network].indexerV1UrlEnvKey!]
-        : undefined,
+      // Env-aware wiring: static config, except the launch-day mainnet upgrade —
+      // ENSNODE_MAINNET_V2_URL set ⇒ v2-dialect primary + subgraph as v1 secondary.
+      ...resolveIndexerConfig(network, env),
       network,
       fallbackToBlockchain: true,
       internalCacheEnabled: true,
@@ -1238,7 +1236,7 @@ const handleWebhook = async (c: AppContext) => {
           // network; the per-network existence gate below cheaply skips chains
           // where the name doesn't resolve, so wrong-chain warming is a no-op.
           const targetNetworks = payload.protocol === 'v2'
-            ? SUPPORTED_NETWORKS.filter((n) => NETWORKS[n].indexerV2ApiVersion === 'v2')
+            ? SUPPORTED_NETWORKS.filter((n) => resolveIndexerConfig(n, c.env).indexerV2ApiVersion === 'v2')
             : SUPPORTED_NETWORKS;
 
           // Purge L0 edge cache for every URL shape that could hold this name:
