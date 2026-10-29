@@ -39,6 +39,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check the tag format
+        id: tag
         run: |
           if ! [[ "$TAG" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]]; then
             echo "::error::Tag '$TAG' is not YYYY-MM-DD or YYYY-MM-DD.COUNT (COUNT >= 2)."
@@ -46,6 +47,7 @@ jobs:
           fi
 
       - name: Check the tagged commit is on main
+        id: branch
         run: |
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -54,14 +56,17 @@ jobs:
           fi
 
       - uses: ./.github/actions/setup
+        id: setup
 
       - name: Lint, typecheck and test
+        id: checks
         run: pnpm lint && pnpm typecheck && pnpm vitest run
 
       # The changes since the previous release tag: the full list for the
       # GitHub release, and the same list cut to 1000 bytes (Cloudflare's limit)
       # for the Worker version message.
       - name: Write the release notes
+        id: notes
         run: |
           node scripts/release-notes.mjs "$TAG" "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
@@ -69,12 +74,14 @@ jobs:
       # Migrations are additive, so the version still serving traffic keeps
       # working against the new schema until the deploy below lands.
       - name: Apply D1 migrations
+        id: migrate
         run: pnpm db:migrate:remote
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy
+        id: deploy
         run: pnpm run deploy --tag "$TAG" --message "$(cat "$RUNNER_TEMP/release-message.txt")"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -83,6 +90,7 @@ jobs:
       # Only after a successful deploy, so a release on GitHub means it is live.
       # A re-run of the workflow updates the existing release instead.
       - name: Create the GitHub release
+        id: release
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
@@ -91,3 +99,13 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+      # Posts the outcome to Slack, failures included; a rerun posts again.
+      # A failed post must not mark a finished release as failed.
+      - name: Post to Slack
+        if: always()
+        continue-on-error: true
+        env:
+          STEPS: ${{ toJSON(steps) }}
+          SLACK_WEBHOOK_URL: ${{ secrets.RELEASES_SLACK_WEBHOOK }}
+        run: node scripts/release-slack.mjs "$RUNNER_TEMP"
