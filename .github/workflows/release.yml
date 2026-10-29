@@ -105,6 +105,7 @@ jobs:
       - name: Post to Slack
         if: always()
         continue-on-error: true
+        timeout-minutes: 1
         env:
           STEPS: ${{ toJSON(steps) }}
           SLACK_WEBHOOK_URL: ${{ secrets.RELEASES_SLACK_WEBHOOK }}
