@@ -101,9 +101,7 @@ function invalidNameGradient(width: number, height: number): string {
     + `<stop stop-color="#EB9E9E"/><stop offset="1" stop-color="#992222"/></linearGradient></defs>`;
 }
 
-// v1's card background for a name without an avatar (ens-metadata-service
-// src/svg-template.ts): its blue-purple gradient, in v1's 270-unit space scaled
-// to the card (the composer's own copy of it is not scaled).
+// v1's gradient (ens-metadata-service src/svg-template.ts), scaled to the card.
 function ensGradient(width: number, height: number): string {
   return `<defs><linearGradient id="ensGradient" x1="190.5" y1="302" x2="-64" y2="-172.5" gradientUnits="userSpaceOnUse" gradientTransform="scale(${width / 270} ${height / 270})">`
     + `<stop stop-color="#44BCF0"/><stop offset="0.428185" stop-color="#628BF3"/><stop offset="1" stop-color="#A099FF"/></linearGradient></defs>`;
@@ -364,8 +362,7 @@ export class ImageGenerationService {
   }
 
   // The v1 card (names not on ENS v2): the name over the avatar or v1's
-  // gradient, without the character-set indicator. Every v1 card defines the
-  // gradient, so forRasterization can draw it in place of an avatar.
+  // gradient, without the character-set indicator.
   private v1Card(
     text: string,
     size: { width: number; height: number },
