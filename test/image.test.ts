@@ -134,11 +134,11 @@ describe('ImageGenerationService', () => {
       return mockCreateSVG.mock.calls[0][0];
     }
 
-    it('keeps the v1 card, with no badge or indicator, for a name not on ENS v2', async () => {
+    it("keeps the v1 card, on v1's gradient with no badge or indicator, for a name not on ENS v2", async () => {
       const opts = await composerOptions('unmigrated');
       expect(opts).not.toHaveProperty('layout');
-      expect(opts).not.toHaveProperty('customElements');
-      expect(opts).toMatchObject({ text: 'test.eth', textColor: '#F9FAFB', backgroundColor: '#1F2937' });
+      expect(opts?.customElements).toEqual([expect.stringMatching(/^<defs><linearGradient id="ensGradient" .*<\/defs>$/)]);
+      expect(opts).toMatchObject({ text: 'test.eth', textColor: '#F9FAFB', backgroundColor: 'url(#ensGradient)' });
     });
 
     it.each(['migrated', 'native'] as const)('draws the ENS v2 card, with no badge or indicator, for a %s name', async (status) => {
