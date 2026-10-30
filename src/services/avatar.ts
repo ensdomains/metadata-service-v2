@@ -15,8 +15,9 @@ import {
   type PublicClient,
 } from 'viem';
 import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
+import { remainingRequestTime, timeLeftForAttempt } from './request-budget';
 import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayStatus } from './ccip-request';
-import { UpstreamError } from './errors';
+import { RequestDeadlineError, UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
 import { MAX_SVG_LENGTH, toSafeImage } from './media-safety';
@@ -637,6 +638,7 @@ export class AvatarService {
       return null;
     }
 
+    timeLeftForAttempt(`${kind} fetch for ${name}`);
     try {
       return await this.fetchMedia(uri, kind, name);
     } catch (error) {
@@ -810,42 +812,80 @@ export class AvatarService {
     if (uri.startsWith('http')) {
       // Validates the URL and every redirect hop (scheme, private hosts, this
       // service's own hostnames); a blocked URL throws and degrades to "none".
-      const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
-        signal: AbortSignal.timeout(7000),
-        headers: {
-          'user-agent': 'ENS-Metadata-V2/1.0.0',
-        },
-      });
+      const left = remainingRequestTime();
+      const mediaTimeoutMs = Number.isFinite(left) ? Math.min(7000, left) : 7000;
+      // The deadline, not the media cap, shortened the timeout.
+      const deadlineDriven = Number.isFinite(left) && left < 7000;
+      const signal = AbortSignal.timeout(mediaTimeoutMs);
 
-      if (!response.ok) {
-        console.warn(`Failed to fetch ${kind} for ${name}: ${response.status}`);
-        // A failing or throttling host (5xx, 429) may serve the image later;
-        // any other status (404, 410, 403, ...) is the record's problem.
-        if (isOutageStatus(response.status)) {
-          throw new UpstreamError(`${kind} host answered ${response.status} for ${name}`);
+      // The complete fetch + body-consumption, raced against the signal-abort
+      // event when the deadline drives the timeout.  Whichever settles first
+      // controls: normal completion / its own error, or a clean
+      // RequestDeadlineError from the abort event.  Late rejections are
+      // suppressed so unhandled-rejection noise is avoided.
+      const work = (async (): Promise<AvatarImage | null> => {
+        const response = await fetchMediaUrl(toLiveGatewayUrl(uri, this.ipfsGateway), {
+          signal,
+          headers: {
+            'user-agent': 'ENS-Metadata-V2/1.0.0',
+          },
+        }, undefined, () => timeLeftForAttempt(`${kind} fetch for ${name}`));
+
+        if (!response.ok) {
+          console.warn(`Failed to fetch ${kind} for ${name}: ${response.status}`);
+          // A failing or throttling host (5xx, 429) may serve the image later;
+          // any other status (404, 410, 403, ...) is the record's problem.
+          if (isOutageStatus(response.status)) {
+            throw new UpstreamError(`${kind} host answered ${response.status} for ${name}`);
+          }
+          return null;
         }
-        return null;
+
+        // Cap the size: a user-controlled URL could serve an arbitrarily large body
+        // (memory/DoS, and an avatar gets base64-embedded into the SVG). Reject early
+        // on a declared oversize, then bound the actual bytes.
+        const declared = Number(response.headers.get('Content-Length') ?? '');
+        if (Number.isFinite(declared) && declared > this.maxAvatarBytes) {
+          console.warn(`${kind} for ${name} too large (Content-Length ${declared})`);
+          return null;
+        }
+
+        const arrayBuffer = await readBodyCapped(response, this.maxAvatarBytes);
+        if (!arrayBuffer) {
+          console.warn(`${kind} for ${name} too large (over ${this.maxAvatarBytes} bytes)`);
+          return null;
+        }
+        const safe = toSafeImage(Buffer.from(arrayBuffer));
+        if (!safe) {
+          console.warn(`Rejected ${kind} for ${name}: not an allowlisted image`);
+        }
+        return safe;
+      })();
+
+      if (!deadlineDriven) return await work;
+
+      // Already-aborted signal: produce RequestDeadlineError immediately
+      // without registering a listener that would never fire.
+      if (signal.aborted) {
+        work.catch(() => {});
+        throw new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`);
       }
 
-      // Cap the size: a user-controlled URL could serve an arbitrarily large body
-      // (memory/DoS, and an avatar gets base64-embedded into the SVG). Reject early
-      // on a declared oversize, then bound the actual bytes.
-      const declared = Number(response.headers.get('Content-Length') ?? '');
-      if (Number.isFinite(declared) && declared > this.maxAvatarBytes) {
-        console.warn(`${kind} for ${name} too large (Content-Length ${declared})`);
-        return null;
+      // Race: the signal-abort event itself produces RequestDeadlineError.
+      // No error-identity check — whichever settles first controls.
+      let abortHandler: (() => void) | undefined;
+      const abortPromise = new Promise<never>((_, reject) => {
+        abortHandler = () => {
+          reject(new RequestDeadlineError(`Request deadline reached during ${kind} fetch for ${name}`));
+        };
+        signal.addEventListener('abort', abortHandler, { once: true });
+      });
+      try {
+        return await Promise.race([work, abortPromise]);
+      } finally {
+        if (abortHandler) signal.removeEventListener('abort', abortHandler);
+        work.catch(() => {});
       }
-
-      const arrayBuffer = await readBodyCapped(response, this.maxAvatarBytes);
-      if (!arrayBuffer) {
-        console.warn(`${kind} for ${name} too large (over ${this.maxAvatarBytes} bytes)`);
-        return null;
-      }
-      const safe = toSafeImage(Buffer.from(arrayBuffer));
-      if (!safe) {
-        console.warn(`Rejected ${kind} for ${name}: not an allowlisted image`);
-      }
-      return safe;
     }
 
     console.warn(`Unsupported ${kind} URI format for ${name}: ${uri}`);
