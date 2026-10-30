@@ -299,6 +299,20 @@ function getServices(env: Env, network: NetworkName): FullServices {
 
   const storageManager = new StorageManager(env.ASSET_BUCKET);
 
+  const rawValue = env.WEBHOOK_TOLERANCE_SECS?.trim();
+  const parsedWebhookTolerance = rawValue && /^-?\d+$/.test(rawValue)
+    ? parseInt(rawValue, 10)
+    : undefined;
+  // Reject non-safe-integer and values exceeding the documented maximum
+  // accepted replay-tolerance (86400s = 24h). Such values fall back to the
+  // secure DEFAULT_TOLERANCE_SECS (120s). Ordinary finite overrides unchanged.
+  const MAX_TOLERANCE_SECS = 86400;
+  const webhookToleranceSecs = typeof parsedWebhookTolerance === 'number' &&
+    Number.isFinite(parsedWebhookTolerance) &&
+    Number.isSafeInteger(parsedWebhookTolerance) &&
+    parsedWebhookTolerance <= MAX_TOLERANCE_SECS
+    ? parsedWebhookTolerance
+    : undefined;
   const webhookService = new WebhookService(
     cacheService,
     {
@@ -306,7 +320,7 @@ function getServices(env: Env, network: NetworkName): FullServices {
       secret: env.WEBHOOK_SECRET,
       // Fail-closed by default: no secret ⇒ reject. Opt out only for local dev.
       allowUnauthenticated: env.WEBHOOK_ALLOW_UNAUTHENTICATED === 'true',
-      toleranceSecs: env.WEBHOOK_TOLERANCE_SECS ? parseInt(env.WEBHOOK_TOLERANCE_SECS, 10) : undefined,
+      toleranceSecs: webhookToleranceSecs,
     },
     env.SVG_CACHE,
     storageManager,
