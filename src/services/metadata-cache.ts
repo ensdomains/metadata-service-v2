@@ -113,17 +113,13 @@ export class MetadataCacheService {
   // listing the whole `meta:` namespace breaks silently past 1000 keys (KV
   // list() page cap).
   async invalidate(name: string): Promise<void> {
-    try {
-      const canonical = canonicalizeName(name);
-      const keys = SUPPORTED_NETWORKS.flatMap((network) =>
-        (['registry', 'namewrapper'] as const).map(
-          (registryType) => buildCacheKey(network, registryType, canonical),
-        ),
-      );
-      await Promise.all(keys.map((k) => this.kv.delete(k)));
-    } catch (err) {
-      console.error(`[metadata-cache] invalidation failed for ${name}:`, err);
-    }
+    const canonical = canonicalizeName(name);
+    const keys = SUPPORTED_NETWORKS.flatMap((network) =>
+      (['registry', 'namewrapper'] as const).map(
+        (registryType) => buildCacheKey(network, registryType, canonical),
+      ),
+    );
+    await Promise.all(keys.map((k) => this.kv.delete(k)));
   }
 
   private async revalidate(
