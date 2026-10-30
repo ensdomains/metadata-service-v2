@@ -312,5 +312,31 @@ describe('WebhookService (zigens contract)', () => {
       const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ name: 'noTld' }))));
       expect(res.status).toBe(400);
     });
+
+    // W8-WEBHOOK-002: block_number must be a number before any purge or
+    // warming. The minimized finding is a fully shaped unauthenticated-dev
+    // event for red-team.eth with block_number: null — that must 400 and
+    // must not touch caches.
+    it('rejects block_number: null with 400 and does not invalidate caches', async () => {
+      const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
+      const body = JSON.stringify(validEvent({ name: 'red-team.eth', block_number: null }));
+      const res = await svc.handleWebhook(makeCtx(body));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Missing or invalid block_number' });
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+      expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
+      expect(fakes.metadataCacheKv.delete).not.toHaveBeenCalled();
+      expect(fakes.svgCacheKv.delete).not.toHaveBeenCalled();
+      expect(fakes.storageManager.deleteByPrefix).not.toHaveBeenCalled();
+    });
+
+    it('rejects a string block_number with 400 and does not invalidate caches', async () => {
+      const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
+      const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ block_number: '100' }))));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Missing or invalid block_number' });
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+      expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
+    });
   });
 });
