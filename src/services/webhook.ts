@@ -223,6 +223,9 @@ export class WebhookService {
     if (typeof payload.timestamp !== 'number') {
       return { valid: false, error: 'Missing or invalid timestamp' };
     }
+    if (typeof payload.tx_hash !== 'string') {
+      return { valid: false, error: 'tx_hash must be a string' };
+    }
 
     // A name OR namehash must be present to target invalidation. (zigens may send
     // either; some events carry only a namehash.)
