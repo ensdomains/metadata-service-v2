@@ -67,6 +67,7 @@ Validation enforced by the receiver:
 - `timestamp` — number (required)
 - **`name` OR `namehash` must be present**
 - if `name` is present it must be a well-formed ENS name
+- `namehash` — string or null
 
 **Include `name`.** Cache invalidation is name-keyed; an event with only
 `namehash` returns `200` but invalidates nothing (a namehash can't be reversed to
