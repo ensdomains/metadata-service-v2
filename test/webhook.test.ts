@@ -312,5 +312,25 @@ describe('WebhookService (zigens contract)', () => {
       const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({ name: 'noTld' }))));
       expect(res.status).toBe(400);
     });
+
+    it('rejects protocol: "" with 400 before invalidating caches', async () => {
+      // W8-WEBHOOK-001: protocol must be runtime-validated as v1/v2 ENS-version
+      // discriminant before any purge or warming side effects. An empty string
+      // is neither v1 nor v2.
+      const { svc, fakes } = makeService({ requireAuth: false, allowUnauthenticated: true });
+      const res = await svc.handleWebhook(makeCtx(JSON.stringify(validEvent({
+        protocol: '',
+        name: 'red-team.eth',
+      }))));
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Invalid protocol; must be "v1" or "v2"' });
+
+      // No cache invalidation must have occurred: the invalid discriminant must
+      // never enter the non-v2 cross-network path.
+      expect(fakes.cache.delete).not.toHaveBeenCalled();
+      expect(fakes.metadataCacheKv.delete).not.toHaveBeenCalled();
+      expect(fakes.cache.deleteByPrefix).not.toHaveBeenCalled();
+    });
   });
 });
