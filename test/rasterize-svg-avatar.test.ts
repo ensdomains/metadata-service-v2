@@ -100,11 +100,12 @@ describe('ImageGenerationService.forRasterization', () => {
     },
   );
 
-  it('uses the character-set colour and the custom card size', async () => {
+  it("uses v1's gradient, scaled to the custom card size", async () => {
     const size = { width: 800, height: 600 };
     const withAvatar = await card('a-b.eth', { avatarBase64: svgB64, avatarMimeType: 'image/svg+xml', size });
     const stripped = svc.forRasterization(withAvatar, 'a-b.eth');
-    expect(stripped).toContain('<rect width="800" height="600" fill="#4ECDC4"/>');
+    expect(stripped).toContain('<rect width="800" height="600" fill="url(#ensGradient)"/>');
+    expect(stripped).toContain(`gradientTransform="scale(${800 / 270} ${600 / 270})"`);
     expect(collapse(stripped)).toBe(collapse(await card('a-b.eth', { size })));
   });
 
@@ -138,7 +139,7 @@ describe('/rasterize never hands an SVG avatar to resvg', () => {
     expect(res.headers.get('Content-Type')).toBe('image/png');
     expect(state.rasterized).toHaveLength(1);
     expect(state.rasterized[0]).not.toContain('data:image/svg+xml');
-    expect(state.rasterized[0]).toContain('<rect width="518" height="518" fill="#1F2937"/>');
+    expect(state.rasterized[0]).toContain('<rect width="518" height="518" fill="url(#ensGradient)"/>');
 
     // The same (cached) card is served as SVG, rendered by the client, unchanged.
     const image = await req('/mainnet/registry/nick.eth/image');

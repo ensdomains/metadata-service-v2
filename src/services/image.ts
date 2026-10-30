@@ -4,7 +4,7 @@ import { generateIdenticon } from "@ensdomains/etherloom";
 import { ens_beautify } from "@adraffy/ens-normalize";
 import type { MigrationStatus } from "../types";
 import { namehash } from "viem/ens";
-import { canonicalizeName, getCharacterSet, isNormalized, maskedName } from "../utils/ens";
+import { canonicalizeName, isNormalized, maskedName } from "../utils/ens";
 import { isOnV2 } from "../utils/migration";
 import type { AvatarService } from "./avatar";
 import { getSatoshiFont } from "./font";
@@ -101,9 +101,10 @@ function invalidNameGradient(width: number, height: number): string {
     + `<stop stop-color="#EB9E9E"/><stop offset="1" stop-color="#992222"/></linearGradient></defs>`;
 }
 
-// The v1 card's background colour, by character set.
-function v1Background(characterSet: string): string {
-  return characterSet === "emoji" ? "#FF6B6B" : characterSet === "mixed" ? "#4ECDC4" : "#1F2937";
+// v1's gradient (ens-metadata-service src/svg-template.ts), scaled to the card.
+function ensGradient(width: number, height: number): string {
+  return `<defs><linearGradient id="ensGradient" x1="190.5" y1="302" x2="-64" y2="-172.5" gradientUnits="userSpaceOnUse" gradientTransform="scale(${width / 270} ${height / 270})">`
+    + `<stop stop-color="#44BCF0"/><stop offset="0.428185" stop-color="#628BF3"/><stop offset="1" stop-color="#A099FF"/></linearGradient></defs>`;
 }
 
 // Raster formats resvg decodes (this build has no WebP decoder), and the
@@ -239,7 +240,7 @@ export class ImageGenerationService {
         ? { svg: await this.invalidNameCard(name, options.registryType ?? 'registry', size, satoshi?.base64), measureFailed: false }
         : isOnV2(migrationStatus)
         ? await this.v2Card(name, size, backgroundImageUrl, satoshi, bucket, cardTheme(options.themeRecord), ctx)
-        : { svg: await this.v1Card(name, escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64), measureFailed: false };
+        : { svg: await this.v1Card(escapeXmlText(displayName(name)), size, backgroundImageUrl, satoshi?.base64), measureFailed: false };
 
       return {
         svg: new TextDecoder().decode(svg),
@@ -281,7 +282,7 @@ export class ImageGenerationService {
         }
         return isOnV2(migrationStatus)
           ? weaveBackground(name, Number(width), Number(height), themeOfCard(svg))
-          : `<rect width="${width}" height="${height}" fill="${v1Background(getCharacterSet(name))}"/>`;
+          : `<rect width="${width}" height="${height}" fill="url(#ensGradient)"/>`;
       },
     );
     // Every data: URI left must be an avatar vetted above; one in any other
@@ -360,10 +361,9 @@ export class ImageGenerationService {
     });
   }
 
-  // The v1 card (names not on ENS v2): the name over the avatar or a colour by
-  // character set, as before, without the character-set indicator.
+  // The v1 card (names not on ENS v2): the name over the avatar or v1's
+  // gradient, without the character-set indicator.
   private v1Card(
-    name: string,
     text: string,
     size: { width: number; height: number },
     backgroundImageUrl: string | null,
@@ -378,8 +378,9 @@ export class ImageGenerationService {
       fontFamily: 'Satoshi',
       fontBase64,
       textColor: '#F9FAFB',
-      backgroundColor: backgroundImageUrl ? 'transparent' : v1Background(getCharacterSet(name)),
+      backgroundColor: backgroundImageUrl ? 'transparent' : 'url(#ensGradient)',
       backgroundImageUrl,
+      customElements: [ensGradient(size.width, size.height)],
       fitMode: 'natural',
     });
   }

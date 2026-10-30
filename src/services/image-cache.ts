@@ -47,8 +47,8 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
 // badges, etherloom weave when there is no avatar). v4: the v2 card's theme
 // comes from the name's `theme` record. v5: subnames one label per line, long
 // names wrapped onto more lines. v6: a 40-unit accent square, and a shorter label
-// for a name that shrinks to fit.
-const CARD_CACHE_VERSION = 'v6';
+// for a name that shrinks to fit. v7: v1's gradient on v1 cards.
+const CARD_CACHE_VERSION = 'v7';
 
 function buildCacheKey(name: string, network: NetworkName, params: ImageCacheParams): string {
   // Canonical (case-insensitive) name — keep it first so the per-name invalidation
