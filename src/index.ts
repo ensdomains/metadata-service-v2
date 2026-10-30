@@ -31,7 +31,7 @@ import { withServingHost } from "./services/media-fetch";
 import { RasterizeService, getRasterizer } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
-import { CachePresets } from "./utils/cache-headers";
+import { CachePresets, CacheTTL } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
@@ -712,6 +712,26 @@ app.get(
   }
 );
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+// Two-level zero-owner placeholder matching generateBasicHierarchy.
+// Used when the pre-service expiry check cannot read upstream state so this
+// route stays total (200) instead of answering 503.
+function degradedHierarchyPlaceholder(name: string, network: NetworkName) {
+  const parts = name.split(".");
+  const resolver = NETWORKS[network].contracts.resolver;
+  const hierarchy = [];
+  for (let i = parts.length - 1; i >= 0; i--) {
+    hierarchy.push({
+      name: parts.slice(i).join("."),
+      owner: ZERO_ADDRESS,
+      resolver,
+      level: parts.length - i,
+    });
+  }
+  return { name, hierarchy };
+}
+
 // Registry hierarchy endpoint
 app.get(
   "/registry-hierarchy/:name",
@@ -728,7 +748,22 @@ app.get(
     const { metadataService } = getServices(c.env, network);
 
     try {
-      await metadataService.checkExpiry(name);
+      try {
+        // Default checkExpiry fails open, which would skip this catch and cache
+        // whatever hierarchy returns as a healthy 200. Surface the unreadable read.
+        await metadataService.checkExpiry(name, { throwOnUnreadable: true });
+      } catch (error) {
+        if (!(error instanceof UpstreamError)) throw error;
+
+        const cacheHeaders = CachePresets.error();
+        Object.entries(cacheHeaders).forEach(([key, value]) => {
+          c.header(key, value);
+        });
+
+        const res = c.json(degradedHierarchyPlaceholder(name, network));
+        edgeCachePut(c, res, CacheTTL.error);
+        return res;
+      }
 
       const hierarchy = await metadataService.getRegistryHierarchy(name);
 

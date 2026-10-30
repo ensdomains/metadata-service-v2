@@ -330,7 +330,15 @@ export class MetadataService {
   //  - Every request runs this gate, so a live verdict read from the chain is
   //    cached in-isolate (expiry-verdict-cache.ts). An expired verdict never is
   //    (a renewal can undo it at any moment), and neither is a fail-open outcome.
-  async checkExpiry(name: string): Promise<void> {
+  // throwOnUnreadable is for the registry-hierarchy route only. Other callers
+  // keep the fail-open returns below so an unreadable chain does not 410 a
+  // name that may still be live. That route must not continue into hierarchy
+  // when the pre-check cannot read upstream state, so it asks for the
+  // UpstreamError the route catch already handles.
+  async checkExpiry(
+    name: string,
+    opts?: { throwOnUnreadable?: boolean },
+  ): Promise<void> {
     // ENS names are case-insensitive but labelhash is not: canonicalize before
     // the suffix check and any hashing, so `DeadName.ETH` gets the same verdict
     // as `deadname.eth` (a raw-case labelhash reads a nonexistent registrar
@@ -342,12 +350,20 @@ export class MetadataService {
     if (this.expiryVerdicts.isLive(verdictKey)) return;
 
     // The fail-open returns below cache nothing; settleExpiry caches a live verdict.
+    const onUnreadable = (error: unknown, warning: string): void => {
+      if (opts?.throwOnUnreadable) {
+        throw error instanceof UpstreamError
+          ? error
+          : new UpstreamError(`expiry precheck unreadable for ${canonical}`, { cause: error });
+      }
+      console.warn(warning, error);
+    };
     if (this.blockchain.isV2Configured(this.network)) {
       let v2: { status: number; expiry: bigint } | null;
       try {
         v2 = await this.blockchain.getV2Registration(this.network, canonical);
       } catch (error) {
-        console.warn(`[expiry] v2 registration unreadable for ${canonical} — failing open (no 410):`, error);
+        onUnreadable(error, `[expiry] v2 registration unreadable for ${canonical} — failing open (no 410):`);
         return;
       }
       if (v2 && v2.status === 2) {
@@ -362,7 +378,7 @@ export class MetadataService {
       const hash = labelhash(label);
       expiry = await this.blockchain.getExpiry(this.network, hash);
     } catch (error) {
-      console.warn(`Failed to check expiry for ${canonical}:`, error);
+      onUnreadable(error, `Failed to check expiry for ${canonical}:`);
       return;
     }
     this.settleExpiry(canonical, verdictKey, expiry);
