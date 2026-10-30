@@ -255,17 +255,16 @@ export class D1Service {
   }>): Promise<void> {
     const rootDomainId = namehash(canonicalizeName(name));
 
-    // Clear the existing hierarchy for this domain and insert the new records,
-    // in one batch (one round trip, one transaction).
-    const statements = [
-      this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2')
-        .bind(this.network, rootDomainId),
-    ];
+    const statements: D1PreparedStatement[] = [];
+    const newIds: string[] = [];
 
     for (const level of hierarchy) {
+      const id = namehash(canonicalizeName(level.name));
+      newIds.push(id);
+
       const record: Omit<D1HierarchyRecord, 'sync_version'> = {
         network: this.network,
-        id: namehash(canonicalizeName(level.name)),
+        id,
         name: canonicalizeName(level.name),
         owner: level.owner,
         resolver: level.resolver,
@@ -281,7 +280,7 @@ export class D1Service {
           last_updated, sync_version
         ) VALUES (
           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE network = ?1 AND id = ?2), 0) + 1
+          COALESCE((SELECT sync_version FROM registry_hierarchy WHERE network = ?1 AND id = ?2 AND root_domain_id = ?8), 0) + 1
         )
       `);
 
@@ -289,6 +288,24 @@ export class D1Service {
         record.network, record.id, record.name, record.owner, record.resolver, record.level,
         record.parent_id, record.root_domain_id, record.last_updated
       ));
+    }
+
+    // DELETE stale rows inside the same transactional batch. Uses
+    // id NOT IN (...) scoped to network + root_domain_id so concurrent
+    // stores cannot leave orphaned rows. An empty hierarchy deletes all
+    // rows for the root (no NOT IN clause). Dynamic placeholders are
+    // bounded by the hierarchy length, which is capped at ~32 labels.
+    if (newIds.length === 0) {
+      statements.push(
+        this.db.prepare('DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2')
+          .bind(this.network, rootDomainId)
+      );
+    } else {
+      const placeholders = newIds.map(() => '?').join(', ');
+      const deleteStmt = this.db.prepare(
+        `DELETE FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2 AND id NOT IN (${placeholders})`
+      );
+      statements.push(deleteStmt.bind(this.network, rootDomainId, ...newIds));
     }
 
     await this.db.batch(statements);
@@ -303,6 +320,19 @@ export class D1Service {
     `);
     const result = await stmt.bind(this.network, rootDomainId).all<D1HierarchyRecord>();
     return (result.results || []).filter((record) => this.isFresh(record));
+  }
+
+  // Count fresh hierarchy rows for a domain (matching getHierarchy's isFresh
+  // semantics). Used to decide whether to schedule a recovery sync after
+  // migration 003. Stale rows are excluded so they don't suppress recovery.
+  async getHierarchyCount(name: string): Promise<number> {
+    const rootDomainId = namehash(canonicalizeName(name));
+    const cutoff = Date.now() - this.readMaxAgeMs;
+    const stmt = this.db.prepare(
+      'SELECT COUNT(*) AS cnt FROM registry_hierarchy WHERE network = ?1 AND root_domain_id = ?2 AND last_updated >= ?3'
+    );
+    const result = await stmt.bind(this.network, rootDomainId, cutoff).first<{ cnt: number }>();
+    return result?.cnt ?? 0;
   }
 
   // Batch operations. All rows go in one db.batch() (one round trip and one
