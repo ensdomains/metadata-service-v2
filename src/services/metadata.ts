@@ -825,9 +825,19 @@ export class MetadataService {
         error,
       );
 
-      // Generate basic hierarchy as last resort
-      const fallbackResponse = this.generateBasicHierarchy(name);
-      await this.cache.set(cacheKey, fallbackResponse, { ttl: CacheTTL.error });
+      // Last-resort placeholder. The route must not cache an outage as a
+      // healthy hierarchy. hierarchyErrorCache survives the KV round trip and
+      // is stripped before the public JSON. A definitive miss is a clean
+      // answer and keeps the normal policy.
+      const fallbackResponse: RegistryHierarchyResponse & {
+        hierarchyErrorCache?: true;
+      } = this.generateBasicHierarchy(name);
+      const definitive =
+        error instanceof NotFoundError && error.definitive === true;
+      if (!definitive) fallbackResponse.hierarchyErrorCache = true;
+      await this.cache.set(cacheKey, fallbackResponse, {
+        ttl: definitive ? CacheTTL.ensnode : CacheTTL.error,
+      });
       return fallbackResponse;
     }
   }
@@ -1153,8 +1163,11 @@ export class MetadataService {
     };
   }
 
-  // Generate basic hierarchy as fallback
-  private generateBasicHierarchy(name: string): RegistryHierarchyResponse {
+  // Generate basic hierarchy as fallback (zero-owner placeholder, root-first).
+  // Public: the registry-hierarchy route calls it when every data source fails
+  // (NotFoundError, UpstreamError, RequestDeadlineError) so the route stays
+  // total — never 404 or 503.
+  generateBasicHierarchy(name: string): RegistryHierarchyResponse {
     const parts = name.split(".");
     const hierarchy: Array<{
       name: string;
