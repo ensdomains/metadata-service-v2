@@ -728,7 +728,36 @@ app.get(
     const { metadataService } = getServices(c.env, network);
 
     try {
-      await metadataService.checkExpiry(name);
+      try {
+        await metadataService.checkExpiry(name);
+      } catch (error) {
+        // W3-ROUTES-008: a definitive miss at the expiry gate is still a total
+        // 200 placeholder (this route never 404s). Other checkExpiry errors,
+        // and every getRegistryHierarchy failure, keep the catch below.
+        if (error instanceof NotFoundError && error.definitive) {
+          const labels = name.split('.');
+          const placeholder = {
+            name,
+            hierarchy: labels.map((_, i) => {
+              const levelName = labels.slice(labels.length - 1 - i).join('.');
+              return {
+                name: levelName,
+                owner: '0x0000000000000000000000000000000000000000',
+                resolver: NETWORKS[network].contracts.resolver,
+                level: i + 1,
+              };
+            }),
+          };
+          const cacheHeaders = CachePresets.hierarchy(name);
+          Object.entries(cacheHeaders).forEach(([key, value]) => {
+            c.header(key, value);
+          });
+          const res = c.json(placeholder);
+          edgeCachePut(c, res);
+          return res;
+        }
+        throw error;
+      }
 
       const hierarchy = await metadataService.getRegistryHierarchy(name);
 
