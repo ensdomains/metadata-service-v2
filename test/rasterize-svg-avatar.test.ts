@@ -35,7 +35,7 @@ const svgB64 = HOSTILE_SVG.toString('base64');
 const pngB64 = PNG.toString('base64');
 
 // The route mocks below hand out whatever card the test put here.
-const state = vi.hoisted(() => ({ card: '', rasterized: [] as string[] }));
+const state = vi.hoisted(() => ({ card: '', rasterized: [] as string[], getImageOptions: null as Record<string, unknown> | null }));
 
 vi.mock('../src/services/rasterize', () => ({
   RasterizeService: class {
@@ -48,7 +48,8 @@ vi.mock('../src/services/rasterize', () => ({
 
 vi.mock('../src/services/image-cache', () => ({
   ImageCacheService: class {
-    async getImage() {
+    async getImage(_name: string, options: Record<string, unknown>) {
+      state.getImageOptions = options;
       return {
         svg: state.card,
         contentType: 'image/svg+xml',
@@ -171,5 +172,191 @@ describe('/rasterize never hands an SVG avatar to resvg', () => {
     const res = await req('/mainnet/registry/nick.eth/rasterize');
     expect(res.status).toBe(500);
     expect(state.rasterized).toHaveLength(0);
+  });
+});
+
+describe('rasterize dimensions (W8-RASTER-001)', () => {
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  const req = (path: string) => app.request(path, undefined, createMockEnv() as unknown as Record<string, unknown>, ctx);
+
+  beforeEach(async () => {
+    state.card = await card('nick.eth');
+    state.rasterized = [];
+    state.getImageOptions = null;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  // --- malformed values (T1–T3) ---
+
+  // T1 — Malformed width square: w=100a parses as 100 on base → square rewrite.
+  it('ignores a malformed width (T1)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100a&h=100');
+    expect(res.status).toBe(200);
+    // Root SVG must not carry the attacker value; must be default 518.
+    expect(state.rasterized[0]).not.toMatch(/^<svg width="100"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // T2 — Malformed height square: h=200b parses as 200 on base → square rewrite.
+  it('ignores a malformed height (T2)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=200b');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).not.toMatch(/^<svg width="200"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // T3a — Malformed both (non-square): w=100a→100, h=101b→101 → options.size set on base.
+  it('ignores two malformed non-square values, no size supplied (T3a)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100a&h=101b');
+    expect(res.status).toBe(200);
+    // Red on base: getImageOptions.size = {width:100,height:101}.
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T3b — Malformed both (square): w=150x&h=150x both parse to 150 → square rewrite on base.
+  it('ignores two malformed square values (T3b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=150x&h=150x');
+    expect(res.status).toBe(200);
+    // Red on base: root SVG rewritten to width="150".
+    expect(state.rasterized[0]).not.toMatch(/^<svg width="150"/);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // --- incomplete pairs (T4a, T4b) ---
+
+  // T4a — Missing width, clean height: must not supply a partial custom size.
+  it('supplies no custom size when only height is present (T4a)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?h=200');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T4b — Missing height, clean width: the reverse incomplete-pair direction.
+  it('supplies no custom size when only width is present (T4b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // --- clean custom sizes: square + non-square (T5) ---
+
+  // T5a — Clean square: pure decimal, within range → applied (rewrite).
+  it('accepts a clean square custom size (T5a)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=250&h=250');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="250" height="250"/);
+  });
+
+  // T5b — Valid non-square: options.size set, no SVG rewrite.
+  it('accepts a valid non-square custom size (T5b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=300');
+    expect(res.status).toBe(200);
+    // Non-square: options.size is set but SVG is left at default (mock ignores size).
+    expect(state.getImageOptions).toHaveProperty('size');
+    expect(state.getImageOptions!.size).toEqual({ width: 200, height: 300 });
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // T5c — Extreme spread low-high: kills square-only (outputWidth===outputHeight) mutant.
+  it('accepts 100×2000 non-square (T5c)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100&h=2000');
+    expect(res.status).toBe(200);
+    expect(state.getImageOptions).toHaveProperty('size');
+    expect(state.getImageOptions!.size).toEqual({ width: 100, height: 2000 });
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // T5d — Extreme spread high-low: kills square-only mutant in reverse direction.
+  it('accepts 2000×100 non-square (T5d)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2000&h=100');
+    expect(res.status).toBe(200);
+    expect(state.getImageOptions).toHaveProperty('size');
+    expect(state.getImageOptions!.size).toEqual({ width: 2000, height: 100 });
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+  });
+
+  // --- boundary values (T6a–T6e) ---
+
+  // T6a — Below lower bound: 99 < 100 → ignored.
+  it('ignores below-lower-bound values (T6a)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=99');
+    expect(res.status).toBe(200);
+    // Anchored: root SVG, not the background rect.
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6b — Exact lower bound: 100 → accepted (kills >100 exclusive mutant).
+  it('accepts exact lower bound (T6b)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=100&h=100');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="100" height="100"/);
+  });
+
+  // T6c — Exact upper bound: 2000 → accepted.
+  it('accepts exact upper bound (T6c)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2000&h=2000');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="2000" height="2000"/);
+  });
+
+  // T6d — Above upper bound: 2001 > 2000 → ignored.
+  it('ignores above-upper-bound values (T6d)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2001&h=2001');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6e — Cross-boundary: one in range, one out → both ignored (no partial size).
+  it('ignores cross-boundary pairs (T6e)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=100');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6f — Valid width, height below lower bound → ignores pair (kills height-only mutant).
+  it('ignores valid width with too-low height (T6f)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=99');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6g — Valid height, width below lower bound → ignores pair (kills width-only mutant).
+  it('ignores valid height with too-low width (T6g)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=99&h=200');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6h — Valid width, height above upper bound → ignores pair (kills height-only mutant).
+  it('ignores valid width with too-high height (T6h)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=200&h=2001');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // T6i — Valid height, width above upper bound → ignores pair (kills width-only mutant).
+  it('ignores valid height with too-high width (T6i)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=2001&h=200');
+    expect(res.status).toBe(200);
+    expect(state.rasterized[0]).toMatch(/^<svg width="518" height="518"/);
+    expect(state.getImageOptions).not.toHaveProperty('size');
+  });
+
+  // --- leading zeros (T7) ---
+
+  // T7 — Leading zeros: pure decimal, /^\d+$/ accepts; parseInt('0100',10)→100.
+  it('accepts leading-zero decimal spellings (T7)', async () => {
+    const res = await req('/mainnet/registry/nick.eth/rasterize?w=0100&h=0100');
+    expect(res.status).toBe(200);
+    // Must be accepted as 100×100, killing a /^[1-9]\d*$/ rejection mutant.
+    expect(state.rasterized[0]).toMatch(/^<svg width="100" height="100"/);
   });
 });
