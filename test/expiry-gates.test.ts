@@ -10,6 +10,7 @@ vi.mock('../src/services/rasterize', () => ({
 import app from '../src/index';
 import { BlockchainService } from '../src/services/blockchain';
 import { MetadataService, DomainExpiredError } from '../src/services/metadata';
+import { METADATA_CACHE_SCHEMA } from '../src/services/metadata-cache';
 import { UpstreamError } from '../src/services/errors';
 
 // Expiry gates:
@@ -209,6 +210,7 @@ function cacheEntryFor(name: string): string {
     createdAt: Date.now() - 60_000, // fresh (age 60s < softTtl 24h) → pure KV hit, no origin fetch
     softTtl: 86400,
     migrationStatus: 'migrated',
+    schema: METADATA_CACHE_SCHEMA,
   });
 }
 
