@@ -665,8 +665,13 @@ export class MetadataService {
     }
   }
 
+  // In-process result. degradedByUpstreamFailure is set non-enumerable after a
+  // D1 rescue from UpstreamError and is not part of the public JSON; the route
+  // strips it before c.json. It is on this return type so that strip typechecks.
   // Get migration status (CF cache handles API response caching)
-  async getMigrationStatus(name: string): Promise<MigrationStatusResponse> {
+  async getMigrationStatus(
+    name: string,
+  ): Promise<MigrationStatusResponse & { degradedByUpstreamFailure?: boolean }> {
     if (!isResolvableEnsName(name)) {
       throw new InvalidNameError();
     }
@@ -712,6 +717,15 @@ export class MetadataService {
               owner: d1Record.owner ?? undefined,
               expirationDate: d1Record.expiration_date ?? undefined,
             };
+
+            // Internal signal for the route: rescued from D1 after a live-tier
+            // outage (UpstreamError). Non-enumerable so public JSON never includes
+            // it and the shape stays unchanged.
+            if (error instanceof UpstreamError) {
+              Object.defineProperty(fallbackResponse, 'degradedByUpstreamFailure', {
+                value: true,
+              });
+            }
 
             return fallbackResponse;
           }
