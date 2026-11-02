@@ -3,6 +3,7 @@
   "version": "2.0.0",
   "description": "ENS Metadata Service V2 - Cloudflare Workers implementation for ENS v1 and v2 on Ethereum",
   "main": "src/index.ts",
+  "exports": "./src/index.ts",
   "type": "module",
   "packageManager": "pnpm@12.5.1",
   "scripts": {

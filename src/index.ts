@@ -726,9 +726,11 @@ app.get(
       return c.json({ error: "Invalid network. Must be 'mainnet' or 'sepolia'", timestamp: new Date().toISOString() }, 400);
     }
     const { metadataService } = getServices(c.env, network);
+    let expiryChecked = false;
 
     try {
       await metadataService.checkExpiry(name);
+      expiryChecked = true;
 
       const hierarchy = await metadataService.getRegistryHierarchy(name);
 
@@ -741,6 +743,23 @@ app.get(
       edgeCachePut(c, res);
       return res;
     } catch (error) {
+      if (!expiryChecked && error instanceof NotFoundError && error.definitive) {
+        const labels = name.split('.');
+        const placeholder = {
+          name,
+          hierarchy: labels.map((_, index) => ({
+            name: labels.slice(labels.length - index - 1).join('.'),
+            owner: '0x0000000000000000000000000000000000000000',
+            resolver: NETWORKS[network].contracts.resolver,
+            level: index + 1,
+          })),
+        };
+        const cacheHeaders = CachePresets.hierarchy(name);
+        Object.entries(cacheHeaders).forEach(([key, value]) => c.header(key, value));
+        const res = c.json(placeholder);
+        edgeCachePut(c, res);
+        return res;
+      }
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
         const errorCacheHeaders = CachePresets.error();
         Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
