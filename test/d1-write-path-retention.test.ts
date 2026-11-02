@@ -36,6 +36,13 @@ try {
   console.warn('[d1-write-path-retention.test] node:sqlite unavailable on this Node — skipping real-SQL D1 suites');
 }
 const hasSqlite = DatabaseSyncImpl !== null;
+
+// Exact operational boundary and gap values for envSecsToMs guard regressions.
+const MAX_ENV_SECS = 10 * 365 * 24 * 60 * 60; // 315,360,000
+const MAX_PLUS_ONE  = MAX_ENV_SECS + 1;        // 315,360,001
+// MAX_SAFE_INTEGER / 1000 ≈ 9,007,199,254.741; floor is 9,007,199,254,741.
+const SAFE_SECS_UNSAFE_MS = 9_007_199_254_741;
+
 type SqliteDb = InstanceType<NonNullable<typeof DatabaseSyncImpl>>;
 
 // The real schema, straight from the latest migration.
@@ -581,6 +588,56 @@ describe.skipIf(!hasSqlite)('D1 reads treat rows older than the read max age as 
 
     expect(await run({})).toBe(false);
     expect(await run({ D1_READ_MAX_AGE_SECS: '600' })).toBe(true);
+  });
+
+  // ---- envSecsToMs guard-gap regressions on the D1 read path ---------------
+
+  // Prove D1 freshness via forced upstream outage: when the indexer is down,
+  // the only data source is D1. A row older than the 7-day default but younger
+  // than 10 years discriminates the cap from its fallback.
+  const readFreshness = async (env: Record<string, unknown>) => {
+    const sqlite = openSqlite();
+    // 8-day-old row: older than 7-day default, younger than 10-year max.
+    seedDomain(sqlite, 'sepolia', 'sub.fox.eth', Date.now() - 8 * DAY);
+    // Force indexer outage: every fetch for the indexer throws.
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).startsWith('https://zigens.test/') || String(url).startsWith('https://api.'))
+        throw new Error('indexer outage');
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+    try {
+      const app = await loadApp();
+      const { ctx, drain } = makeCtx();
+      const res = await app.request(
+        '/sepolia/registry/sub.fox.eth', undefined,
+        makeEnv({ DB: makeSqliteD1(sqlite).d1, ...env }), ctx as unknown as ExecutionContext,
+      );
+      await drain();
+      return res.status;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it('serves from D1 at the exact operational maximum (10 years) under upstream outage', async () => {
+    // 8-day row < 10-year max → D1 serves → HTTP 200.
+    // A >= MAX_ENV_SECS mutant would reject the max, fall back to 7-day default,
+    // and the 8-day row would be stale → outage → 503. Kills the mutant.
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: String(MAX_ENV_SECS) })).toBe(200);
+  });
+
+  it('rejects max+1 for D1 read freshness under upstream outage (falls back to 7-day default, outage → 503)', async () => {
+    // Cap rejects 315360001 → 7-day default. 8-day row > 7 days → stale → outage → 503.
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: String(MAX_PLUS_ONE) })).toBe(503);
+  });
+
+  it('rejects an unsafe-integer digit string for D1 read freshness under upstream outage (outage → 503)', async () => {
+    // '9'.repeat(16) → unsafe int → rejected → 7-day default → stale → outage → 503.
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: '9'.repeat(16) })).toBe(503);
+  });
+
+  it('rejects safe seconds / unsafe ms for D1 read freshness under upstream outage (outage → 503)', async () => {
+    expect(await readFreshness({ D1_READ_MAX_AGE_SECS: String(SAFE_SECS_UNSAFE_MS) })).toBe(503);
   });
 });
 
