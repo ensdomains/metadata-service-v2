@@ -31,7 +31,7 @@ import { withServingHost } from "./services/media-fetch";
 import { RasterizeService, getRasterizer } from "./services/rasterize";
 import { MEDIA_SECURITY_HEADERS } from "./services/media-safety";
 const rasterizeService = new RasterizeService();
-import { CachePresets } from "./utils/cache-headers";
+import { CachePresets, CacheTTL } from "./utils/cache-headers";
 import { installConsoleRedaction, registerLogSecrets } from "./utils/log-redaction";
 import type {
   HealthResponse,
@@ -729,18 +729,70 @@ app.get(
 
     try {
       await metadataService.checkExpiry(name);
+    } catch (error) {
+      if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
+        const errorCacheHeaders = CachePresets.error();
+        Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
+      }
+      return httpError(c, error, "Failed to resolve registry hierarchy");
+    }
 
+    try {
       const hierarchy = await metadataService.getRegistryHierarchy(name);
+      const record = hierarchy as typeof hierarchy & {
+        hierarchyErrorCache?: true;
+      };
+      // The service returns a placeholder instead of throwing when every
+      // source fails. That hint must not become public JSON.
+      const degraded = record.hierarchyErrorCache === true;
+      delete record.hierarchyErrorCache;
 
-      const cacheHeaders = CachePresets.hierarchy(name);
+      const cacheHeaders = degraded
+        ? CachePresets.error()
+        : CachePresets.hierarchy(name);
       Object.entries(cacheHeaders).forEach(([key, value]) => {
         c.header(key, value);
       });
 
       const res = c.json(hierarchy);
-      edgeCachePut(c, res);
+      edgeCachePut(
+        c,
+        res,
+        degraded ? CacheTTL.error : EDGE_CACHE_MAX_AGE_SECS,
+      );
       return res;
     } catch (error) {
+      // W3-ROUTES-010: the registry-hierarchy route must stay total — return
+      // a 200 root-first zero-owner placeholder when the hierarchy service
+      // itself reports absence, outage, or deadline after a successful expiry
+      // check.
+      if (
+        error instanceof NotFoundError ||
+        error instanceof UpstreamError
+      ) {
+        // Definitive absence → normal caching. Outage/deadline/non-definitive
+        // miss → short-lived 30s caching so the error is not cached as healthy.
+        const definitive =
+          error instanceof NotFoundError && error.definitive === true;
+        const cacheHeaders = definitive
+          ? CachePresets.hierarchy(name)
+          : CachePresets.error();
+        Object.entries(cacheHeaders).forEach(([key, value]) =>
+          c.header(key, value),
+        );
+
+        const placeholder = metadataService.generateBasicHierarchy(name);
+        const res = c.json(placeholder);
+        // Client headers already carry the policy. The edge writer defaults to
+        // 300s and rewrites the stored copy, so a degraded 200 must pass 30s
+        // explicitly or the colo keeps a zero-owner placeholder as fresh success.
+        edgeCachePut(
+          c,
+          res,
+          definitive ? EDGE_CACHE_MAX_AGE_SECS : CacheTTL.error,
+        );
+        return res;
+      }
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
         const errorCacheHeaders = CachePresets.error();
         Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
