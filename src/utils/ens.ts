@@ -99,7 +99,13 @@ export function getDomainLevel(name: string): number {
 // Convert token ID to proper hex format
 export function tokenIdToHex(tokenId: string): `0x${string}` {
   if (tokenId.startsWith("0x")) {
-    return tokenId as `0x${string}`;
+    try {
+      const hex = BigInt(tokenId).toString(16).padStart(64, "0");
+      return `0x${hex}` as `0x${string}`;
+    } catch {
+      // Non-integer 0x spellings keep the previous pass-through behavior.
+      return tokenId as `0x${string}`;
+    }
   }
 
   // Convert from decimal to hex
