@@ -741,6 +741,32 @@ app.get(
       edgeCachePut(c, res);
       return res;
     } catch (error) {
+      // S3 hierarchy totality: the hierarchy route never answers 404 or 503.
+      // HTTPException(404) / HTTPException(503) from checkExpiry or
+      // getRegistryHierarchy become a 200 zero-owner placeholder instead.
+      if (error instanceof HTTPException && (error.status === 404 || error.status === 503)) {
+        const parts = name.split('.');
+        const ZERO = '0x0000000000000000000000000000000000000000';
+        const resolver = NETWORKS[network].contracts.resolver;
+        const basicHierarchy = parts
+          .map((_, i, arr) => arr.slice(i).join('.'))
+          .reverse()
+          .map((domainName, levelIndex) => ({
+            name: domainName,
+            owner: ZERO,
+            resolver,
+            level: levelIndex + 1,
+          }));
+        const body = { name, hierarchy: basicHierarchy };
+        const is404 = error.status === 404;
+        const cacheHeaders = is404
+          ? CachePresets.hierarchy(name)
+          : CachePresets.error();
+        Object.entries(cacheHeaders).forEach(([key, value]) => c.header(key, value));
+        const res = c.json(body);
+        edgeCachePut(c, res, is404 ? 300 : 30);
+        return res;
+      }
       if (!(error instanceof DomainExpiredError) && !(error instanceof NotFoundError)) {
         const errorCacheHeaders = CachePresets.error();
         Object.entries(errorCacheHeaders).forEach(([key, value]) => c.header(key, value));
