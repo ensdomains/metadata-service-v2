@@ -64,9 +64,16 @@ constant time. The `sha256=` prefix is optional on the value but recommended.
 Validation enforced by the receiver:
 
 - `event_type` — non-empty string (required)
+- `protocol` — `"v1"` or `"v2"` (required)
+- `block_number` — number (required)
+- `tx_hash` — string (required; empty allowed)
+- `log_index` — number (required)
+- `contract_address` — string (required; empty allowed)
+- `data` — string (required, opaque; not parsed)
 - `timestamp` — number (required)
 - **`name` OR `namehash` must be present**
-- if `name` is present it must be a well-formed ENS name
+- `name` — string or null; if it is a string within the service's length and depth limits it must be a well-formed ENS name; a name over those limits is acknowledged, not rejected
+- `namehash` — string or null; may be omitted when `name` is present
 
 **Include `name`.** Cache invalidation is name-keyed; an event with only
 `namehash` returns `200` but invalidates nothing (a namehash can't be reversed to
