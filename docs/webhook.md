@@ -65,6 +65,7 @@ Validation enforced by the receiver:
 
 - `event_type` — non-empty string (required)
 - `timestamp` — number (required)
+- `log_index` — number (required)
 - **`name` OR `namehash` must be present**
 - if `name` is present it must be a well-formed ENS name
 
@@ -87,7 +88,7 @@ Any other string is accepted and performs the standard name-keyed invalidation.
 | Status | Meaning |
 |---|---|
 | `200` `{status:"success", processed, event, name, timestamp}` | accepted & processed |
-| `400` | malformed JSON / missing `event_type` or `timestamp` / no name-or-namehash / bad name |
+| `400` | malformed JSON / missing `event_type` or `timestamp` / `log_index` not a number / no name-or-namehash / bad name |
 | `401` | missing/invalid signature or timestamp, or timestamp outside the replay window |
 | `403` | source IP not in the allowlist (only if one is configured; checked via `CF-Connecting-IP`) |
 | `503` | server has no `WEBHOOK_SECRET` configured (fail-closed) |
