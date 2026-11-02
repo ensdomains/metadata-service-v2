@@ -285,5 +285,5 @@ the on-chain tier):
 
 **Webhook (`POST /webhook`):**
 - `WEBHOOK_SECRET`: hex-encoded HMAC key for webhook signatures — **required in production; the webhook rejects all requests without it** (production: `wrangler secret put`)
-- `WEBHOOK_TOLERANCE_SECS`: replay window for webhook timestamps, in seconds (default 120)
+- `WEBHOOK_TOLERANCE_SECS`: replay window for webhook timestamps, in whole seconds (default 120, maximum 86400 = 24h)
 - `WEBHOOK_ALLOW_UNAUTHENTICATED`: local dev only — accept webhooks without a secret
