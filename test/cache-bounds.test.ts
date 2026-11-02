@@ -50,7 +50,7 @@ vi.mock('../src/services/rasterize', () => ({
 import { MetadataService, DomainExpiredError } from '../src/services/metadata';
 import { ImageCacheService } from '../src/services/image-cache';
 import { WebhookService } from '../src/services/webhook';
-import { MetadataCacheService } from '../src/services/metadata-cache';
+import { METADATA_CACHE_SCHEMA, MetadataCacheService } from '../src/services/metadata-cache';
 import { BlockchainService, ENS_V2_CONTRACTS } from '../src/services/blockchain';
 import { NotFoundError, UpstreamError } from '../src/services/errors';
 import { MIGRATION_STATUS } from '../src/types';
@@ -226,6 +226,7 @@ function seedStaleEntry(kv: ReturnType<typeof makeKv>) {
       createdAt: Date.now() - 25 * 3600 * 1000,
       softTtl: 86400,
       migrationStatus: 'native',
+      schema: METADATA_CACHE_SCHEMA,
     }),
   );
 }

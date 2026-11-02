@@ -83,6 +83,13 @@ export interface D1RecordData {
   created_at?: string;
 }
 
+export type MetadataProvenance = 'live' | 'degraded-d1';
+
+export interface MetadataResolution {
+  metadata: MetadataResponse;
+  provenance: MetadataProvenance;
+}
+
 export interface MetadataServiceConfig {
   indexerV2Endpoint: string;
   indexerV2FallbackEndpoint?: string;
@@ -201,7 +208,29 @@ export class MetadataService {
     identifier: string,
     baseUrl?: string,
     executionCtx?: Pick<ExecutionContext, 'waitUntil'>,
-  ): Promise<MetadataResponse> {
+  ): Promise<MetadataResponse>;
+  async getMetadata(
+    network: NetworkName,
+    registryType: "registry" | "namewrapper",
+    identifier: string,
+    baseUrl: string | undefined,
+    executionCtx: Pick<ExecutionContext, 'waitUntil'> | undefined,
+    options: { includeProvenance: true },
+  ): Promise<MetadataResolution>;
+  async getMetadata(
+    network: NetworkName,
+    registryType: "registry" | "namewrapper",
+    identifier: string,
+    baseUrl?: string,
+    executionCtx?: Pick<ExecutionContext, 'waitUntil'>,
+    options?: { includeProvenance: true },
+  ): Promise<MetadataResponse | MetadataResolution> {
+    const resolved = (
+      metadata: MetadataResponse,
+      provenance: MetadataProvenance,
+    ): MetadataResponse | MetadataResolution =>
+      options?.includeProvenance ? { metadata, provenance } : metadata;
+
     // Validate identifier as ENS name
     if (!isResolvableEnsName(identifier)) {
       throw new InvalidNameError();
@@ -275,7 +304,7 @@ export class MetadataService {
         console.warn(`Fallback to ${source} used for ${identifier}`);
       }
 
-      return metadata;
+      return resolved(metadata, 'live');
     } catch (error) {
       // Expiry is a distinct, intentional outcome — propagate it unchanged (→ 410).
       if (error instanceof DomainExpiredError) throw error;
@@ -301,7 +330,7 @@ export class MetadataService {
               baseUrl,
               registryType,
             );
-            return metadata;
+            return resolved(metadata, 'degraded-d1');
           }
         } catch (d1Error) {
           console.error(`D1 fallback also failed for ${identifier}:`, d1Error);
