@@ -187,8 +187,10 @@ export class FallbackService {
         { cause: lastError },
       );
     }
+    // A skipped primary (disabled or breaker-open) was not consulted, so the
+    // remaining clean misses are not proof of absence.
     throw new NotFoundError(`${operationName}: not found in any source`, {
-      definitive: v2Consulted || !this.config.indexerV2.enabled,
+      definitive: v2Consulted,
     });
   }
 
