@@ -98,7 +98,8 @@ async function send(path: string, init?: RequestInit, advanceMs = 0) {
 const hang = () => new Promise<never>(() => {});
 const rpcDown = () => new HttpRequestError({ url: 'https://mainnet.test.rpc', status: 503 });
 const cardWrites = () => ({
-  kv: vi.mocked(env.SVG_CACHE.put).mock.calls.length,
+  // Only cards: the avatar service also records a failed lookup in this KV.
+  kv: vi.mocked(env.SVG_CACHE.put).mock.calls.filter(([key]) => String(key).startsWith('svg:')).length,
   r2: vi.mocked(env.ASSET_BUCKET.put).mock.calls.length,
 });
 

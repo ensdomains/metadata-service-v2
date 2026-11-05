@@ -14,9 +14,9 @@ import {
   type Chain,
   type PublicClient,
 } from 'viem';
-import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, readBodyCapped, resolverDenyList } from './media-fetch';
+import { BlockedMediaUrlError, createGuardedFetcher, fetchMediaUrl, mediaHostOf, readBodyCapped, resolverDenyList } from './media-fetch';
 import { CcipGatewayError, ccipBudgetedHttp, guardedCcipRequest, isFinalGatewayStatus } from './ccip-request';
-import { UpstreamError } from './errors';
+import { RequestDeadlineError, UpstreamError } from './errors';
 import { isOutageStatus, reportOutage, runInOutageScope, type OutageScope } from './outage-scope';
 import { normalize } from '../utils/ens';
 import { MAX_SVG_LENGTH, toSafeImage } from './media-safety';
@@ -59,6 +59,14 @@ export interface AvatarMetadata {
 // Hard cap on ENS media resolution (RPC + any NFT-metadata/CCIP fetch). Keeps a
 // slow RPC from stalling an image request until the 30s global timeout.
 const MEDIA_RESOLVE_TIMEOUT_MS = 8_000;
+
+// How long a failed media lookup is remembered (see AvatarService's failure
+// cache). A degraded card is not cached, so a popular name whose avatar host is
+// throttling or down was looked up again on every request, each one another
+// 429 for the host and up to 8s of waiting for the client. A failure stands in
+// for the lookup this long; the name's card is drawn without the avatar until
+// the entry expires. KV's minimum is 60s.
+export const MEDIA_FAILURE_TTL_SECS = 300;
 
 
 // Cap on a JSON document the resolver fetches (an avatar record's URI metadata,
@@ -445,6 +453,9 @@ export class AvatarService {
   private legacyResolver?: AvatarResolver;
   private maxAvatarBytes: number;
   private ipfsGateway: string;
+  private chainId: number;
+  // Failed lookups by name, for MEDIA_FAILURE_TTL_SECS (see withFailureCache).
+  private failureCache?: KVNamespace;
 
   constructor(
     rpcUrl: string,
@@ -452,9 +463,12 @@ export class AvatarService {
     maxAvatarBytes: number = DEFAULT_MAX_AVATAR_BYTES,
     universalResolver?: string,
     ipfsGateway: string = DEFAULT_IPFS_GATEWAY,
+    failureCache?: KVNamespace,
   ) {
     this.maxAvatarBytes = maxAvatarBytes;
     this.ipfsGateway = ipfsGateway;
+    this.chainId = chain.id;
+    this.failureCache = failureCache;
     // ens-avatar 2.x takes a ChainClient (ethers-free core). We adapt a viem
     // PublicClient via `fromViem` — viem is already this project's chain library
     // and one of ens-avatar's optional peers, so no extra dependency (the old
@@ -586,8 +600,8 @@ export class AvatarService {
       return null;
     }
 
-    const resolved = await this.withLegacyFallback((resolver) =>
-      this.resolveMetadataRecord(resolver, normalized, name),
+    const resolved = await this.withFailureCache('avatar metadata', normalized, name, () =>
+      this.withLegacyFallback((resolver) => this.resolveMetadataRecord(resolver, normalized, name)),
     );
     if (!resolved) {
       return null;
@@ -632,22 +646,69 @@ export class AvatarService {
       return null;
     }
 
-    const uri = await this.withLegacyFallback((resolver) => this.resolveRecord(resolver, kind, normalized, name));
-    if (!uri) {
-      return null;
-    }
-
-    try {
-      return await this.fetchMedia(uri, kind, name);
-    } catch (error) {
-      // A blocked URL or redirect hop is a problem with the record; a network
-      // error or timeout means the image may be there.
-      if (error instanceof BlockedMediaUrlError) {
-        console.warn(`Blocked ${kind} URL for ${name}:`, error);
+    return this.withFailureCache(kind, normalized, name, async () => {
+      const uri = await this.withLegacyFallback((resolver) => this.resolveRecord(resolver, kind, normalized, name));
+      if (!uri) {
         return null;
       }
-      console.warn(`Error fetching ${kind} for ${name}:`, error);
-      throw error instanceof UpstreamError ? error : new UpstreamError(`${kind} fetch failed for ${name}`, { cause: error });
+
+      try {
+        return await this.fetchMedia(uri, kind, name);
+      } catch (error) {
+        // A blocked URL or redirect hop is a problem with the record; a network
+        // error or timeout means the image may be there.
+        if (error instanceof BlockedMediaUrlError) {
+          console.warn(`Blocked ${kind} URL for ${name}:`, error);
+          return null;
+        }
+        // Without the name, so the dashboard groups the failures by host or
+        // kind (see lookup); the name is on the info line.
+        console.warn(`${kind} fetch failed:`, error);
+        console.log(`${kind} fetch failed for ${name}:`, error);
+        throw error instanceof UpstreamError ? error : new UpstreamError(`${kind} fetch failed`, { cause: error });
+      }
+    });
+  }
+
+  /**
+   * Run a media lookup unless the same lookup failed within the last
+   * MEDIA_FAILURE_TTL_SECS, in which case it fails again at once with the
+   * remembered failure and nothing upstream is asked. Only a failed lookup
+   * (UpstreamError) is remembered, never a miss or a value, and not a failure
+   * caused by this request's own deadline (RequestDeadlineError), which says
+   * nothing about the name's hosts. The cache is best effort: without one, or
+   * when it cannot be read or written, the lookup simply runs.
+   */
+  private async withFailureCache<T>(
+    kind: string,
+    normalized: string,
+    name: string,
+    lookup: () => Promise<T | null>,
+  ): Promise<T | null> {
+    const cache = this.failureCache;
+    if (!cache) return lookup();
+    const key = `media-failure:${this.chainId}:${kind}:${normalized}`;
+    let recent: string | null = null;
+    try {
+      recent = await cache.get(key);
+    } catch (error) {
+      console.log(`${kind} failure cache read failed for ${name}:`, error);
+    }
+    if (recent) {
+      console.log(`${kind} lookup for ${name} skipped: it failed within the last ${MEDIA_FAILURE_TTL_SECS}s (${recent})`);
+      throw new UpstreamError(`${kind} lookup failed recently: ${recent}`);
+    }
+    try {
+      return await lookup();
+    } catch (error) {
+      if (error instanceof UpstreamError && !(error instanceof RequestDeadlineError)) {
+        try {
+          await cache.put(key, error.message, { expirationTtl: MEDIA_FAILURE_TTL_SECS });
+        } catch (writeError) {
+          console.log(`${kind} failure cache write failed for ${name}:`, writeError);
+        }
+      }
+      throw error;
     }
   }
 
@@ -702,20 +763,32 @@ export class AvatarService {
     const scope: OutageScope = {};
     let result: T | null;
     try {
-      result = await runInOutageScope(scope, () => this.withMediaTimeout(work(), `${what} timed out for ${name}`));
+      result = await runInOutageScope(scope, () => this.withMediaTimeout(work(), `${what} timed out`));
     } catch (error) {
       if (isDefinitiveMiss(error, scope.outage !== undefined)) {
         console.warn(`${what} found no usable record for ${name}:`, error);
         return null;
       }
-      console.warn(`${what} failed for ${name}:`, error);
-      throw error instanceof UpstreamError ? error : new UpstreamError(`${what} failed for ${name}`, { cause: error });
+      this.reportFailure(what, name, error);
+      throw error instanceof UpstreamError ? error : new UpstreamError(`${what} failed`, { cause: error });
     }
     if (!result && scope.outage !== undefined) {
-      console.warn(`${what} failed for ${name}:`, scope.outage);
-      throw new UpstreamError(`${what} failed for ${name}`, { cause: scope.outage });
+      this.reportFailure(what, name, scope.outage);
+      throw new UpstreamError(`${what} failed`, { cause: scope.outage });
     }
     return result;
+  }
+
+  /**
+   * Log a failed lookup. The warning carries the failure but not the name:
+   * Cloudflare's Issues tab fingerprints a log line by its text, so a line per
+   * name made one issue per name (thousands for one throttling gateway) instead
+   * of one per host or per kind of failure. The name is on an info line next to
+   * it, and in the request's own logs.
+   */
+  private reportFailure(what: string, name: string, error: unknown): void {
+    console.warn(`${what} failed:`, error);
+    console.log(`${what} failed for ${name}:`, error);
   }
 
   /**
@@ -818,11 +891,11 @@ export class AvatarService {
       });
 
       if (!response.ok) {
-        console.warn(`Failed to fetch ${kind} for ${name}: ${response.status}`);
+        console.log(`Failed to fetch ${kind} for ${name}: ${response.status}`);
         // A failing or throttling host (5xx, 429) may serve the image later;
         // any other status (404, 410, 403, ...) is the record's problem.
         if (isOutageStatus(response.status)) {
-          throw new UpstreamError(`${kind} host answered ${response.status} for ${name}`);
+          throw new UpstreamError(`${kind} host ${mediaHostOf(uri)} answered ${response.status}`);
         }
         return null;
       }

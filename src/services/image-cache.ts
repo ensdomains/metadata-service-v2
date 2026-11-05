@@ -266,9 +266,10 @@ export class ImageCacheService {
         // avatar is null → name genuinely has no avatar (avatarFailed stays false)
       } catch (err) {
         // UpstreamError (RPC, CCIP gateway or media host failure, timeout) →
-        // avatar might exist but we couldn't get it
+        // avatar might exist but we couldn't get it. AvatarService has already
+        // warned about the failure; this line only says what the card did.
         avatarFailed = true;
-        console.warn(`[image-cache] avatar RPC failed for ${name}:`, err);
+        console.log(`[image-cache] card for ${name} drawn without its avatar:`, err);
       }
     }
 

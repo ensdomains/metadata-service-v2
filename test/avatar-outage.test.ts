@@ -18,7 +18,7 @@ import {
 import { mainnet } from 'viem/chains';
 import { UnsupportedNamespace, utils as avatarUtils } from '@ensdomains/ens-avatar';
 import { AvatarService } from '../src/services/avatar';
-import { BlockedMediaUrlError } from '../src/services/media-fetch';
+import { BlockedMediaUrlError, resetMediaHostPauses } from '../src/services/media-fetch';
 import { UpstreamError } from '../src/services/errors';
 
 // Outage handling for avatar/header lookups. AvatarService used to turn every
@@ -34,6 +34,8 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  // A 429 in one case must not pause that host for the next (media-fetch.ts).
+  resetMediaHostPauses();
 });
 
 function quiet() {
@@ -292,9 +294,11 @@ describe('failures inside the ens-avatar library', () => {
       ['429', status(429)],
     ] as const) {
       withImageHost(route);
+      resetMediaHostPauses(); // the 429 case must not pause the host for the next
       results[label] = await outcome(serviceWithRecord(record, meta).getAvatarImage('x.eth'));
     }
     withImageHost(() => new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } }));
+    resetMediaHostPauses();
     results.png = await outcome(serviceWithRecord(record, meta).getAvatarImage('x.eth'));
 
     expect(results).toEqual({ 'text/html': 'miss', 404: 'miss', 503: 'failure', 429: 'failure', png: 'value' });
@@ -454,6 +458,7 @@ describe('RPC and gateway failures that the library swallows', () => {
     // with the failed query's error, as the Universal Resolver does.
     const gatewayFetches: string[] = [];
     const run = async (gateways: string[], gateway: (url: string) => Response) => {
+      resetMediaHostPauses(); // a 429 case must not pause the gateway for the next
       vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
         if (url !== RPC) {
@@ -558,6 +563,7 @@ describe('RPC and gateway failures that the library swallows', () => {
     const gatewayFetches: string[] = [];
     const results: Record<string, string> = {};
     for (const [label, gateways, gateway] of gatewayCases) {
+      resetMediaHostPauses(); // a 429 case must not pause the gateway for the next
       stubRpc(() => ({ record }), () => ({ revert: offchainLookup(gateways) }), (url) => {
         gatewayFetches.push(url);
         return gateway(url);
