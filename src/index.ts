@@ -258,6 +258,8 @@ function getImageServices(env: Env, network: NetworkName): ImageServices {
     maxAvatarBytes,
     universalResolverV2,
     parseIpfsGateway(env.IPFS_GATEWAY),
+    // Failed lookups are remembered next to the cards they degrade.
+    env.SVG_CACHE,
   );
   const imageService = new ImageGenerationService(avatarService, (bucket, ctx) => getRasterizer(bucket, ctx));
   const storageManager = new StorageManager(env.ASSET_BUCKET);

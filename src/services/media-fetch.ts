@@ -82,6 +82,28 @@ export class BlockedMediaUrlError extends Error {
   }
 }
 
+// A host that answered 429 is throttling this service (the public IPFS
+// gateways cap requests per minute per client, and every Worker isolate shares
+// the egress), so every request sent to it in the next few seconds would fail
+// the same way and count against the same window. Each isolate keeps its own
+// list; the names behind the host are many, the hosts few.
+export const MEDIA_HOST_PAUSE_MS = 30_000;
+const pausedHosts = new Map<string, number>();
+
+/** Forget every paused host (tests). */
+export function resetMediaHostPauses(): void {
+  pausedHosts.clear();
+}
+
+/** The hostname of `url` for a message about the host, or the URL itself when it does not parse. */
+export function mediaHostOf(url: string): string {
+  try {
+    return normalizeHostname(new URL(url).hostname);
+  } catch {
+    return url;
+  }
+}
+
 export function normalizeHostname(hostname: string): string {
   const host = hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
   // Strip trailing dots in one backward scan. The regex /\.+$/ retries from
@@ -132,9 +154,10 @@ export function assertFetchableMediaUrl(url: URL, denyList: readonly string[] = 
 /**
  * GET a media URL, validating the initial URL and every redirect target.
  * Returns the first non-redirect response. Throws BlockedMediaUrlError for a
- * blocked hop or an over-long redirect chain. `beforeEachFetch`, when given,
- * runs before every request that is actually sent (each redirect hop is one)
- * and may throw to stop the chain.
+ * blocked hop or an over-long redirect chain, and UpstreamError for a hop on a
+ * host that answered 429 within the last MEDIA_HOST_PAUSE_MS (the request is
+ * not sent). `beforeEachFetch`, when given, runs before every request that is
+ * actually sent (each redirect hop is one) and may throw to stop the chain.
  */
 export interface MediaRequestInit {
   method?: string;
@@ -159,8 +182,20 @@ export async function fetchMediaUrl(
   let request: MediaRequestInit = init;
   for (let hop = 0; ; hop++) {
     assertFetchableMediaUrl(current, denyList);
+    const host = normalizeHostname(current.hostname);
+    const pausedUntil = pausedHosts.get(host);
+    if (pausedUntil !== undefined) {
+      if (pausedUntil > Date.now()) {
+        throw new UpstreamError(`media host ${host} answered 429 within the last ${MEDIA_HOST_PAUSE_MS / 1000}s, not asked again`);
+      }
+      pausedHosts.delete(host);
+    }
     beforeEachFetch?.();
     const response = await fetch(current.toString(), { ...request, redirect: 'manual' });
+    if (response.status === 429) {
+      pausedHosts.set(host, Date.now() + MEDIA_HOST_PAUSE_MS);
+      console.log(`media host ${host} answered 429 for ${current.toString()}, pausing it for ${MEDIA_HOST_PAUSE_MS / 1000}s`);
+    }
 
     const location = response.status >= 300 && response.status < 400 ? response.headers.get('Location') : null;
     if (!location) return response;
@@ -258,10 +293,14 @@ function headersToRecord(headers: Headers): Record<string, string> {
 // (outage-scope.ts): the library catches the errors of its image check (HEAD,
 // ranged GET) and reads them as "not an image". A blocked URL, an oversized
 // body and a body that is not JSON are answers about the record, not outages.
-async function reportingOutages<T>(request: () => Promise<FetcherResponse<T>>): Promise<FetcherResponse<T>> {
+// The failure names the host, not the record, so the log line it ends up in
+// groups by host.
+async function reportingOutages<T>(url: string, request: () => Promise<FetcherResponse<T>>): Promise<FetcherResponse<T>> {
   try {
     const response = await request();
-    if (isOutageStatus(response.status)) reportOutage(new UpstreamError(`media host answered ${response.status}`));
+    if (isOutageStatus(response.status)) {
+      reportOutage(new UpstreamError(`media host ${mediaHostOf(url)} answered ${response.status}`));
+    }
     return response;
   } catch (error) {
     if (!(error instanceof BlockedMediaUrlError) && !(error instanceof SyntaxError)) reportOutage(error);
@@ -286,11 +325,11 @@ export function createGuardedFetcher(
 ): Fetcher {
   return {
     async get<T = unknown>(url: string, opts?: { headers?: Record<string, string> }): Promise<FetcherResponse<T>> {
-      return reportingOutages(async () => {
+      return reportingOutages(url, async () => {
         const response = await fetchMediaUrl(url, { method: 'GET', headers: opts?.headers, signal: AbortSignal.timeout(timeoutMs) }, denyList);
         if (isOutageStatus(response.status)) {
           await response.body?.cancel().catch(() => {});
-          throw new UpstreamError(`metadata host answered ${response.status}`);
+          throw new UpstreamError(`metadata host ${mediaHostOf(url)} answered ${response.status}`);
         }
         const body = await readBodyCapped(response, maxBodyBytes);
         if (!body) throw new BlockedMediaUrlError(`metadata response over ${maxBodyBytes} bytes`);
@@ -299,7 +338,7 @@ export function createGuardedFetcher(
       });
     },
     async head(url: string): Promise<FetcherResponse<void>> {
-      return reportingOutages(async () => {
+      return reportingOutages(url, async () => {
         const response = await fetchMediaUrl(url, { method: 'HEAD', signal: AbortSignal.timeout(timeoutMs) }, denyList);
         await response.body?.cancel().catch(() => {});
         return { status: response.status, headers: headersToRecord(response.headers), data: undefined };
@@ -309,7 +348,7 @@ export function createGuardedFetcher(
       url: string,
       opts?: { headers?: Record<string, string>; signal?: AbortSignal },
     ): Promise<FetcherResponse<ArrayBuffer>> {
-      return reportingOutages(async () => {
+      return reportingOutages(url, async () => {
         const response = await fetchMediaUrl(
           url,
           { method: 'GET', headers: opts?.headers, signal: opts?.signal ?? AbortSignal.timeout(timeoutMs) },
