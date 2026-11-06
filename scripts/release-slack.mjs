@@ -35,6 +35,7 @@ const [notesDir = '.'] = process.argv.slice(2);
 const {
   TAG: tag,
   STEPS: stepsJson = '{}',
+  NEEDS: needsJson = '{}',
   SLACK_WEBHOOK_URL: webhookUrl,
   DRY_RUN: dryRun,
   GITHUB_SERVER_URL: server = 'https://github.com',
@@ -47,7 +48,8 @@ const {
 
 const notesPath = resolve(notesDir, 'release-notes.json');
 const notes = existsSync(notesPath) ? JSON.parse(readFileSync(notesPath, 'utf8')) : null;
-const steps = JSON.parse(stepsJson);
+const steps = JSON.parse(stepsJson || '{}');
+const needs = JSON.parse(needsJson);
 
 const repoUrl = `${server}/${repo}`;
 const runUrl = `${repoUrl}/actions/runs/${runId}${attempt === '1' ? '' : `/attempts/${attempt}`}`;
@@ -62,7 +64,8 @@ const changeLine = c =>
     c.pr ? `<${repoUrl}/pull/${c.pr}|#${c.pr}>` : `<${repoUrl}/commit/${c.sha}|${c.sha}>`
   }`;
 
-const results = Object.entries(steps).map(([id, { outcome }]) => ({ step: STEPS[id] ?? id, outcome }));
+const deploymentSteps = Object.keys(steps).length ? steps : { deploy: { outcome: needs.deploy?.result ?? 'skipped' } };
+const results = Object.entries(deploymentSteps).map(([id, { outcome }]) => ({ step: STEPS[id] ?? id, outcome }));
 const failed = results.filter(r => r.outcome === 'failure');
 const succeeded = results.filter(r => r.outcome === 'success');
 const isReleased = results.length > 0 && succeeded.length === results.length;
@@ -97,7 +100,16 @@ const outcome = isReleased
       } <${runUrl}|Open the run>.`
     : `Did not finish. <${runUrl}|Open the run>.`;
 
+const linear = needs.linear;
+const linearUrl = linear?.outputs?.['release-url'];
+const linearNotice = linear?.result === 'failure'
+  ? `:warning: Linear sync failed; production deployment is unaffected. <${runUrl}|Retry the Linear sync>.`
+  : linear?.outputs?.status === 'pending-key'
+    ? ':warning: Linear sync is pending its pipeline access key.'
+    : null;
+
 const footer = [
+  linearUrl && `<${linearUrl}|Linear release>`,
   actor && `Tagged by <${server}/${actor}|${actor}>`,
   sha && `<${repoUrl}/commit/${sha}|${sha.slice(0, 9)}>`,
   notes?.compareUrl && `<${notes.compareUrl}|Full diff>`,
@@ -110,7 +122,7 @@ const title = isReleased ? ':rocket: Metadata service released to prod' : ':x: M
 const section = text => ({ type: 'section', text: { type: 'mrkdwn', text } });
 const blocks = [
   { type: 'header', text: { type: 'plain_text', text: title, emoji: true } },
-  section([summary, outcome].filter(Boolean).join('\n')),
+  section([summary, outcome, linearNotice].filter(Boolean).join('\n')),
   ...sections.map(section),
   { type: 'context', elements: [{ type: 'mrkdwn', text: footer }] },
 ];

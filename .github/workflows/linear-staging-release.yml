@@ -1,0 +1,38 @@
+name: Linear Staging Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linear-staging-metadata
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      LINEAR_ACCESS_KEY: ${{ secrets.LINEAR_RELEASE_METADATA_STAGING }}
+    steps:
+      - name: Check staging pipeline key
+        id: key
+        run: |
+          if [ -z "$LINEAR_ACCESS_KEY" ]; then
+            echo '::warning::Staging Linear pipeline key is pending.'
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.configured == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384 # v0.17.2
+        if: steps.key.outputs.configured == 'true'
+        with:
+          access_key: ${{ secrets.LINEAR_RELEASE_METADATA_STAGING }}

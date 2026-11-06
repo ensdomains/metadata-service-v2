@@ -46,6 +46,8 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Test release tracking scripts
+        run: node --test scripts/*.test.mjs
       # @vitest/coverage-v8 must stay on vitest's exact version (it is a peer
       # dependency), or `--coverage` crashes.
       - name: Run tests with coverage
