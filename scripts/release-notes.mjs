@@ -11,11 +11,12 @@
  * Default out dir: the current directory.
  *
  * Release tags are YYYY-MM-DD, then YYYY-MM-DD.2, .3, ... the same day; the
- * previous release is the highest such tag below <tag>.
+ * previous release is the highest such tag below <tag> with a published GitHub release.
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { getPreviousRelease } from './previous-release.mjs';
 
 const MESSAGE_MAX_BYTES = 1000;
 const RELEASE_TAG = /^(\d{4}-\d{2}-\d{2})(?:\.([2-9]|[1-9]\d+))?$/;
@@ -28,17 +29,8 @@ if (!tag || !RELEASE_TAG.test(tag)) {
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 
-// Sort key: the date, then the day's counter (a bare date is release 1).
-const releaseKey = t => {
-  const [, day, count] = t.match(RELEASE_TAG);
-  return `${day}.${String(count ?? 1).padStart(6, '0')}`;
-};
-
-const previous = git('tag', '--list')
-  .split('\n')
-  .filter(t => RELEASE_TAG.test(t) && releaseKey(t) < releaseKey(tag))
-  .sort((a, b) => releaseKey(a).localeCompare(releaseKey(b)))
-  .pop();
+const releasedTags = execFileSync('gh', ['api', '--paginate', 'repos/{owner}/{repo}/releases', '--jq', '.[] | select(.draft | not) | .tag_name'], { encoding: 'utf8' }).split('\n');
+const previous = getPreviousRelease({ tag, tags: git('tag', '--list').split('\n'), releasedTags });
 
 // First-parent history of main: one entry per merged PR. GitHub's merge
 // commits read "Merge pull request #N from <branch>", with the PR title as

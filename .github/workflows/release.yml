@@ -28,6 +28,8 @@ jobs:
     # To create the GitHub release for the tag.
     permissions:
       contents: write
+    outputs:
+      deployment-steps: ${{ toJSON(steps) }}
     env:
       WRANGLER_SEND_METRICS: "false"
       TAG: ${{ github.ref_name }}
@@ -67,9 +69,19 @@ jobs:
       # for the Worker version message.
       - name: Write the release notes
         id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/release-notes.mjs "$TAG" "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: |
+            ${{ runner.temp }}/release-notes.md
+            ${{ runner.temp }}/release-notes.json
 
       # Migrations are additive, so the version still serving traffic keeps
       # working against the new schema until the deploy below lands.
@@ -100,13 +112,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # Posts the outcome to Slack, failures included; a rerun posts again.
-      # A failed post must not mark a finished release as failed.
+  linear:
+    name: Sync production release to Linear
+    needs: deploy
+    uses: ./.github/workflows/linear-production-release.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      LINEAR_ACCESS_KEY: ${{ secrets.LINEAR_RELEASE_METADATA_PRODUCTION }}
+
+  notify:
+    name: Post release outcome to Slack
+    needs: [deploy, linear]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
       - name: Post to Slack
-        if: always()
         continue-on-error: true
         timeout-minutes: 1
         env:
-          STEPS: ${{ toJSON(steps) }}
+          NEEDS: ${{ toJSON(needs) }}
+          STEPS: ${{ needs.deploy.outputs.deployment-steps }}
           SLACK_WEBHOOK_URL: ${{ secrets.RELEASES_SLACK_WEBHOOK }}
-        run: node scripts/release-slack.mjs "$RUNNER_TEMP"
+        run: node scripts/release-slack.mjs "$RUNNER_TEMP/notes"
